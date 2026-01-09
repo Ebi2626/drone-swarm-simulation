@@ -12,5 +12,6 @@ dependencies:
   - jupyter                    # Do notatników
   - pytest                     # Do testów
   - pip                        # Menedżer pakietów Pythona
+  - conda-forge::libstdcxx-ng
   - pip:
       - git+https://github.com/utiasDSL/gym-pybullet-drones.git

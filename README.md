@@ -47,3 +47,10 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 1. Enter environment with `conda activate drone-swarm-env`
 2. Call experiment eg. from gym-pybullet-drones `python3 ~miniconda3/envs/drone-swarm-env/lib/python3.10/site-packages/gym_pybullet_drones/examples/learn.py`
 3. Check results in the `/results`
+
+## My setup
+- Procesor: AMD Ryzen 7 7700
+- Ram: DDR5 64GB/6000 (2x32GB) CL30
+- Graphic: Nvidia GIGABYTE RTX 4060 TI
+- Disk: SSD UD85 2TB PCIe M.2 2280 NVMe Gen 4x4 3600/2800
+- OS: Fedora 43

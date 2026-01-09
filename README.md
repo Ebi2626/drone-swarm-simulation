@@ -27,11 +27,23 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 
 ## Technologies
 - python 3.10 - main language of the project - version determined by main library of the project (gym-pybullet-drones)
-- numpy
-- matplotlib
-- pandas
-- scipy
-- hydra-core
-- jupyter
-- pytest
-- pip
+- numpy - for fast calculations
+- matplotlib - for plots
+- pandas - for data analytics
+- scipy - for scientific calculations
+- hydra-core - for configuration management
+- jupyter - for notebooks
+- pytest - for testing
+- pip - package manager
+    - gym-pybullet-drones - framework for simulation
+
+## Installation
+1. Download this repository
+2. Ensure you have Conda on your OS
+3. Enter to the project eg. `cd ~/drone-swarm-simulation`
+4. Dowload dependencies with conda: `conda env create -f environment.yml`
+
+## Run simulation
+1. Enter environment with `conda activate drone-swarm-env`
+2. Call experiment eg. from gym-pybullet-drones `python3 ~miniconda3/envs/drone-swarm-env/lib/python3.10/site-packages/gym_pybullet_drones/examples/learn.py`
+3. Check results in the `/results`

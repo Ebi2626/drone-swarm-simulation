@@ -1,0 +1,21 @@
+name: "forest"
+class_name: "ForestWorld"
+
+params:
+  drone_model: "CF2X"
+  num_drones: 1
+  physics: "PYB"
+  pyb_freq: 240
+  ctrl_freq: 48
+  gui: true
+  
+  # Parametry specyficzne dla ForestWorld
+  track_length: 600.0 # Krótszy dystans dla testów gęstości
+  num_trees: 600      # Bardzo duże zagęszczenie (1 drzewo na metr bieżący lasu!)
+  tree_height: 10.0
+  ceiling_height: 11.0 # Tylko 1m zapasu nad drzewami = trzeba lecieć między nimi
+
+initial_xyzs:
+  - [0.0, 0.0, -2.5]
+
+target_position: [600.0, 0.0, 5.0]

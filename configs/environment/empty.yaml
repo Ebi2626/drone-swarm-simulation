@@ -1,0 +1,25 @@
+# configs/environment/empty.yaml
+
+name: "empty"
+class_name: "EmptyWorld"
+
+# Parametry przekazywane do __init__ klasy EmptyWorld
+params:
+  drone_model: "CF2X" # Crazyflie 2.x
+  num_drones: 1
+  physics: "PYB" # Standardowa fizyka PyBullet
+  neighbourhood_radius: .inf
+  
+  # Częstotliwość symulacji
+  pyb_freq: 240 # Hz (Fizyka)
+  ctrl_freq: 48 # Hz (Sterowanie - PID lub Algorytm Ewolucyjny co 20ms)
+  
+  gui: true # Na Fedorze z GPU warto włączyć, aby widzieć symulację
+  record: false
+
+# Pozycje początkowe (start na początku "pasa startowego")
+initial_xyzs: 
+  - [0.0, 0.0, 0.1] # Start z ziemi (z = 0.1m)
+
+# Cel lotu (Target) - definiujemy to w configu, aby algorytm wiedział gdzie lecieć
+target_position: [1200.0, 0.0, 50.0] # 1.2 km w osi X, 50m wysokości

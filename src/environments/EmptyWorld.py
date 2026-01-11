@@ -40,10 +40,8 @@ class EmptyWorld(SwarmBaseWorld):
         
     def _addObstacles(self):
         print("[DEBUG] Setting up empty world...")
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)  
+        self._init_render_silently()
 
         self._setup_environment(length=500.0, width=500.0, ceiling_height=0.0, ground_color=[0.5, 0.5, 0.55, 1.0])
 
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
         print("[DEBUG] Empty world setup complete.")

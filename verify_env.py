@@ -33,7 +33,7 @@ def main(cfg: DictConfig):
     )
 
     print("\nSimulation running... Press CTRL+C in terminal to stop.")
-    
+
     try:
         while True: 
             if not p.isConnected():
@@ -42,7 +42,8 @@ def main(cfg: DictConfig):
 
             action = np.zeros((1, 4)) 
             obs, reward, terminated, truncated, info = env.step(action)
-            
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+
             pos, _ = p.getBasePositionAndOrientation(env.DRONE_IDS[0])
             if pos[2] < -1.0:
                 p.resetBasePositionAndOrientation(env.DRONE_IDS[0], [0,0,0.5], [0,0,0,1])

@@ -39,8 +39,9 @@ class ForestWorld(SwarmBaseWorld):
 
     def _addObstacles(self):
         print(f"[DEBUG] Forrest generating: {self.num_trees} trees...")
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
+
+        self._init_render_silently()
+
         self._setup_environment(
             self.track_length,
             100.0,
@@ -48,7 +49,6 @@ class ForestWorld(SwarmBaseWorld):
             ground_color=[0.3, 0.5, 0.3, 1.0],
         )
         self._createForest()
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
         print("[DEBUG] Forest generated succesfully.")
 
     def _createTree(self, x, y):

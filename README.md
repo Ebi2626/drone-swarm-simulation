@@ -8,7 +8,8 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 - `/experiments` - launch scripts for experiments
 - `/notebooks` - notes about the project
 - `/src` - main logic
-- `/tests` - unit tests
+    - `/environments` - worlds for simulations
+- `/tests` - tests
 
 ## Main concepts
 - experiments should be reproducible

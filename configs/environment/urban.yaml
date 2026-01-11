@@ -1,0 +1,23 @@
+name: "urban"
+class_name: "UrbanWorld"
+
+params:
+  drone_model: "CF2X"
+  num_drones: 1
+  physics: "PYB"
+  pyb_freq: 240
+  ctrl_freq: 48
+  gui: true
+  
+  city_length: 1000.0
+  city_width: 300.0
+  block_size: 30.0
+  street_width: 10.0
+  min_height: 15.0
+  max_height: 60.0
+  skyscraper_prob: 0.15
+
+initial_xyzs:
+  - [0.0, 0.0, 0.5]
+
+target_position: [1000.0, 0.0, 50.0]

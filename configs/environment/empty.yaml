@@ -1,0 +1,17 @@
+name: "empty"
+class_name: "EmptyWorld"
+
+params:
+  drone_model: "CF2X"
+  num_drones: 1
+  physics: "PYB"
+  neighbourhood_radius: .inf
+  pyb_freq: 240
+  ctrl_freq: 48
+  gui: true
+  record: false
+
+initial_xyzs: 
+  - [0.0, 0.0, 0.1]
+
+target_position: [1200.0, 0.0, 50.0]

@@ -1,0 +1,20 @@
+name: "forest"
+class_name: "ForestWorld"
+
+params:
+  drone_model: "CF2X"
+  num_drones: 1
+  physics: "PYB"
+  pyb_freq: 240
+  ctrl_freq: 48
+  gui: true
+  
+  track_length: 600.0
+  num_trees: 600
+  tree_height: 10.0
+  ceiling_height: 11.0
+
+initial_xyzs:
+  - [0.0, 0.0, -2.5]
+
+target_position: [600.0, 0.0, 5.0]

@@ -1,0 +1,16 @@
+defaults:
+  - _self_
+  - environment: empty
+
+seed: 42
+experiment_name: "test_run"
+debug: true
+
+hydra:
+  run:
+    dir: results/${now:%Y-%m-%d}/${now:%H-%M-%S}_${environment.name}
+  
+  job_logging:
+    version: 1
+    root:
+      level: INFO

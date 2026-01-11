@@ -9,11 +9,10 @@ params:
   ctrl_freq: 48
   gui: true
   
-  # Parametry specyficzne dla ForestWorld
-  track_length: 600.0 # Krótszy dystans dla testów gęstości
-  num_trees: 600      # Bardzo duże zagęszczenie (1 drzewo na metr bieżący lasu!)
+  track_length: 600.0
+  num_trees: 600
   tree_height: 10.0
-  ceiling_height: 11.0 # Tylko 1m zapasu nad drzewami = trzeba lecieć między nimi
+  ceiling_height: 11.0
 
 initial_xyzs:
   - [0.0, 0.0, -2.5]

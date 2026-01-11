@@ -1,7 +1,8 @@
 import numpy as np
+import pybullet as p
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
-from src.simulation.worlds.SwarmBaseWorld import SwarmBaseWorld
-
+from src.environments.SwarmBaseWorld import SwarmBaseWorld
+from src.utils.config_parser import sanitize_init_params
 
 class EmptyWorld(SwarmBaseWorld):
     def __init__(self,
@@ -15,31 +16,13 @@ class EmptyWorld(SwarmBaseWorld):
                  ctrl_freq: int = 48,
                  gui: bool = True,
                  record: bool = False,
-                 obstacles: bool = False,
+                 obstacles: bool = True,
                  user_debug_gui: bool = True
                  ):
         
-        # --- FIX: Konwersja String -> Enum ---
-        # Jeśli Hydra przysłała string (np. "CF2X"), zamień go na DroneModel.CF2X
-        if isinstance(drone_model, str):
-            # Używamy getattr, aby dynamicznie pobrać wartość z klasy Enum
-            # np. DroneModel['CF2X'] lub getattr(DroneModel, 'CF2X')
-            try:
-                drone_model = DroneModel[drone_model]
-            except KeyError:
-                # Fallback, jeśli nazwa jest niepoprawna (opcjonalnie)
-                print(f"Warning: Unknown drone model '{drone_model}', defaulting to CF2X")
-                drone_model = DroneModel.CF2X
-
-        if isinstance(physics, str):
-            try:
-                physics = Physics[physics] 
-            except KeyError:
-                print(f"Warning: Unknown physics engine '{physics}', defaulting to PYB")
-                physics = Physics.PYB
-        # -------------------------------------
-
-        self.flight_duration_sec = 120
+        drone_model, physics, initial_xyzs, initial_rpys = sanitize_init_params(
+            drone_model, physics, initial_xyzs, initial_rpys
+        )
         
         super().__init__(drone_model=drone_model,
                          num_drones=num_drones,
@@ -54,3 +37,13 @@ class EmptyWorld(SwarmBaseWorld):
                          obstacles=obstacles,
                          user_debug_gui=user_debug_gui
                          )
+        
+    def _addObstacles(self):
+        print("[DEBUG] Setting up empty world...")
+        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)  
+
+        self._setup_environment(length=500.0, width=500.0, ceiling_height=0.0, ground_color=[0.5, 0.5, 0.55, 1.0])
+
+        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+        print("[DEBUG] Empty world setup complete.")

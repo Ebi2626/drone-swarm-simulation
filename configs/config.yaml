@@ -1,25 +1,15 @@
-# configs/config.yaml
-
-# --- Lista domyślnych konfiguracji (Defaults List) ---
-# To najważniejsza sekcja. Mówi Hydrze, z jakich plików w podkatalogach
-# ma skleić ostateczną konfigurację.
 defaults:
-  - _self_                         # Pozwala nadpisywać wartości w tym pliku
-  - environment: empty        # Domyślnie ładuje configs/environment/empty.yaml
+  - _self_
+  - environment: empty
 
-# --- Globalne ustawienia eksperymentu ---
-seed: 42                           # Ziarno losowości (dla numpy/torch) - kluczowe dla nauki
-experiment_name: "test_run"        # Opcjonalna nazwa eksperymentu
-debug: true                       # Flaga do włączania trybów debugowania
+seed: 42
+experiment_name: "test_run"
+debug: true
 
-# --- Konfiguracja samej Hydry (zapisywanie wyników) ---
 hydra:
   run:
-    # Definiuje, gdzie lądują wyniki każdego uruchomienia.
-    # Tworzy strukturę: results/ROK-MIESIĄC-DZIEŃ/GODZINA-MINUTA_NAZWA-ŚRODOWISKA
     dir: results/${now:%Y-%m-%d}/${now:%H-%M-%S}_${environment.name}
   
-  # Konfiguracja logowania (opcjonalna, wycisza spam Hydry w konsoli)
   job_logging:
     version: 1
     root:

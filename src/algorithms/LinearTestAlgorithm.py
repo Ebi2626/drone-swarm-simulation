@@ -7,18 +7,14 @@ class LinearTestAlgorithm(BaseAlgorithm):
     def __init__(self, num_drones, params=None):
         super().__init__(num_drones, params)
         self.controllers = [DSLPIDControl(drone_model=DroneModel.CF2X) for _ in range(num_drones)]
-        
-        # Ostateczny cel (np. 500m dalej)
-        self.final_target_pos = np.array(self.params.get("target_pos", [10.0, 0.0, 1.0]))
-        
-        # Prędkość przelotowa (m/s) - kluczowy parametr dla stabilności
+        self.final_target_pos = np.array(self.params.get("target_pos", [10.0, 0.0, 1.0]))        
         self.cruise_speed = self.params.get("speed", 5.0) 
 
     def compute_actions(self, current_states, current_time):
         actions = []
         for i in range(self.num_drones):
             state = current_states[i]
-            pos = state[0:3] # Aktualna pozycja drona [x, y, z]
+            pos = state[0:3]
             
             # --- LOGIKA "MARCHEWKI NA KIJU" (Trajectory Generation) ---
             

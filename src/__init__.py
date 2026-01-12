@@ -10,7 +10,7 @@ ENVIRONMENT_REGISTRY = {
 }
 
 ALGORITHM_REGISTRY = {
-    "LinearTestAlgorithm": LinearTestAlgorithm,
+    "LinearTestAlgorithm": LinearTestAlgorithm, ## Simple algorithm for testing
     # "OOA": OOAPlanner,
     # "MSFFOA": MSFFOAPlanner,
     # "SSA": SSAPlanner,

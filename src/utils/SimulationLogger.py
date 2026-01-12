@@ -9,7 +9,7 @@ class SimulationLogger:
         self.trajectory_buffer = []
         self.collision_buffer = []        
         self.crashed_drones = set()
-        print(f"[LOGGER] Buffering in RAM. Writing to disk after completion.")
+        print("[LOGGER] Buffering in RAM. Writing to disk after completion.")
 
     def log_step(self, step_idx, current_time, all_states):
         if step_idx % self.log_step_interval == 0:
@@ -48,7 +48,7 @@ class SimulationLogger:
             print(f"[LOGGER] Collision! Drone {drone_id} hit object {other_body_id} (t={current_time:.2f}s)")
 
     def save(self):
-        print(f"[LOGGER] Saving data to disk...")
+        print("[LOGGER] Saving data to disk...")
         
         if self.trajectory_buffer:
             path = os.path.join(self.output_dir, "trajectories.csv")
@@ -58,7 +58,7 @@ class SimulationLogger:
                 writer = csv.writer(f)
                 writer.writerow(headers)
                 writer.writerows(self.trajectory_buffer)
-            print(f"[LOGGER] Trajectories saved: trajectories.csv")
+            print("[LOGGER] Trajectories saved: trajectories.csv")
             self.trajectory_buffer.clear()
         
         if self.collision_buffer:
@@ -73,4 +73,4 @@ class SimulationLogger:
             print(f"[LOGGER] Collisions saved: collisions.csv ({len(self.collision_buffer)} events)")
             self.collision_buffer.clear()
         else:
-            print(f"[LOGGER] No collisions - file collisions.csv not created.")
+            print("[LOGGER] No collisions - file collisions.csv not created.")

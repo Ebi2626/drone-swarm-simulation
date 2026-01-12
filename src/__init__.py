@@ -1,6 +1,7 @@
 from .environments.EmptyWorld import EmptyWorld
 from .environments.ForestWorld import ForestWorld
 from .environments.UrbanWorld import UrbanWorld
+from .algorithms.LinearTestAlgorithm import LinearTestAlgorithm
 
 ENVIRONMENT_REGISTRY = {
     "empty": EmptyWorld,
@@ -9,6 +10,7 @@ ENVIRONMENT_REGISTRY = {
 }
 
 ALGORITHM_REGISTRY = {
+    "LinearTestAlgorithm": LinearTestAlgorithm, ## Simple algorithm for testing
     # "OOA": OOAPlanner,
     # "MSFFOA": MSFFOAPlanner,
     # "SSA": SSAPlanner,

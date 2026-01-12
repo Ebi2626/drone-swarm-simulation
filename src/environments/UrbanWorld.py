@@ -44,13 +44,9 @@ class UrbanWorld(SwarmBaseWorld):
 
     def _addObstacles(self):
         print("[DEBUG] Generating urban environment...") 
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)  
-
+        self._init_render_silently()
         self._setup_environment(self.city_length, self.city_width, self.ceiling_height, ground_color=[0.4, 0.4, 0.45, 1.0])
         self._createCity()
-
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
         print("[DEBUG] Urban environment generated.")
 
     def _create_building(self, x, y, len_x, len_y, is_blocker=False):

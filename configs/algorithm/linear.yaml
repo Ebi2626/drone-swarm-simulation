@@ -1,0 +1,5 @@
+name: "linear"
+class_name: "LinearTestAlgorithm"
+params:
+  target_pos: [500.0, 0.0, 2.0]
+  speed: 50.0

@@ -1,10 +1,35 @@
 defaults:
   - _self_
   - environment: empty
+  - algorithm: linear
+
+num_drones: 5
+initial_xyzs:
+  - [0.0, 0.0, 0.2]
+  - [0.0, 1.0, 0.2]
+  - [0.0, 2.0, 0.2]
+  - [0.0, 3.0, 0.2]
+  - [0.0, 4.0, 0.2]
+
+simulation:
+  duration_sec: 12
+  gui: true
+  pyb_freq: 240
+  ctrl_freq: 48
 
 seed: 42
 experiment_name: "test_run"
 debug: true
+logging:
+  enabled: true
+  log_freq: 1.0
+
+visualization:
+  camera_follow: true
+  tracked_drone_id: 0
+  camera_distance: 3.0
+  camera_yaw: -90.0
+  camera_pitch: -30.0
 
 hydra:
   run:

@@ -8,6 +8,20 @@ class SwarmBaseWorld(BaseAviary):
         super().__init__(**kwargs)
     
     # Common environment setup methods
+    def reset(self, seed=None, options=None):
+        obs, info = super().reset(seed=seed, options=options)
+        self._finalize_render()
+        return obs, info
+    
+    def _init_render_silently(self):
+        if self.GUI:
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+
+    def _finalize_render(self):
+        if self.GUI:
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+
     def _clear_default_plane(self):
         print("[DEBUG] Deleting default plane...")
         for i in range(p.getNumBodies()):
@@ -46,6 +60,31 @@ class SwarmBaseWorld(BaseAviary):
             self._create_ceiling(length, width, ceiling_height)
 
         print("[DEBUG] Environment setup complete.")
+
+    def get_detailed_collisions(self):
+        """
+        Sprawdza kolizje dla każdego drona.
+        Zwraca listę krotek: (drone_id, other_body_id)
+        """
+        collisions = []
+        for drone_id in range(self.NUM_DRONES):
+            # Pobieramy ID ciała fizycznego drona w PyBullet
+            # W BaseAviary drony są trzymane w self.DRONE_IDS (lista)
+            drone_body_id = self.DRONE_IDS[drone_id]
+            
+            # Zapytanie do silnika fizycznego o punkty kontaktu
+            contact_points = p.getContactPoints(bodyA=drone_body_id)
+            
+            if contact_points:
+                for contact in contact_points:
+                    # contact[2] to bodyB (obiekt, w który uderzyliśmy)
+                    other_body_id = contact[2]
+                    # Unikamy logowania "kolizji" z samym sobą (rzadkie, ale możliwe w błędnych modelach)
+                    if other_body_id != drone_body_id:
+                        collisions.append((drone_id, other_body_id))
+                        
+        # Usuwamy duplikaty (np. wielokrotne punkty styku w jednej klatce)
+        return list(set(collisions))
 
     # Implementations needed for BaseAviary / Gymnasium
     def _actionSpace(self):

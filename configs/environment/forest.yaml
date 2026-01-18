@@ -10,9 +10,11 @@ params:
   gui: true
   
   track_length: 600.0
+  track_width: 60.0
+  track_height: 11.0
   num_trees: 600
   tree_height: 10.0
-  ceiling_height: 11.0
+  tree_radius: 1.0
 
 initial_xyzs:
   - [0.0, 0.0, -2.5]

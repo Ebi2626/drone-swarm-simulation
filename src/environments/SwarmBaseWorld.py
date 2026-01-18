@@ -52,12 +52,12 @@ class SwarmBaseWorld(BaseAviary):
         p.createMultiBody(0, col_id, vis_id, [length/2, 0, height])
         print(f"[DEBUG] Created ceiling at height {height}m")
 
-    def _setup_environment(self, length, width, ceiling_height, ground_color):
+    def _setup_environment(self, length, width, track_height, ground_color):
         print("[DEBUG] Setting up environment (ground and ceiling)...")
         self._clear_default_plane()
         self._create_ground(length, width, color=ground_color)
-        if ceiling_height > 0:
-            self._create_ceiling(length, width, ceiling_height)
+        if track_height > 0:
+            self._create_ceiling(length, width, track_height)
 
         print("[DEBUG] Environment setup complete.")
 

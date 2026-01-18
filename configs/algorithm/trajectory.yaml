@@ -1,0 +1,4 @@
+name: "trajectory"
+class_name: "TrajectoryFollowingAlgorithm"
+params:
+  trajectories: []

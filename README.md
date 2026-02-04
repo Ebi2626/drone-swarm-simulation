@@ -49,6 +49,13 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 2. Call experiment eg. from gym-pybullet-drones `python ~/miniconda3/envs/drone-swarm-env/lib/python3.10/site-packages/gym_pybullet_drones/examples/pid.py`
 3. Check results in the `/results`
 
+## Notebooks
+To verify building blocks of this simulation you can use prepared in that purpose notebooks.
+In the main catalog you have to activate conda envirionment and simple call `jupyter notebook` to lauch server which will be avialable under the address: `http://localhost:8888/`.
+Notebooks are located in `notebooks` folder. There are such files as:
+- `world_generation.ipynb` - it allow call mathematical abstracion to create random worlds with different parameters
+- `draw_trajectory.ipynb` - it's using world generation from previous notebook to create world and allow draw example trajectories with given algorithms in this abstract mathematical space
+
 ## My setup
 - Procesor: AMD Ryzen 7 7700
 - Ram: DDR5 64GB/6000 (2x32GB) CL30

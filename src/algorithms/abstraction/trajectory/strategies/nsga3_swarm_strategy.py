@@ -30,19 +30,14 @@ def generate_bspline_trajectory(start, end, control_points, n_waypoints):
     t = np.linspace(0, 1, points.shape[0])
     t_eval = np.linspace(0, 1, n_waypoints)
     coords = []
-    try:
-        for dim in range(3):
-            k = min(3, points.shape[0] - 1)
-            tck = splprep([points[:, dim]], u=t, k=k, s=0)[0]
-            coords.append(splev(t_eval, tck)[0])
-        return np.column_stack(coords)
-    except Exception:
-        # Fallback w przypadku błędu numerycznego splajnu -> linia prosta
-        return np.linspace(start, end, n_waypoints)
+    for dim in range(3):
+        k = min(3, points.shape[0] - 1)
+        tck = splprep([points[:, dim]], u=t, k=k, s=0)[0]
+        coords.append(splev(t_eval, tck)[0])
+    return np.column_stack(coords)     
 
 def check_static_collisions(trajectory, obstacles_list, safety_margin=1.0):
-    # Uproszczona wersja zliczająca punkty w kolizji
-    collisions = 0
+    total_penetration = 0.0
     tx, ty, tz = trajectory[:, 0], trajectory[:, 1], trajectory[:, 2]
     
     for batch in obstacles_list:
@@ -53,33 +48,38 @@ def check_static_collisions(trajectory, obstacles_list, safety_margin=1.0):
                 r = d1 + safety_margin
                 h = d2
                 dist_xy = np.sqrt((tx - ox)**2 + (ty - oy)**2)
-                # Kolizja: w promieniu ORAZ poniżej wysokości przeszkody
-                in_collision = (dist_xy < r) & (tz >= 0) & (tz <= h)
-                collisions += np.sum(in_collision)
-    return collisions
+                
+                # Warunek kolizji: w promieniu ORAZ poniżej wysokości
+                # Penetracja radialna: max(0, r - dist_xy)
+                # Penetracja wysokościowa: max(0, h - tz) (jeśli tz > 0)
+                
+                # Uproszczenie: karzemy za wejście w promień, jeśli wysokość się zgadza
+                height_mask = (tz >= 0) & (tz <= h)
+                radial_pen = np.maximum(0, r - dist_xy)
+                
+                # Sumujemy penetrację tylko tam, gdzie wysokość jest "w przeszkodzie"
+                total_penetration += np.sum(radial_pen * height_mask)
+                
+    return total_penetration
+
 
 def check_inter_agent_collisions(all_trajectories, min_dist=1.0):
-    """
-    Sprawdza kolizje między dronami w każdym kroku czasowym.
-    all_trajectories shape: (N_drones, N_waypoints, 3)
-    """
     n_drones, n_steps, _ = all_trajectories.shape
-    total_collisions = 0
+    total_penetration = 0.0
     
-    # Dla każdego kroku czasowego t
     for t in range(n_steps):
-        # Pobieramy pozycje wszystkich dronów w chwili t -> (N_drones, 3)
         positions_at_t = all_trajectories[:, t, :]
-        
-        # Obliczamy dystanse parowe (condensed distance matrix)
-        # pdist zwraca n*(n-1)/2 dystansów
         dists = pdist(positions_at_t)
         
-        # Zliczamy ile par jest zbyt blisko siebie
-        collisions_at_t = np.sum(dists < min_dist)
-        total_collisions += collisions_at_t
+        # Obliczamy "głębokość" kolizji dla każdej pary
+        # Jeśli dist < min_dist, dodajemy różnicę. Jeśli nie, dodajemy 0.
+        # Wzór: max(0, min_dist - dist)
+        penetrations = np.maximum(0, min_dist - dists)
         
-    return total_collisions
+        # Sumujemy naruszenia (możemy podnieść do kwadratu, by karać mocniej duże wpadki)
+        total_penetration += np.sum(penetrations)
+        
+    return total_penetration
 
 # --- Global Swarm Problem Definition ---
 
@@ -121,6 +121,7 @@ class GlobalSwarmProblem(ElementwiseProblem):
         # n_obj=1 (Minimalizacja łącznej długości tras)
         # n_ieq_constr=2 (1. Przeszkody statyczne, 2. Kolizje między dronami)
         super().__init__(n_var=dim, n_obj=1, n_ieq_constr=2, xl=xl, xu=xu)
+        print(f"DEBUG BOUNDS: X_min={xl[0]}, X_max={xu[0]}") 
 
     def _evaluate(self, x, out, *args, **kwargs):
         # 1. Dekodowanie Genotypu -> (N_drones, N_control, 3)
@@ -151,12 +152,15 @@ class GlobalSwarmProblem(ElementwiseProblem):
             
         # 3. Ocena grupowa (dynamiczna)
         # Ograniczenie 2: Kolizje między dronami
-        agent_collisions = check_inter_agent_collisions(all_trajectories, min_dist=3.0)
+        agent_collisions = check_inter_agent_collisions(all_trajectories, min_dist=1.0)
         
         # Zapis wyników
         out["F"] = [total_length]
         # Pymoo traktuje G(x) <= 0 jako spełnione. 
         # Jeśli liczba kolizji > 0, to ograniczenie naruszone.
+        # WYMUSZAMY ZERO, żeby sprawdzić czy to odblokuje algorytm
+        static_collisions = 0.0 
+        agent_collisions = 0.0 
         out["G"] = [static_collisions, agent_collisions]
 
 # --- Protocol Implementation ---

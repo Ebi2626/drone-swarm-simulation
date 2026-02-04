@@ -71,7 +71,10 @@ class SwarmOptimizationProblem(Problem):
         # Granice zmiennych (Bounding Box świata)
         xl_one_point = bounds[:, 0] - margin
         xu_one_point = bounds[:, 1] + margin
-        
+        print("Dolne granice [x, y, z]: ")
+        print(xl_one_point)
+        print("Górne granice [x, y, z]:")
+        print(xu_one_point)
         # Powielamy granice dla wszystkich punktów kontrolnych wszystkich dronów
         xl = np.tile(xl_one_point, n_drones * n_control)
         xu = np.tile(xu_one_point, n_drones * n_control)
@@ -197,10 +200,7 @@ def nsga3_swarm_strategy(
     else:
         obs_list = [obstacles_data]
 
-    try:
-        bounds = world_data.bounds
-    except AttributeError:
-        bounds = np.array([[-100, 100], [-100, 100], [0, 100]])
+    bounds = world_data.bounds
     
     # 2. Obliczanie parametrów algorytmu
     # Dynamicznie dobieramy n_partitions do wielkości populacji
@@ -251,8 +251,22 @@ def nsga3_swarm_strategy(
         algorithm,
         termination=('n_gen', n_gen),
         seed=1,
-        verbose=True
+        verbose=True,
+        save_history=True
     )
+
+    if res.history:
+        last_pop = res.history[-1].pop
+        print(f"Ostatnia populacja: {len(last_pop)} osobników")
+        
+        # Pobierz F (cele) i G (ograniczenia) dla całej populacji
+        F_all = last_pop.get("F")
+        G_all = last_pop.get("G")
+        CV_all = last_pop.get("CV") # Constraint Violation
+        
+        print("Przykładowe CV z ostatniej generacji:", CV_all[:5])
+        print("Przykładowe F z ostatniej generacji:", F_all[:5])
+        print("Przykładowe G z ostatniej generacji:", G_all[:5])
     
     # 5. Decyzja
     if res.X is not None and len(res.X) > 0:

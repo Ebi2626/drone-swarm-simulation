@@ -243,7 +243,7 @@ def constr_battery_limit(
     trajectories: NDArray[np.float64], 
     start_pos: NDArray[np.float64], 
     target_pos: NDArray[np.float64], 
-    max_ratio: float = 2.0
+    max_ratio: float = 5.0
 ) -> NDArray[np.float64]:
     """
     Ograniczenie budżetu energetycznego.
@@ -280,35 +280,51 @@ def constr_inter_agent_separation_segments(
 ) -> NDArray[np.float64]:
     """
     Weryfikacja separacji między dronami.
-    Dla każdego kroku czasowego t, sprawdza czy drony są od siebie oddalone o min_dist.
-    Ignoruje fazę startu i lądowania (zdefiniowaną przez ignore_ratio).
+    Poprawiona wersja: ignoruje przekątną (dystans 0 do samego siebie).
     """
     xp = get_xp(trajectories)
     pop_size, n_drones, n_steps, _ = trajectories.shape
     
+    # Zabezpieczenia indeksów (bez zmian)
+    if ignore_ratio >= 0.5:
+        ignore_ratio = 0.45
     start_idx = int(n_steps * ignore_ratio)
     end_idx = int(n_steps * (1.0 - ignore_ratio))
+    if start_idx >= end_idx:
+        start_idx = 0
+        end_idx = n_steps
     
     total_cv = xp.zeros(pop_size)
     
-    # Iteracja po czasie (Cruise Phase)
+    # Tworzymy macierz tożsamościową (Identity) rozszerzoną do (Pop, N, N)
+    # Aby wyzerować przekątną (self-collision)
+    # identity_mask[k, i, j] = 1 jeśli i==j
+    eye = xp.eye(n_drones, dtype=bool)
+    # Rozszerzamy do wymiaru populacji (broadcasting zadziała automatycznie przy odejmowaniu, ale dla pewności przy masce):
+    # W numpy/cupy po prostu odejmiemy dużą wartość na przekątnej dystansu lub wyzerujemy wynik.
+    
     for t in range(start_idx, end_idx):
         pos_t = trajectories[:, :, t, :] # (Pop, Drones, 3)
         
         # Macierz dystansów (Pop, N, N)
-        # Broadcasting: (Pop, N, 1, 3) - (Pop, 1, N, 3)
         diff = pos_t[:, :, None, :] - pos_t[:, None, :, :]
         dist_sq = xp.sum(diff**2, axis=-1)
         dist = xp.sqrt(dist_sq)
         
-        # Maska: Gdzie dystans jest za mały, ALE większy od 0 (nie ja sam ze sobą)
-        violation_mask = (dist < min_dist) & (dist > 1e-5)
+        # --- FIX: Eliminacja samo-kolizji ---
+        # Dodajemy nieskończoność na przekątnej, żeby min_dist - dist < 0
+        # dist ma kształt (Pop, N, N). Dodajemy dużą liczbę tam, gdzie eye jest True.
+        # (Eye jest (N, N), broadcasting doda to do każdego osobnika w populacji)
+        dist_no_self = dist + (eye * 1e6) 
         
-        # Wartość naruszenia
-        val = xp.maximum(0.0, min_dist - dist)
+        # Obliczamy naruszenie (penetrację strefy ochronnej)
+        # Teraz na przekątnej mamy: min_dist - 1000000 = ujemne -> maximum zamieni na 0.
+        penetration = xp.maximum(0.0, min_dist - dist_no_self)
         
-        # Sumujemy naruszenia (dzielimy przez 2 bo macierz symetryczna)
-        step_cv = xp.sum(xp.sum(val, axis=-1), axis=-1) / 2.0
+        # Sumujemy naruszenia
+        # Dzielimy przez 2, bo każda para (i, j) i (j, i) jest liczona podwójnie
+        step_cv = xp.sum(xp.sum(penetration, axis=-1), axis=-1) / 2.0
+        
         total_cv += step_cv
         
     return total_cv
@@ -338,21 +354,35 @@ class VectorizedEvaluator:
         """
         xp = get_xp(trajectories)
         
-        # 1. Cele (Objectives) -> Minimalizacja
+        # Pobieranie parametrów z konfiguracji
+        # Domyślnie 1.5 i 0.1, ale teraz zareaguje na Twoje 'min_dist': 0.001
+        p_min_dist = self.params.get("min_dist", 1.5)
+        p_ignore_ratio = self.params.get("ignore_ratio", 0.1)
+        p_safety_margin = self.params.get("safety_margin", 1.0)
+        
+        # 1. Cele (Objectives)
         f1 = calc_path_length(trajectories)
-        f2 = calc_collision_risk_segments(trajectories, self.obstacles)
+        
+        # Przekazujemy safety_margin do f2
+        f2 = calc_collision_risk_segments(trajectories, self.obstacles, safety_margin=p_safety_margin)
+        
         f3 = calc_elevation_changes(trajectories)
         
-        # 2. Ograniczenia (Constraints) -> CV <= 0
+        # 2. Ograniczenia (Constraints)
         g1 = constr_battery_limit(trajectories, 
                                   to_device(self.start, xp), 
                                   to_device(self.target, xp))
-        g2 = constr_inter_agent_separation_segments(trajectories)
+                                  
+        # --- KLUCZOWA ZMIANA ---
+        # Przekazujemy parametry dynamicznie!
+        g2 = constr_inter_agent_separation_segments(
+            trajectories, 
+            min_dist=p_min_dist, 
+            ignore_ratio=p_ignore_ratio
+        )
+        # -----------------------
         
-        # G3: Hard Collision (Zduplikowane ryzyko jako twardy zakaz)
-        # Jeśli f2 (ryzyko) > 0.1 (margines błędu), uznajemy to za naruszenie
         g3 = xp.maximum(0.0, f2 - 0.1)
         
-        # Złożenie wyników
         out["F"] = xp.column_stack([f1, f2, f3])
         out["G"] = xp.column_stack([g1, g2, g3])

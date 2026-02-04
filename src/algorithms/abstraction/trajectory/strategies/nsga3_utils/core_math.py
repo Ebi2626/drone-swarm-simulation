@@ -11,7 +11,7 @@ Kluczowe funkcjonalności:
 """
 
 import numpy as np
-from typing import Union, Tuple, Any
+from typing import Any
 
 # --- 1. Dynamiczny Backend (CPU/GPU) ---
 

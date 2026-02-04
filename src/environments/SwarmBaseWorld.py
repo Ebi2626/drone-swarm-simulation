@@ -1,11 +1,20 @@
+
+from abc import abstractmethod
+from typing import List
 from gym_pybullet_drones.envs.BaseAviary import BaseAviary
 from gymnasium import spaces
 import numpy as np
+import pandas as pd
 import pybullet as p
+import os
+from hydra.core.hydra_config import HydraConfig
+
+from src.environments.obstacles.Obstacle import Obstacle
 
 class SwarmBaseWorld(BaseAviary):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.obstacles = None
     
     # Common environment setup methods
     def reset(self, seed=None, options=None):
@@ -85,6 +94,16 @@ class SwarmBaseWorld(BaseAviary):
                         
         # Usuwamy duplikaty (np. wielokrotne punkty styku w jednej klatce)
         return list(set(collisions))
+    
+    def printObstaclesToFile(self, obstacleType: str):
+        if(obstacleType == "CYLINDER"):
+            columns = ['x', 'y', 'radius', 'height']
+        if(obstacleType == "CUBOID"):
+            columns = ['x', 'y', 'length', 'width', 'height']
+        
+        df = pd.DataFrame(self.obstacles, columns= columns)
+        df.to_csv(os.path.join(HydraConfig.get().runtime.output_dir, 'obstacles.csv'), index=False)
+        print(f"Zapisano pozycje {len(self.obstacles)} przeszkód typu {obstacleType} do obstacles.csv")
 
     # Implementations needed for BaseAviary / Gymnasium
     def _actionSpace(self):
@@ -114,3 +133,13 @@ class SwarmBaseWorld(BaseAviary):
 
     def _computeInfo(self):
         return {"answer": 42}
+
+
+# Abstract methods to implement in children
+    @abstractmethod
+    def generate_obstacles(self) -> List[Obstacle]:
+        raise NotImplementedError("Subclasses must implement the generate_obstacles method.")
+    
+    @abstractmethod
+    def draw_obstacles(self):
+        raise NotImplementedError("Subclasses must implement the draw_obstacles method.")

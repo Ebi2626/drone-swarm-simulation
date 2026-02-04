@@ -2,7 +2,8 @@ import numpy as np
 from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.optimize import minimize
-from ElementWiseProblem import ElementwiseProblem
+
+from src.algorithms.NSGA3.ElementWiseProblem import UAVSwarmPathPlanningProblem
 
 class SwarmDroneOptimizer:
     def __init__(self, 
@@ -14,7 +15,13 @@ class SwarmDroneOptimizer:
                  obstacles: np.ndarray, # array of obstacles [x, y, radius, height]
                  **kwargs):
         super().__init__(**kwargs)
-        self.problem = ElementwiseProblem(
+        self.n_drones = n_drones
+        self.n_waypoints = n_waypoints
+        self.start_positions = start_positions
+        self.end_positions = end_positions
+        self.obstacles = obstacles
+        self.space_limits = space_limits
+        self.problem = UAVSwarmPathPlanningProblem(
             space_limits=space_limits,
             n_drones=n_drones,
             n_waypoints=n_waypoints,
@@ -24,7 +31,7 @@ class SwarmDroneOptimizer:
 
     def run_optimization(self, pop_size=100, n_gen=200):
         # Konfiguracja algorytmu NSGA-III
-        ref_dirs = get_reference_directions("das-dennis", 2, n_partitions=12)
+        ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=12)
         algorithm = NSGA3(pop_size=pop_size, ref_dirs=ref_dirs)
 
         # Uruchomienie minimalizacji
@@ -33,7 +40,7 @@ class SwarmDroneOptimizer:
             algorithm,
             termination=('n_gen', n_gen),
             seed=1,
-            verbose=True # Warto widzieć postęp
+            verbose=False # Warto widzieć postęp
         )
         return res
     

@@ -3,7 +3,7 @@ class_name: "ForestWorld"
 
 params:
   drone_model: "CF2X"
-  num_drones: 1
+  num_drones: 5
   physics: "PYB"
   pyb_freq: 240
   ctrl_freq: 48
@@ -16,7 +16,10 @@ params:
   tree_height: 10.0
   tree_radius: 1.0
 
-initial_xyzs:
-  - [0.0, 0.0, -2.5]
+target_position: 
+  - [600.0, 0.0, 5.0]
+  - [600.0, 0.0, 5.0]
+  - [600.0, 0.0, 5.0]
+  - [600.0, 0.0, 5.0]
+  - [600.0, 0.0, 5.0]
 
-target_position: [600.0, 0.0, 5.0]

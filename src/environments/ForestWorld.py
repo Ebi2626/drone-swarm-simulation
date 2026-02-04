@@ -1,11 +1,9 @@
-import os
 import numpy as np
-import pandas as pd
 import pybullet as p
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from src.environments.SwarmBaseWorld import SwarmBaseWorld
+from src.environments.obstacles.Cylinder import Cylinder
 from src.utils.config_parser import sanitize_init_params
-from hydra.core.hydra_config import HydraConfig
 
 class ForestWorld(SwarmBaseWorld):
     def __init__(
@@ -34,7 +32,8 @@ class ForestWorld(SwarmBaseWorld):
         self.end_safe_zone = 20.0
         self.tree_radius = tree_radius
         self.track_width = track_width
-
+        self.obstacles = []
+    
         super().__init__(
             drone_model=drone_model,
             physics=physics,
@@ -44,6 +43,28 @@ class ForestWorld(SwarmBaseWorld):
             **kwargs,
         )
 
+    def generate_obstacles(self):
+        # Generate trees
+        forest_start_x = self.start_safe_zone
+        forest_end_x = self.track_length - self.end_safe_zone
+        corridor_width = self.track_width - 20.0
+
+        np.random.seed(42)
+
+        obstacles = []
+
+        for _ in range(self.num_trees):
+            x = np.random.uniform(forest_start_x, forest_end_x)
+            y = np.random.uniform(-corridor_width / 2, corridor_width / 2)
+            obstacles.append(Cylinder([x, y], self.tree_radius, self.track_height, [0.4, 0.25, 0.1, 1.0]))
+        self.obstacles = obstacles
+        return obstacles
+    
+    def draw_obstacles(self):
+        for obstacle in self.obstacles:
+            self._drawTree(obstacle)
+        
+    
     def _addObstacles(self):
         print(f"[DEBUG] Forrest generating: {self.num_trees} trees...")
 
@@ -55,45 +76,27 @@ class ForestWorld(SwarmBaseWorld):
             self.track_height,
             ground_color=[0.3, 0.5, 0.3, 1.0],
         )
-        self._createForest()
+        self.generate_obstacles()
+        self.draw_obstacles()
         print("[DEBUG] Forest generated succesfully.")
 
-    def _createTree(self, x, y):
+    def _drawTree(self, obstacle):
         collision_shape = p.createCollisionShape(
             p.GEOM_CYLINDER,
-            radius=self.tree_radius + np.random.uniform(0, 0.5),
-            height=self.tree_height,
+            radius=obstacle.radius + np.random.uniform(0, 0.5),
+            height=obstacle.height,
         )
 
         visual_shape = p.createVisualShape(
             p.GEOM_CYLINDER,
-            radius=self.tree_radius,
-            length=self.tree_height,
-            rgbaColor=[0.4, 0.25, 0.1, 1],
+            radius=obstacle.radius,
+            length=obstacle.height,
+            rgbaColor=obstacle.color
         )
 
         p.createMultiBody(
             baseMass=0,
             baseCollisionShapeIndex=collision_shape,
             baseVisualShapeIndex=visual_shape,
-            basePosition=[x, y, self.tree_height / 2],
+            basePosition=[obstacle.position[0], obstacle.position[1], obstacle.height / 2],
         )
-
-    def _createForest(self):
-        forest_start_x = self.start_safe_zone
-        forest_end_x = self.track_length - self.end_safe_zone
-        corridor_width = self.track_width - 20.0
-
-        np.random.seed(42)
-
-        obstacle_positions = []
-
-        for _ in range(self.num_trees):
-            x = np.random.uniform(forest_start_x, forest_end_x)
-            y = np.random.uniform(-corridor_width / 2, corridor_width / 2)
-            self._createTree(x, y)
-            obstacle_positions.append([x, y, self.tree_radius, self.tree_height])
-
-        df = pd.DataFrame(obstacle_positions, columns=['x', 'y', 'radius', 'height'])
-        df.to_csv(os.path.join(HydraConfig.get().runtime.output_dir, 'obstacles.csv'), index=False)
-        print(f"Zapisano pozycje {self.num_trees} drzew do obstacles.csv")

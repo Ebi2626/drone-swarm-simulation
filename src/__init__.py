@@ -1,3 +1,4 @@
+from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgorithm
 from .environments.EmptyWorld import EmptyWorld
 from .environments.ForestWorld import ForestWorld
 from .environments.UrbanWorld import UrbanWorld
@@ -11,6 +12,7 @@ ENVIRONMENT_REGISTRY = {
 
 ALGORITHM_REGISTRY = {
     "LinearTestAlgorithm": LinearTestAlgorithm, ## Simple algorithm for testing
+    "TrajectoryFollowingAlgorithm": TrajectoryFollowingAlgorithm
     # "OOA": OOAPlanner,
     # "MSFFOA": MSFFOAPlanner,
     # "SSA": SSAPlanner,

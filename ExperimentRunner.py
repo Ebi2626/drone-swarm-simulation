@@ -27,8 +27,12 @@ class ExperimentRunner:
         self.logger = None
         self.input_handler = None
         self.obstacles = None
+        self.obstacles_matrix = None
         self.nsga3_optimizer = None 
-        self.trajctories = None
+        self.trajectories = None
+        self.best_trajectories = None
+        self.start_positions = np.array(self.cfg.initial_xyzs)
+        self.end_positions = np.array(self.cfg.environment.get("target_position"))
 
     def _init_components(self):
         WorldClass = get_environment(self.cfg.environment.name)
@@ -43,9 +47,9 @@ class ExperimentRunner:
         alg_name = self.cfg.algorithm.class_name
         AlgClass = get_algorithm(alg_name)
         self.algorithm = AlgClass(
+            parent=self,
             num_drones=self.num_drones, 
             params=self.cfg.algorithm.params,
-            trajectories=self.trajctories[0]
         )
 
         if self.cfg.logging.enabled:
@@ -80,35 +84,52 @@ class ExperimentRunner:
     def _getObstacles(self):
         if( self.obstacles is not None):
             return self.obstacles
-        df = pd.read_csv(os.path.join(HydraConfig.get().runtime.output_dir, 'obstacles.csv'), engine="pyarrow", header=0)
-        self.obstacles = df.to_numpy()
+        self.obstacles = np.array(self.env.obstacles)
         return self.obstacles
+    
+    def _getObstaclesMatrix(self):
+        if (self.obstacles_matrix is not None):
+            return self.obstacles_matrix
+        
+        self.obstacles_matrix = np.zeros((len(self.obstacles), 4))
+        for i in range(len(self.obstacles)):
+            self.obstacles_matrix[i] = [
+                self.obstacles[i].position[0],
+                self.obstacles[i].position[1],
+                self.obstacles[i].radius,
+                self.obstacles[i].height
+                ]
+        return self.obstacles_matrix
+        
     
     def _init_nsga3_optimizer(self):
         if self.obstacles is None:
             self._getObstacles()
+        print("Initializing NSGA-3 optimizer...")
+        print(self.cfg.environment)
         self.nsga3_optimizer = SwarmDroneOptimizer(
             space_limits=[
-                self.cfg.environment.track_width,
-                self.cfg.environment.track_length,
-                self.cfg.environment.track_height
+                self.cfg.environment.params.get("track_width"),
+                self.cfg.environment.params.get("track_length"),
+                self.cfg.environment.params.get("track_height")
             ],
             n_drones=self.num_drones,
             n_waypoints=20,
-            start_positions=self.cfg.initial_xyzs,
-            end_positions=self.cfg.target_xyzs,
-            obstacles=self._getObstacles()
+            start_positions=self.start_positions,
+            end_positions=self.end_positions,
+            obstacles=self._getObstaclesMatrix()
         )
 
     def run(self):
         self._init_components()
         self.env.reset()
         self._init_nsga3_optimizer()
-        self.trajctories = self.nsga3_optimizer.run_optimization(
-            pop_size=self.cfg.algorithm.params.get("pop_size", 100),
+        self.trajectories = self.nsga3_optimizer.run_optimization(
+            pop_size=self.cfg.algorithm.params.get("pop_size", 1000),
             n_gen=self.cfg.algorithm.params.get("n_gen", 200)
-        ).get_best_trajectories(
-            self.trajctories, n=1
+        )
+        self.best_trajectories = self.nsga3_optimizer.get_best_trajectories(
+            self.trajectories, n=5
         )
 
         is_running = False

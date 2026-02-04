@@ -5,6 +5,7 @@ channels:
 dependencies:
   - python=3.10                # Stabilna wersja dla pybullet
   - numpy=1.26                 # Wersja <2.0 (krytyczne dla kompatybilności!)
+  - cupy                       # Do obliczeń na GPU
   - matplotlib                 # Do wykresów
   - pandas                     # Do analizy danych
   - scipy                      # Do obliczeń naukowych

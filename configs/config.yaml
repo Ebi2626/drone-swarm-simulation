@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - environment: empty
-  - algorithm: linear
+  - algorithm: trajectory
 
 num_drones: 5
 initial_xyzs:

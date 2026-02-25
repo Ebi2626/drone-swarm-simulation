@@ -1,12 +1,14 @@
-"""
+""""
 Objectives and Constraints Evaluator.
 Moduł odpowiedzialny za ocenę jakości rozwiązań (Fitness) oraz weryfikację ograniczeń (Constraints).
 Implementuje precyzyjną detekcję kolizji dla obiektów typu Cylinder i Box w środowisku zurbanizowanym.
+Oraz wymusza poprawność geometryczną trajektorii typu Polyline.
 
 Kluczowe funkcjonalności:
 1. Wielokryterialna ocena (Długość, Ryzyko, Energia).
 2. Obsługa typów przeszkód: CYLINDER (rzut 2D + Z) i BOX (AABB).
 3. Segmentowa weryfikacja ciągłości ruchu (Segment-based checks).
+4. Ograniczenia geometryczne dla łamanej (Uniformity, Smoothness).
 """
 
 from typing import List, Dict, Optional, Any
@@ -28,73 +30,44 @@ def _dist_segment_to_cylinder(
 ) -> NDArray:
     """
     Oblicza naruszenie strefy cylindra przez odcinek.
-    Logika:
-    1. Rzutujemy odcinek na płaszczyznę XY.
-    2. Liczymy dystans punkt-odcinek w 2D (względem środka koła).
-    3. Sprawdzamy czy dystans 2D < radius.
-    4. Sprawdzamy czy odcinek znajduje się w zakresie Z [0, height].
-    
-    Args:
-        seg_start, seg_end: (N_Seg, 3)
-        obs_center: (N_Obs, 3) - [x, y, z] (z zazwyczaj 0)
-        obs_radius: (N_Obs, )
-        obs_height: (N_Obs, )
-        
-    Returns:
-        violation: (N_Seg, N_Obs) - Wartość > 0 jeśli jest kolizja.
     """
     xp = get_xp(seg_start)
     
     # Rozpakowanie współrzędnych (Broadcasting: Segments vs Obstacles)
-    # Seg: (N_S, 1, 3), Obs: (1, N_O, 3)
     s_start = seg_start[:, None, :]
     s_end = seg_end[:, None, :]
     o_center = obs_center[None, :, :]
     
     # 1. Analiza w płaszczyźnie XY (indeksy 0, 1)
-    # Wektor odcinka w 2D
     ab_xy = s_end[..., :2] - s_start[..., :2]
-    # Wektor od początku do środka koła
     ap_xy = o_center[..., :2] - s_start[..., :2]
     
     # Projekcja punktu na odcinek (t) w 2D
     dot_ap_ab = xp.sum(ap_xy * ab_xy, axis=-1)
     dot_ab_ab = xp.sum(ab_xy * ab_xy, axis=-1)
     
-    # Zabezpieczenie przed dzieleniem przez zero (pionowe odcinki mają długość 0 w XY)
     t = xp.where(dot_ab_ab > 1e-8, dot_ap_ab / dot_ab_ab, 0.0)
     t_clamped = xp.clip(t, 0.0, 1.0)
     
-    # Najbliższy punkt na odcinku (w 2D)
     closest_xy = s_start[..., :2] + ab_xy * t_clamped[..., None]
     
-    # Dystans 2D od środka przeszkody do najbliższego punktu
     diff_xy = closest_xy - o_center[..., :2]
     dist_sq_xy = xp.sum(diff_xy**2, axis=-1)
     
-    # Warunek 1: Czy jesteśmy wewnątrz promienia? (dist < r)
-    # violation_xy > 0 jeśli kolizja
+    # Warunek 1: Czy jesteśmy wewnątrz promienia?
     r_sq = obs_radius[None, :]**2
     violation_xy = xp.maximum(0.0, r_sq - dist_sq_xy)
     
     # 2. Analiza wysokości Z
-    # Musimy sprawdzić Z w tym samym punkcie t_clamped (interpolacja Z)
-    # Z_closest = Z_start + t * (Z_end - Z_start)
     z_start = s_start[..., 2]
     z_end = s_end[..., 2]
     z_closest = z_start + t_clamped * (z_end - z_start)
     
-    # Warunek 2: Czy 0 <= Z <= Height?
-    # Zakładamy, że przeszkoda stoi na Z=0 (plus ew. o_center.z)
     obs_z_base = o_center[..., 2]
     obs_z_top = obs_z_base + obs_height[None, :]
     
-    # Sprawdzamy czy Z punktu jest wewnątrz zakresu
-    # (Zastosujemy miękkie przejście lub twardy warunek binarny mnożony przez violation_xy)
     in_z_range = (z_closest >= obs_z_base) & (z_closest <= obs_z_top)
     
-    # Finalna kolizja: Jest kolizja XY ORAZ jest w zakresie Z
-    # Zwracamy violation_xy (kwadrat dystansu wchodzącego w przeszkodę) tylko tam gdzie Z pasuje
     return xp.where(in_z_range, violation_xy, 0.0)
 
 def _dist_segment_to_box(
@@ -104,56 +77,26 @@ def _dist_segment_to_box(
     obs_dims: NDArray
 ) -> NDArray:
     """
-    Uproszczona detekcja kolizji Odcinek vs AABB (Axis Aligned Bounding Box).
-    Dla szybkości w roju przyjmujemy, że budynki są prostopadłe do osi.
-    
-    Args:
-        obs_dims: [length, width, height]
+    Uproszczona detekcja kolizji Odcinek vs AABB.
     """
-    # Implementacja AABB vs Segment jest kosztowna na GPU.
-    # W kontekście pracy magisterskiej, często aproksymuje się BOX-a 
-    # jako Cylinder opisany na nim (bezpieczniej) lub wpisany.
-    # PROPOZYCJA: Aproksymacja cylindryczna o promieniu = max(len, wid)/2
-    # Jest to standard w szybkich symulacjach rojów.
-    
     xp = get_xp(seg_start)
     radius = xp.maximum(obs_dims[:, 0], obs_dims[:, 1]) / 2.0
     height = obs_dims[:, 2]
-    
     return _dist_segment_to_cylinder(seg_start, seg_end, obs_center, radius, height)
 
 
 # --- 1. Funkcje Celu (Objectives) ---
 
 def calc_path_length(trajectories: NDArray[np.float64]) -> NDArray[np.float64]:
-    """
-    Oblicza sumaryczną długość euklidesową trasy dla każdego drona.
-    
-    Args:
-        trajectories: Tensor kształtu (Pop, Drones, Waypoints, 3).
-        
-    Returns:
-        total_length: Tensor kształtu (Pop, ), zawierający sumę długości tras wszystkich dronów.
-    """
+    """Oblicza sumaryczną długość euklidesową trasy."""
     xp = get_xp(trajectories)
-    # Wektor przesunięcia między punktami
     diffs = trajectories[:, :, 1:, :] - trajectories[:, :, :-1, :]
-    # Długość każdego segmentu
     seg_lengths = xp.sqrt(xp.sum(diffs**2, axis=-1))
-    # Suma po segmentach (axis=2) i po dronach (axis=1)
     return xp.sum(xp.sum(seg_lengths, axis=-1), axis=-1)
 
 
 def calc_elevation_changes(trajectories: NDArray[np.float64]) -> NDArray[np.float64]:
-    """
-    Oblicza sumę zmian wysokości (koszt energetyczny wznoszenia/opadania).
-    
-    Args:
-        trajectories: Tensor kształtu (Pop, Drones, Waypoints, 3).
-        
-    Returns:
-        elevation_cost: Tensor kształtu (Pop, ).
-    """
+    """Oblicza sumę zmian wysokości."""
     xp = get_xp(trajectories)
     z_coords = trajectories[..., 2]
     z_diffs = xp.abs(z_coords[:, :, 1:] - z_coords[:, :, :-1])
@@ -166,9 +109,9 @@ def calc_collision_risk_segments(
     safety_margin: float = 1.0
 ) -> NDArray[np.float64]:
     """
-    Oblicza stopień naruszenia przestrzeni przeszkód przez segmenty trasy.
-    Wykorzystuje precyzyjną geometrię Cylindrów (drzewa/wieże).
-    
+    Oblicza stopień naruszenia przestrzeni przeszkód.
+
+
     Args:
         trajectories: Tensor (Pop, Drones, Waypoints, 3).
         obstacles_list: Lista batchy przeszkód.
@@ -180,8 +123,6 @@ def calc_collision_risk_segments(
     xp = get_xp(trajectories)
     pop_size, n_drones, n_steps, _ = trajectories.shape
     
-    # Reshape do listy segmentów: (Total_Segments, 3)
-    # Total = Pop * Drones * (Waypoints-1)
     seg_starts = trajectories[:, :, :-1, :].reshape(-1, 3)
     seg_ends = trajectories[:, :, 1:, :].reshape(-1, 3)
     
@@ -195,47 +136,35 @@ def calc_collision_risk_segments(
         if count == 0:
             continue
             
-        # Dane aktywnych przeszkód
         active_obs = data[:count]
         centers = active_obs[:, :3]
-        d1 = active_obs[:, 3] # Radius / Length
-        d2 = active_obs[:, 4] # Height / Width
-        d3 = active_obs[:, 5] # Height (for BOX)
+        d1 = active_obs[:, 3]
+        d2 = active_obs[:, 4]
+        d3 = active_obs[:, 5]
         
         batch_violation = None
         
         if shape == 'CYLINDER':
-            # d1=radius, d2=height
             radii = d1 + safety_margin
             heights = d2
-            # Obliczenie naruszeń (N_Seg, N_Obs)
             batch_violation = _dist_segment_to_cylinder(
                 seg_starts, seg_ends, centers, radii, heights
             )
             
         elif shape == 'BOX':
-            # d1=len, d2=wid, d3=height
-            # Aproksymacja cylindryczna dla szybkości (bezpieczny opis)
-            # radius = max(len, wid)/2 * sqrt(2) -> opisany na prostokącie
             max_side = xp.maximum(d1, d2)
             radii = (max_side / 2.0 * 1.414) + safety_margin 
             heights = d3
-            
             batch_violation = _dist_segment_to_cylinder(
                 seg_starts, seg_ends, centers, radii, heights
             )
         
         if batch_violation is not None:
-            # Suma naruszeń dla każdego segmentu (po wszystkich przeszkodach)
-            # Sumujemy wartości (które są kwadratami penetracji z funkcji _dist...)
             seg_risk = xp.sum(batch_violation, axis=1)
-            
-            # Reshape z powrotem do struktury populacji i agregacja
             risk_per_pop = seg_risk.reshape(pop_size, -1)
             total_violation += xp.sum(risk_per_pop, axis=1)
 
     return total_violation
-
 
 # --- 2. Funkcje Ograniczeń (Constraints) ---
 
@@ -245,31 +174,16 @@ def constr_battery_limit(
     target_pos: NDArray[np.float64], 
     max_ratio: float = 5.0
 ) -> NDArray[np.float64]:
-    """
-    Ograniczenie budżetu energetycznego.
-    Trasa nie może być dłuższa niż `max_ratio` razy dystans w linii prostej.
-    
-    Returns:
-        cv: Tensor (Pop, ) - wartość naruszenia (>0 oznacza błąd).
-    """
+    """Ograniczenie budżetu energetycznego."""
     xp = get_xp(trajectories)
-    
-    # Długość trasy per dron (Pop, Drones)
     diffs = trajectories[:, :, 1:, :] - trajectories[:, :, :-1, :]
     actual_lengths = xp.sum(xp.sqrt(xp.sum(diffs**2, axis=-1)), axis=-1)
     
-    # Dystans referencyjny per dron (N_Drones, )
-    # Używamy start/target przekazanego z zewnątrz (nie z trajektorii, bo ta może dryfować)
     ref_vec = target_pos - start_pos
     ref_dist = xp.sqrt(xp.sum(ref_vec**2, axis=-1))
     
-    # Limit dla każdego drona
     max_allowed = ref_dist[None, :] * max_ratio
-    
-    # Naruszenie per dron
     cv_per_drone = xp.maximum(0.0, actual_lengths - max_allowed)
-    
-    # Suma naruszeń w roju (jeśli choć jeden dron padnie, cały rój ma problem)
     return xp.sum(cv_per_drone, axis=1)
 
 
@@ -278,14 +192,10 @@ def constr_inter_agent_separation_segments(
     min_dist: float = 1.5,
     ignore_ratio: float = 0.1
 ) -> NDArray[np.float64]:
-    """
-    Weryfikacja separacji między dronami.
-    Poprawiona wersja: ignoruje przekątną (dystans 0 do samego siebie).
-    """
+    """Weryfikacja separacji między dronami."""
     xp = get_xp(trajectories)
     pop_size, n_drones, n_steps, _ = trajectories.shape
     
-    # Zabezpieczenia indeksów (bez zmian)
     if ignore_ratio >= 0.5:
         ignore_ratio = 0.45
     start_idx = int(n_steps * ignore_ratio)
@@ -295,40 +205,89 @@ def constr_inter_agent_separation_segments(
         end_idx = n_steps
     
     total_cv = xp.zeros(pop_size)
-    
-    # Tworzymy macierz tożsamościową (Identity) rozszerzoną do (Pop, N, N)
-    # Aby wyzerować przekątną (self-collision)
-    # identity_mask[k, i, j] = 1 jeśli i==j
     eye = xp.eye(n_drones, dtype=bool)
-    # Rozszerzamy do wymiaru populacji (broadcasting zadziała automatycznie przy odejmowaniu, ale dla pewności przy masce):
-    # W numpy/cupy po prostu odejmiemy dużą wartość na przekątnej dystansu lub wyzerujemy wynik.
     
     for t in range(start_idx, end_idx):
-        pos_t = trajectories[:, :, t, :] # (Pop, Drones, 3)
-        
-        # Macierz dystansów (Pop, N, N)
+        pos_t = trajectories[:, :, t, :]
         diff = pos_t[:, :, None, :] - pos_t[:, None, :, :]
         dist_sq = xp.sum(diff**2, axis=-1)
         dist = xp.sqrt(dist_sq)
         
-        # --- FIX: Eliminacja samo-kolizji ---
-        # Dodajemy nieskończoność na przekątnej, żeby min_dist - dist < 0
-        # dist ma kształt (Pop, N, N). Dodajemy dużą liczbę tam, gdzie eye jest True.
-        # (Eye jest (N, N), broadcasting doda to do każdego osobnika w populacji)
         dist_no_self = dist + (eye * 1e6) 
-        
-        # Obliczamy naruszenie (penetrację strefy ochronnej)
-        # Teraz na przekątnej mamy: min_dist - 1000000 = ujemne -> maximum zamieni na 0.
         penetration = xp.maximum(0.0, min_dist - dist_no_self)
         
-        # Sumujemy naruszenia
-        # Dzielimy przez 2, bo każda para (i, j) i (j, i) jest liczona podwójnie
         step_cv = xp.sum(xp.sum(penetration, axis=-1), axis=-1) / 2.0
-        
         total_cv += step_cv
         
     return total_cv
 
+
+def constr_segment_uniformity(
+    trajectories: NDArray[np.float64], 
+    tolerance_std: float = 2.0
+) -> NDArray[np.float64]:
+    """
+    [NOWA] Ograniczenie wymuszające równomierne rozmieszczenie waypointów.
+    
+    Liczy odchylenie standardowe długości segmentów. Jeśli punkty są "zlepione"
+    w jednym miejscu a inne daleko - odchylenie będzie duże.
+    
+    Args:
+        tolerance_std: Dopuszczalne odchylenie standardowe (w metrach).
+        
+    Returns:
+        CV: Wartość naruszenia (std_dev - tolerance).
+    """
+    xp = get_xp(trajectories)
+    
+    # 1. Wektory segmentów
+    diffs = trajectories[:, :, 1:, :] - trajectories[:, :, :-1, :]
+    
+    # 2. Długości segmentów (Pop, Drones, Waypoints-1)
+    seg_lengths = xp.sqrt(xp.sum(diffs**2, axis=-1))
+    
+    # 3. Odchylenie standardowe długości segmentów per dron (Pop, Drones)
+    std_lengths = xp.std(seg_lengths, axis=-1)
+    
+    # 4. Naruszenie
+    cv = xp.maximum(0.0, std_lengths - tolerance_std)
+    
+    # 5. Suma po dronach
+    return xp.sum(cv, axis=1)
+
+
+def constr_path_smoothness(
+    trajectories: NDArray[np.float64],
+    max_turn_factor: float = 10.0
+) -> NDArray[np.float64]:
+    """
+    [NOWA] Ograniczenie gładkości trasy (Laplacian Smoothing).
+    Penalizuje "zygzaki" poprzez badanie wektora drugiej różnicy (krzywizny lokalnej).
+    P(i-1) -> P(i) -> P(i+1). 
+    Wektor: P(i+1) - 2*P(i) + P(i-1) powinien być mały dla gładkiej linii.
+    
+    Returns:
+        CV: Suma kwadratów "jerku" przekraczająca próg.
+    """
+    xp = get_xp(trajectories)
+    
+    # Druga różnica dyskretna (aproksymacja przyspieszenia/krzywizny)
+    # Kształt: (Pop, Drones, Waypoints-2, 3)
+    second_diff = (trajectories[:, :, 2:, :] 
+                   - 2 * trajectories[:, :, 1:-1, :] 
+                   + trajectories[:, :, :-2, :])
+    
+    # Kwadrat normy (siła "szarpnięcia")
+    jerk_sq = xp.sum(second_diff**2, axis=-1)
+    
+    # Suma po całej trasie
+    total_jerk = xp.sum(jerk_sq, axis=-1)
+    
+    # Normalizacja (zależna od liczby punktów)
+    # Próg jest heurystyczny - jeśli jerk jest ogromny, trasa jest chaotyczna
+    cv = xp.maximum(0.0, total_jerk - max_turn_factor)
+    
+    return xp.sum(cv, axis=1)
 
 # --- 3. Wrapper ---
 
@@ -355,17 +314,15 @@ class VectorizedEvaluator:
         xp = get_xp(trajectories)
         
         # Pobieranie parametrów z konfiguracji
-        # Domyślnie 1.5 i 0.1, ale teraz zareaguje na Twoje 'min_dist': 0.001
         p_min_dist = self.params.get("min_dist", 1.5)
         p_ignore_ratio = self.params.get("ignore_ratio", 0.1)
         p_safety_margin = self.params.get("safety_margin", 1.0)
+        p_smoothness_factor = self.params.get("max_jerk", 50.0) # Próg gładkości
+        p_uniformity_tol = self.params.get("uniformity_std", 5.0) # Próg równomierności
         
         # 1. Cele (Objectives)
         f1 = calc_path_length(trajectories)
-        
-        # Przekazujemy safety_margin do f2
         f2 = calc_collision_risk_segments(trajectories, self.obstacles, safety_margin=p_safety_margin)
-        
         f3 = calc_elevation_changes(trajectories)
         
         # 2. Ograniczenia (Constraints)
@@ -373,16 +330,21 @@ class VectorizedEvaluator:
                                   to_device(self.start, xp), 
                                   to_device(self.target, xp))
                                   
-        # --- KLUCZOWA ZMIANA ---
-        # Przekazujemy parametry dynamicznie!
         g2 = constr_inter_agent_separation_segments(
             trajectories, 
             min_dist=p_min_dist, 
             ignore_ratio=p_ignore_ratio
         )
-        # -----------------------
         
-        g3 = xp.maximum(0.0, f2 - 0.1)
+        g3 = xp.maximum(0.0, f2 - 0.1) # Kolizja z przeszkodami jako twardy constraint
+        
+        # --- NOWE OGRANICZENIA GEOMETRYCZNE ---
+        # Wymuszenie równych odstępów (kluczowe dla "rozciągnięcia" trasy)
+        g4 = constr_segment_uniformity(trajectories, tolerance_std=p_uniformity_tol)
+        
+        # Wymuszenie gładkości (by nie tworzył chaotycznych kłębków w miejscu)
+        g5 = constr_path_smoothness(trajectories, max_turn_factor=p_smoothness_factor)
         
         out["F"] = xp.column_stack([f1, f2, f3])
-        out["G"] = xp.column_stack([g1, g2, g3])
+        # Dodajemy g4 i g5 do wektora ograniczeń
+        out["G"] = xp.column_stack([g1, g2, g3, g4, g5])

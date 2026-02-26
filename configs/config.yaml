@@ -4,18 +4,14 @@ defaults:
   - algorithm: trajectory
 
 num_drones: 5
-initial_xyzs:
-  - [0.0, 0.0, 0.2]
-  - [0.0, 1.0, 0.2]
-  - [0.0, 2.0, 0.2]
-  - [0.0, 3.0, 0.2]
-  - [0.0, 4.0, 0.2]
 
 simulation:
   duration_sec: 12
   gui: true
   pyb_freq: 240
   ctrl_freq: 48
+  drone_model: "CF2X"
+  physics: "PYB"
 
 seed: 42
 experiment_name: "test_run"

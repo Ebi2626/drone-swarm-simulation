@@ -15,6 +15,8 @@ from typing import List, Dict, Optional, Any
 import numpy as np
 from numpy.typing import NDArray
 
+from src.environments.obstacles.ObstacleShape import ObstacleShape
+
 # Importy helperów
 from .core_math import get_xp, to_device
 from src.environments.abstraction.generate_obstacles import ObstaclesData
@@ -144,14 +146,14 @@ def calc_collision_risk_segments(
         
         batch_violation = None
         
-        if shape == 'CYLINDER':
+        if shape == ObstacleShape.CYLINDER:
             radii = d1 + safety_margin
             heights = d2
             batch_violation = _dist_segment_to_cylinder(
                 seg_starts, seg_ends, centers, radii, heights
             )
             
-        elif shape == 'BOX':
+        elif shape == ObstacleShape.BOX:
             max_side = xp.maximum(d1, d2)
             radii = (max_side / 2.0 * 1.414) + safety_margin 
             heights = d3

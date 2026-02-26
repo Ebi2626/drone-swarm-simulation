@@ -2,99 +2,104 @@ import numpy as np
 import pybullet as p
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from src.environments.SwarmBaseWorld import SwarmBaseWorld
+from src.environments.abstraction.generate_obstacles import ObstaclesData, generate_obstacles, strategy_grid_jitter
+from src.environments.abstraction.generate_world_boundaries import generate_world_boundaries
+from src.environments.obstacles.ObstacleShape import ObstacleShape
+from src.utils.ConfigValidator import ConfigValidator
 from src.utils.config_parser import sanitize_init_params
+from src.utils.postions_to_tensor import positions_to_tensor
 
 class UrbanWorld(SwarmBaseWorld):
     def __init__(self,
                  drone_model: DroneModel = DroneModel.CF2X,
                  physics: Physics = Physics.PYB,
-                 initial_xyzs=None,
                  initial_rpys=None,
-                 city_length: float = 1000.0,
-                 city_width: float = 200.0,
-                 block_size: float = 40.0,
-                 street_width: float = 15.0,
-                 min_height: float = 10.0,
-                 max_height: float = 80.0,
-                 skyscraper_prob: float = 0.1,
-                 street_block_prob: float = 0.2,
-                 ceiling_height: float = 120.0,
+                 initial_xyzs=None,
+                 end_xyzs=None,
+                 drone_number: int = None,
+                 ground_position: float = 0.1,
+                 track_length: float = 1000.0,
+                 track_width: float = 200.0,
+                 track_height: float = 120.0,
+                 obstacles_number: float = 63.0,
+                 obstacle_width: float = 15.0,
+                 obstacle_length: float = None,
+                 obstacle_height: float = 30.0,
                  **kwargs):
         
-        drone_model, physics, initial_xyzs, initial_rpys = sanitize_init_params(
-            drone_model, physics, initial_xyzs, initial_rpys
+        drone_model, physics, initial_xyzs, end_xyzs, initial_rpys = sanitize_init_params(
+            drone_model, physics, initial_xyzs, end_xyzs, initial_rpys
         )
-        
-        self.city_length = city_length
-        self.city_width = city_width
-        self.block_size = block_size
-        self.street_width = street_width
-        self.min_height = min_height
-        self.max_height = max_height
-        self.skyscraper_prob = skyscraper_prob
-        self.street_block_prob = street_block_prob
-        self.ceiling_height = ceiling_height
+        self.config_validator = ConfigValidator(expected_obstacle_shape=ObstacleShape.BOX)
+        self.config_validator.validate(
+            initial_xyzs,
+            end_xyzs,
+            drone_number,
+            obstacles_number,
+            obstacle_width,
+            obstacle_length,
+            obstacle_height,
+            track_length,
+            track_width,
+            track_height,
+            ground_position,
+            drone_model
+        )
+
+        self.initial_xyzs = initial_xyzs
+        self.end_xyzs = end_xyzs
+        self.ground_position = ground_position
+        self.track_length = track_length
+        self.track_width = track_width
+        self.track_height = track_height
+        self.obstacles_number = obstacles_number
+        self.obstacle_width = obstacle_width
+        self.obstacle_length = obstacle_length
+        self.obstacle_height = obstacle_height
         
         super().__init__(drone_model=drone_model,
                          physics=physics,
                          initial_xyzs=initial_xyzs,
                          initial_rpys=initial_rpys,
+                         ground_position=ground_position,
                          obstacles=True,
                          **kwargs)
+    
+    def _generate_world_def(self):
+        return generate_world_boundaries(self.track_width, self.track_length, self.track_height, self.ground_position)
 
-    def _addObstacles(self):
+    def _create_building(self, obstacle):
+        shade = np.random.uniform(0.6, 0.9)
+        x, y, z = obstacle[0], obstacle[1], obstacle[2]
+        length, width, height = obstacle[3], obstacle[4], obstacle[5]        
+        color = [shade, shade, shade, 1]
+
+        base_z = z + height/2
+
+        col_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[length/2, width/2, height/2])
+        vis_shape = p.createVisualShape(p.GEOM_BOX, halfExtents=[length/2, width/2, height/2], rgbaColor=color)
+        
+        p.createMultiBody(0, col_shape, vis_shape, [x, y, base_z])
+
+    def _create_city(self, obstacles: np.ndarray):
+        for i in range(obstacles.shape[0]):
+            obstacle = obstacles[i, :]
+            self._create_building(obstacle)
+
+    def generate_obstacles(self) -> ObstaclesData:
+        return generate_obstacles(
+            self._generate_world_def(),
+            n_obstacles=self.obstacles_number,
+            shape_type=ObstacleShape.BOX,
+            placement_strategy=strategy_grid_jitter,
+            size_params={'length': self.obstacle_length, 'width': self.obstacle_width, 'height': self.obstacle_height},
+            start_positions=positions_to_tensor(self.initial_xyzs),
+            target_positions=positions_to_tensor(self.end_xyzs)
+        )
+
+    def draw_obstacles(self, obstacles: ObstaclesData) -> None:
         print("[DEBUG] Generating urban environment...") 
         self._init_render_silently()
-        self._setup_environment(self.city_length, self.city_width, self.ceiling_height, ground_color=[0.4, 0.4, 0.45, 1.0])
-        self._createCity()
+        self._setup_environment(self.track_length, self.track_width, self.track_height, ground_color=[0.4, 0.4, 0.45, 1.0])
+        self._create_city(obstacles.data)
         print("[DEBUG] Urban environment generated.")
-
-    def _create_building(self, x, y, len_x, len_y, is_blocker=False):
-        shade = np.random.uniform(0.6, 0.9)
-
-        # Blocker is a building crossing the street to avoid
-        # easy passage for the drones in straight line
-        if is_blocker:
-            h = np.random.uniform(self.min_height, self.max_height * 0.7)
-            color = [shade, shade, shade, 1]
-        elif np.random.random() < self.skyscraper_prob:
-            h = self.max_height * 1.5
-            color = [0.2, 0.2, 0.3, 1]
-        else:
-            h = np.random.uniform(self.min_height, self.max_height)
-            color = [shade, shade, shade, 1]
-
-        col_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[len_x/2, len_y/2, h/2])
-        vis_shape = p.createVisualShape(p.GEOM_BOX, halfExtents=[len_x/2, len_y/2, h/2], rgbaColor=color)
-        
-        p.createMultiBody(0, col_shape, vis_shape, [x, y, h/2])
-
-    def _createCity(self):
-        step = self.block_size + self.street_width
-        start_x = 20.0
-        end_x = self.city_length - 20.0
-        start_y = -self.city_width / 2
-        end_y = self.city_width / 2
-        
-        np.random.seed(101) 
-        
-        current_x = start_x
-        while current_x < end_x:
-            current_y = start_y
-            while current_y < end_y:
-                
-                self._create_building(current_x, current_y, self.block_size, self.block_size)
-                
-                if np.random.random() < self.street_block_prob:
-                    blocker_y = current_y + self.block_size/2 + self.street_width/2
-                    
-                    if blocker_y < end_y:
-                        self._create_building(
-                            x=current_x, 
-                            y=blocker_y, 
-                            len_x=self.block_size, 
-                            len_y=self.street_width + 0.5, 
-                            is_blocker=True
-                        )
-                current_y += step
-            current_x += step

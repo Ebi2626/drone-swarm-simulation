@@ -2,22 +2,34 @@ name: "urban"
 class_name: "UrbanWorld"
 
 params:
+  # Drone parmaeters
   drone_model: "CF2X"
-  num_drones: 1
-  physics: "PYB"
-  pyb_freq: 240
-  ctrl_freq: 48
-  gui: true
-  
-  city_length: 1000.0
-  city_width: 300.0
-  block_size: 30.0
-  street_width: 10.0
-  min_height: 15.0
-  max_height: 60.0
-  skyscraper_prob: 0.15
+  num_drones: 5
 
+  # Grid parameters (min(x, y) are 0)
+  ground_position: 0.1 # Z-axis (min)
+  track_length: 1000.0 # Y-axis
+  track_width: 300.0 # X-axis
+  track_height: 120.0 # Z-axis (max)
+
+  # Obstacles parameters
+  obstacles_number: 63.0
+  obstacle_width: 15.0
+  obstacle_length: 15.0
+  obstacle_height: 15.0
+
+# Starting positions
 initial_xyzs:
-  - [0.0, 0.0, 0.5]
+  - [145.0, 1.0, 0.5]
+  - [150.0, 1.0, 0.5]
+  - [155.0, 1.0, 0.5]
+  - [160.0, 1.0, 0.5]
+  - [165.0, 1.0, 0.5]
 
-target_position: [1000.0, 0.0, 50.0]
+# Target positions
+end_xyzs: 
+  - [145.0, 999.0, 0.5]
+  - [150.0, 999.0, 0.5]
+  - [155.0, 999.0, 0.5]
+  - [160.0, 999.0, 0.5]
+  - [165.0, 999.0, 0.5]

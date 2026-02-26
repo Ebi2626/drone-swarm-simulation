@@ -1,7 +1,8 @@
 import numpy as np
-from typing import Callable, NamedTuple, Literal, Optional, Protocol
+from typing import NamedTuple, Optional, Protocol
 from numpy.typing import NDArray
 from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 class ObstaclesData(NamedTuple):
     """
@@ -15,8 +16,7 @@ class ObstaclesData(NamedTuple):
         shape_type (str): 'CYLINDER' or 'BOX'
     """
     data: NDArray[np.float64] 
-    shape_type: Literal['CYLINDER', 'BOX']
-
+    shape_type: ObstacleShape
     @property
     def count(self) -> int:
         return self.data.shape[0]
@@ -171,10 +171,25 @@ def strategy_grid_jitter(
     
     return final_positions
 
+def strategy_empty(
+    min_b: NDArray[np.float64], 
+    max_b: NDArray[np.float64], 
+    count: int,
+    start_positions: Optional[NDArray[np.float64]] = None,
+    target_positions: Optional[NDArray[np.float64]] = None,
+    safe_radius: float = 15.0
+) -> NDArray[np.float64]:
+    """
+    Dummy strategy for an empty environment.
+    Celowo ignoruje parametr 'count' i zwraca pusty tensor pozycji.
+    """
+    # Zwraca pustą macierz o poprawnym kształcie (0 wierszy, 3 kolumny: X, Y, Z)
+    return np.empty((0, 3), dtype=np.float64)
+
 def generate_obstacles(
     world: WorldData,
     n_obstacles: int,
-    shape_type: Literal['CYLINDER', 'BOX'] = 'CYLINDER',
+    shape_type: ObstacleShape = ObstacleShape.CYLINDER,
     placement_strategy: PlacementStrategy = strategy_random_uniform,
     size_params: dict = {'radius': 5.0, 'height': 20.0, 'width': 5.0, 'length': 5.0},
     start_positions: np.ndarray = None,
@@ -213,14 +228,14 @@ def generate_obstacles(
     
     # Fill data matrix with obstacle coordinates and dimensions
     # Different shapes can be used depending on the requirements
-    if shape_type == 'CYLINDER':
+    if shape_type == ObstacleShape.CYLINDER:
         # [radius, height, 0]
         r = size_params.get('radius', 5.0)
         h = size_params.get('height', 10.0)
         dimensions[:, 0] = r
         dimensions[:, 1] = h
         
-    elif shape_type == 'BOX':
+    elif shape_type == ObstacleShape.BOX:
         # [length, width, height]
         length = size_params.get('length', 5.0)
         width = size_params.get('width', 5.0)

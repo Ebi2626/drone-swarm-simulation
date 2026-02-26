@@ -5,6 +5,7 @@ Sprawdza czy trasa zaczyna się w Starcie i kończy w Celu.
 
 import numpy as np
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import nsga3_swarm_strategy
+from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 # --- Mock Data Classes ---
 class WorldData:
@@ -16,7 +17,7 @@ class ObstaclesData:
     def __init__(self):
         self.count = 0
         self.data = np.zeros((10, 6)) # Puste
-        self.shape_type = 'CYLINDER'
+        self.shape_type = ObstacleShape.CYLINDER
 
 def test_run():
     # 1. Konfiguracja Scenariusza

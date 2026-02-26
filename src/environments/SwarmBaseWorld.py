@@ -1,15 +1,10 @@
 
-from abc import abstractmethod
-from typing import List
+from src.environments.abstraction.generate_obstacles import ObstaclesData
 from gym_pybullet_drones.envs.BaseAviary import BaseAviary
+from abc import abstractmethod
 from gymnasium import spaces
 import numpy as np
-import pandas as pd
 import pybullet as p
-import os
-from hydra.core.hydra_config import HydraConfig
-
-from src.environments.obstacles.Obstacle import Obstacle
 
 class SwarmBaseWorld(BaseAviary):
     def __init__(self, **kwargs):
@@ -42,7 +37,7 @@ class SwarmBaseWorld(BaseAviary):
 
         half_len = length / 2 + 50.0 
         half_wid = width / 2 + 50.0 
-        z_pos = 0.0 - (thickness / 2.0)
+        z_pos = self.ground_position - (thickness / 2.0)
 
         col_id = p.createCollisionShape(p.GEOM_BOX, halfExtents=[half_len, half_wid, thickness/2])
         vis_id = p.createVisualShape(p.GEOM_BOX, halfExtents=[half_len, half_wid, thickness/2], rgbaColor=color)
@@ -69,43 +64,11 @@ class SwarmBaseWorld(BaseAviary):
             self._create_ceiling(length, width, track_height)
 
         print("[DEBUG] Environment setup complete.")
-
-    def get_detailed_collisions(self):
-        """
-        Sprawdza kolizje dla każdego drona.
-        Zwraca listę krotek: (drone_id, other_body_id)
-        """
-        collisions = []
-        for drone_id in range(self.NUM_DRONES):
-            # Pobieramy ID ciała fizycznego drona w PyBullet
-            # W BaseAviary drony są trzymane w self.DRONE_IDS (lista)
-            drone_body_id = self.DRONE_IDS[drone_id]
-            
-            # Zapytanie do silnika fizycznego o punkty kontaktu
-            contact_points = p.getContactPoints(bodyA=drone_body_id)
-            
-            if contact_points:
-                for contact in contact_points:
-                    # contact[2] to bodyB (obiekt, w który uderzyliśmy)
-                    other_body_id = contact[2]
-                    # Unikamy logowania "kolizji" z samym sobą (rzadkie, ale możliwe w błędnych modelach)
-                    if other_body_id != drone_body_id:
-                        collisions.append((drone_id, other_body_id))
-                        
-        # Usuwamy duplikaty (np. wielokrotne punkty styku w jednej klatce)
-        return list(set(collisions))
     
-    def printObstaclesToFile(self, obstacleType: str):
-        if(obstacleType == "CYLINDER"):
-            columns = ['x', 'y', 'radius', 'height']
-        if(obstacleType == "CUBOID"):
-            columns = ['x', 'y', 'length', 'width', 'height']
-        
-        df = pd.DataFrame(self.obstacles, columns= columns)
-        df.to_csv(os.path.join(HydraConfig.get().runtime.output_dir, 'obstacles.csv'), index=False)
-        print(f"Zapisano pozycje {len(self.obstacles)} przeszkód typu {obstacleType} do obstacles.csv")
-
     # Implementations needed for BaseAviary / Gymnasium
+    def _addObstacles(self):
+        return
+    
     def _actionSpace(self):
         act_lower_bound = np.array([[0., 0., 0., 0.] for i in range(self.NUM_DRONES)])
         act_upper_bound = np.array([[self.MAX_RPM, self.MAX_RPM, self.MAX_RPM, self.MAX_RPM] for i in range(self.NUM_DRONES)])
@@ -134,10 +97,9 @@ class SwarmBaseWorld(BaseAviary):
     def _computeInfo(self):
         return {"answer": 42}
 
-
 # Abstract methods to implement in children
     @abstractmethod
-    def generate_obstacles(self) -> List[Obstacle]:
+    def generate_obstacles(self) -> ObstaclesData:
         raise NotImplementedError("Subclasses must implement the generate_obstacles method.")
     
     @abstractmethod

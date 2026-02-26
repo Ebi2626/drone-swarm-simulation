@@ -34,14 +34,14 @@ class ExperimentRunner:
         self.best_trajectories = None
         self.start_positions = np.array(cfg.environment.get("initial_xyzs"))
         self.end_positions = np.array(cfg.environment.get("end_xyzs"))
-        self.ground_position = cfg.environment.get("ground_position")
-        self.track_length = cfg.environment.get("track_length")
-        self.track_width = cfg.environment.get("track_width")
-        self.track_height = cfg.environment.get("track_height")
-        self.obstacles_number = cfg.environment.get("obstacles_number")
-        self.obstacle_width = cfg.environment.get("obstacle_width")
-        self.obstacle_height = cfg.environment.get("obstacle_height")
-        self.obstacle_height = cfg.environment.get("obstacle_height")
+        self.ground_position = cfg.environment.params.get("ground_position")
+        self.track_length = cfg.environment.params.get("track_length")
+        self.track_width = cfg.environment.params.get("track_width")
+        self.track_height = cfg.environment.params.get("track_height")
+        self.obstacles_number = cfg.environment.params.get("obstacles_number")
+        self.obstacle_width = cfg.environment.params.get("obstacle_width")
+        self.obstacle_height = cfg.environment.params.get("obstacle_height")
+        self.obstacle_length = cfg.environment.params.get("obstacle_length")
 
     def _init_components(self):
         WorldClass = get_environment(self.cfg.environment.name)
@@ -51,13 +51,14 @@ class ExperimentRunner:
             initial_xyzs = self.start_positions,
             end_xyzs = self.end_positions,
             ground_position = self.ground_position,
-            track_length = self.cfg.track_length,
+            track_length = self.track_length,
             track_width = self.track_width,
             track_height = self.track_height,
             obstacles_number = self.obstacles_number,
             obstacle_width = self.obstacle_width,
             obstacle_length = self.obstacle_length,
             obstacle_height = self.obstacle_height,
+            drone_number=self.num_drones,
             gui=self.cfg.simulation.gui
         )
 

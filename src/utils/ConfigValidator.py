@@ -88,7 +88,6 @@ class ConfigValidator():
         self._validate_initial_positions(initial_xyzs, drone_number)
         self._validate_end_positions(end_xyzs, drone_number)
         self._validate_obstacles_parameters(obstacles_number, obstacle_width, obstacle_length, obstacle_height)
-        self._validate_world_boundaries_parameters(obstacles_number, obstacle_width, obstacle_length, obstacle_height)
         self._validate_world_boundaries_parameters(track_length, track_width, track_height, ground_position)
         self._validate_drone_parameters(drone_model)
         

@@ -61,7 +61,6 @@ class UrbanWorld(SwarmBaseWorld):
                          physics=physics,
                          initial_xyzs=initial_xyzs,
                          initial_rpys=initial_rpys,
-                         ground_position=ground_position,
                          obstacles=True,
                          **kwargs)
     

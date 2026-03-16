@@ -32,8 +32,8 @@ class ExperimentRunner:
         self.nsga3_optimizer = None 
         self.trajectories = None
         self.best_trajectories = None
-        self.start_positions = np.array(cfg.environment.get("initial_xyzs"))
-        self.end_positions = np.array(cfg.environment.get("end_xyzs"))
+        self.start_positions = np.array(cfg.environment.get("initial_xyzs"), dtype=np.int64)
+        self.end_positions = np.array(cfg.environment.get("end_xyzs"), dtype=np.int64)
         self.ground_position = cfg.environment.params.get("ground_position")
         self.track_length = cfg.environment.params.get("track_length")
         self.track_width = cfg.environment.params.get("track_width")
@@ -111,10 +111,10 @@ class ExperimentRunner:
                 self.cfg.environment.params.get("track_length"),
                 self.cfg.environment.params.get("track_height")
             ],
-            n_drones=self.num_drones,
-            n_waypoints=20,
-            start_positions=self.start_positions,
-            end_positions=self.end_positions,
+            n_drones=int(self.num_drones),
+            n_waypoints=100,
+            start_positions=self.start_positions.tolist(),
+            end_positions=self.end_positions.tolist(),
             obstacles=self.obstacles.data
         )
 
@@ -124,8 +124,8 @@ class ExperimentRunner:
         self._init_obstacles()
         self._init_nsga3_optimizer()
         self.trajectories = self.nsga3_optimizer.run_optimization(
-            pop_size=self.cfg.algorithm.params.get("pop_size", 1000),
-            n_gen=self.cfg.algorithm.params.get("n_gen", 200)
+            pop_size=self.cfg.algorithm.params.get("pop_size", 200),
+            n_gen=self.cfg.algorithm.params.get("n_gen", 100)
         )
         self.best_trajectories = self.nsga3_optimizer.get_best_trajectories(
             self.trajectories, n=5

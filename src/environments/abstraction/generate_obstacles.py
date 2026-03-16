@@ -33,7 +33,7 @@ class PlacementStrategy(Protocol):
         count: int,
         start_positions: Optional[NDArray[np.float64]] = None,
         target_positions: Optional[NDArray[np.float64]] = None,
-        safe_radius: float = 15.0
+        safe_radius: float = 1.5
     ) -> NDArray[np.float64]:
         """
         Generates obstacle positions within bounds.
@@ -157,8 +157,7 @@ def strategy_grid_jitter(
     valid_candidates = candidates[mask]
     
     # 7. Wybór ostatecznych punktów
-    available = valid_candidates.shape[0]
-    
+    available = int(valid_candidates.shape[0])
     if available < count:
         print(f"[WARN] Nie udało się wygenerować {count} przeszkód z zachowaniem bezpiecznej strefy.")
         print(f"       Zwiększ obszar lub zmniejsz liczbę przeszkód/promień. Dostępne: {available}")

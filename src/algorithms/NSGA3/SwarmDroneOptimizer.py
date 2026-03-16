@@ -40,7 +40,8 @@ class SwarmDroneOptimizer:
             algorithm,
             termination=('n_gen', n_gen),
             seed=1,
-            verbose=False # Warto widzieć postęp
+            verbose=True, # Warto widzieć postęp
+            return_least_infeasible=True
         )
         return res
     

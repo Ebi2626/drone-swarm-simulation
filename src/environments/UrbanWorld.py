@@ -59,6 +59,7 @@ class UrbanWorld(SwarmBaseWorld):
         
         super().__init__(drone_model=drone_model,
                          physics=physics,
+                         num_drones=len(initial_xyzs),
                          initial_xyzs=initial_xyzs,
                          initial_rpys=initial_rpys,
                          obstacles=True,

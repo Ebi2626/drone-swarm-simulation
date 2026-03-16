@@ -2,6 +2,7 @@ defaults:
   - _self_
   - environment: empty
   - algorithm: trajectory
+  - follower: pid
 
 num_drones: 5
 

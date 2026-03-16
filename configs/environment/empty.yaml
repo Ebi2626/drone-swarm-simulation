@@ -1,17 +1,27 @@
 name: "empty"
-class_name: "EmptyWorld"
 
 params:
   drone_model: "CF2X"
-  num_drones: 1
-  physics: "PYB"
-  neighbourhood_radius: .inf
-  pyb_freq: 240
-  ctrl_freq: 48
-  gui: true
-  record: false
+  num_drones: 5
+  ground_position: 0.1
+  track_length: 1000.0
+  track_width: 200.0
+  track_height: 120.0
+  obstacles_number: 0
+  obstacle_width: 15.0
+  obstacle_length: 15.0
+  obstacle_height: 30.0
 
-initial_xyzs: 
-  - [0.0, 0.0, 0.1]
+initial_xyzs:
+  - [95.0, 1.0, 0.5]
+  - [100.0, 1.0, 0.5]
+  - [105.0, 1.0, 0.5]
+  - [110.0, 1.0, 0.5]
+  - [115.0, 1.0, 0.5]
 
-target_position: [1200.0, 0.0, 50.0]
+end_xyzs:
+  - [95.0, 999.0, 0.5]
+  - [100.0, 999.0, 0.5]
+  - [105.0, 999.0, 0.5]
+  - [110.0, 999.0, 0.5]
+  - [115.0, 999.0, 0.5]

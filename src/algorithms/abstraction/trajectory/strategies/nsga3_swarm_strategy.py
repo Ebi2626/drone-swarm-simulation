@@ -199,7 +199,9 @@ class HeuristicSampling(Sampling):
         noise_xy = np.random.normal(0, 30.0, (n_samples, self.n_drones, self.n_inner_points, 2))
         
         # Szum Z: sigma = 5m (lekkie wahania wysokości)
-        noise_z = np.random.normal(0, 5.0, (n_samples, self.n_drones, self.n_inner_points, 1))
+        # Uwaga: składowa Z w X ma kształt (samples, drones, inner),
+        # więc noise_z musi mieć dokładnie 3 wymiary, bez końcowego singletona.
+        noise_z = np.random.normal(0, 5.0, (n_samples, self.n_drones, self.n_inner_points))
         
         X[..., :2] += noise_xy
         X[..., 2] += noise_z
@@ -254,6 +256,9 @@ def nsga3_swarm_strategy(
     n_partitions = calculate_n_partitions(pop_size, n_obj=3)
     ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=n_partitions)
     actual_pop_size = ref_dirs.shape[0]
+    if pop_size < actual_pop_size:
+        print(f"[NSGA-III Polyline] Zwiększam pop_size z {pop_size} do {actual_pop_size}, aby dopasować do liczby reference directions.")
+        pop_size = actual_pop_size
     
     print(f"[NSGA-III Polyline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Inner Pts: {n_inner}")
 

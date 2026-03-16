@@ -1,11 +1,11 @@
-name: "nsga3"
+name: "nsga3_fast"
 
 params:
-  pop_size: 200
-  n_gen: 100
-  n_inner_waypoints: 5
+  pop_size: 50
+  n_gen: 30
+  n_inner_waypoints: 3
   n_output_waypoints: 100
-  decision_mode: "safety"
+  decision_mode: "equal"
   min_dist: 1.5
   ignore_ratio: 0.1
   safety_margin: 1.0

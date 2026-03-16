@@ -6,12 +6,14 @@ import pybullet as p
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 
-from src import get_environment, get_algorithm
+from src import get_environment
+from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgorithm
+from src.algorithms.abstraction.count_trajectories import count_trajectories
+from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import nsga3_swarm_strategy
 from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.utils.SimulationLogger import SimulationLogger
-from src.utils.pybullet_utils import update_camera_position 
+from src.utils.pybullet_utils import update_camera_position
 from src.utils.input_utils import InputHandler, CommandType
-from src.algorithms.NSGA3.SwarmDroneOptimizer import SwarmDroneOptimizer
 
 class ExperimentRunner:
     def __init__(self, cfg: DictConfig):
@@ -29,11 +31,8 @@ class ExperimentRunner:
         self.logger = None
         self.input_handler = None
         self.obstacles: ObstaclesData = None
-        self.nsga3_optimizer = None 
-        self.trajectories = None
-        self.best_trajectories = None
-        self.start_positions = np.array(cfg.environment.get("initial_xyzs"), dtype=np.int64)
-        self.end_positions = np.array(cfg.environment.get("end_xyzs"), dtype=np.int64)
+        self.start_positions = np.array(cfg.environment.get("initial_xyzs"), dtype=np.float64)
+        self.end_positions = np.array(cfg.environment.get("end_xyzs"), dtype=np.float64)
         self.ground_position = cfg.environment.params.get("ground_position")
         self.track_length = cfg.environment.params.get("track_length")
         self.track_width = cfg.environment.params.get("track_width")
@@ -43,39 +42,62 @@ class ExperimentRunner:
         self.obstacle_height = cfg.environment.params.get("obstacle_height")
         self.obstacle_length = cfg.environment.params.get("obstacle_length")
 
-    def _init_components(self):
+    def _init_world(self):
         WorldClass = get_environment(self.cfg.environment.name)
         self.world = WorldClass(
-            drone_model = self.drone_model,
-            physics = self.phyics,
-            initial_xyzs = self.start_positions,
-            end_xyzs = self.end_positions,
-            ground_position = self.ground_position,
-            track_length = self.track_length,
-            track_width = self.track_width,
-            track_height = self.track_height,
-            obstacles_number = self.obstacles_number,
-            obstacle_width = self.obstacle_width,
-            obstacle_length = self.obstacle_length,
-            obstacle_height = self.obstacle_height,
+            drone_model=self.drone_model,
+            physics=self.phyics,
+            initial_xyzs=self.start_positions,
+            end_xyzs=self.end_positions,
+            ground_position=self.ground_position,
+            track_length=self.track_length,
+            track_width=self.track_width,
+            track_height=self.track_height,
+            obstacles_number=self.obstacles_number,
+            obstacle_width=self.obstacle_width,
+            obstacle_length=self.obstacle_length,
+            obstacle_height=self.obstacle_height,
             drone_number=self.num_drones,
             gui=self.cfg.simulation.gui
         )
 
-        alg_name = self.cfg.algorithm.class_name
-        AlgClass = get_algorithm(alg_name)
-        self.algorithm = AlgClass(
-            parent=self,
-            num_drones=self.num_drones, 
-            params=self.cfg.algorithm.params,
+    def _init_obstacles(self) -> None:
+        self.obstacles = self.world.generate_obstacles()
+
+    def _compute_trajectories(self):
+        """Compute trajectories using count_trajectories with nsga3_swarm_strategy."""
+        world_data = self.world._generate_world_def()
+        algorithm_params = OmegaConf.to_container(self.cfg.algorithm.params, resolve=True)
+        n_output_waypoints = algorithm_params.get("n_output_waypoints", 100)
+
+        trajectories = count_trajectories(
+            world_data=world_data,
+            obstacles_data=self.obstacles,
+            counting_protocol=nsga3_swarm_strategy,
+            drone_swarm_size=self.num_drones,
+            number_of_waypoints=n_output_waypoints,
+            start_positions=self.start_positions.astype(np.float64),
+            target_positions=self.end_positions.astype(np.float64),
+            algorithm_params=algorithm_params
+        )
+        return trajectories
+
+    def _init_follower(self, trajectories):
+        """Create trajectory follower with pre-computed trajectories."""
+        follower_params = OmegaConf.to_container(self.cfg.follower.params, resolve=True)
+        self.algorithm = TrajectoryFollowingAlgorithm(
+            num_drones=self.num_drones,
+            trajectories=trajectories,
+            params=follower_params
         )
 
+    def _init_logger(self):
         if self.cfg.logging.enabled:
             try:
                 output_dir = HydraConfig.get().runtime.output_dir
             except Exception:
                 output_dir = os.getcwd()
-            
+
             self.logger = SimulationLogger(
                 output_dir=output_dir,
                 log_freq=self.cfg.logging.log_freq,
@@ -83,15 +105,12 @@ class ExperimentRunner:
                 num_drones=self.num_drones
             )
 
-        if self.cfg.simulation.gui:
-            self.input_handler = InputHandler(self.num_drones)
-
     def _update_camera(self, all_states):
         if not self.cfg.visualization.camera_follow:
             return
 
         target_state = all_states[self.tracked_drone_id]
-                
+
         update_camera_position(
             drone_state=target_state,
             distance=self.cfg.visualization.camera_distance,
@@ -99,49 +118,40 @@ class ExperimentRunner:
             pitch=self.cfg.visualization.camera_pitch
         )
 
-    def _init_obstacles(self) -> None:
-        self.obstacles = self.world.generate_obstacles()
-    
-    def _init_nsga3_optimizer(self):
-        print("Initializing NSGA-3 optimizer...")
-        print(self.cfg.environment)
-        self.nsga3_optimizer = SwarmDroneOptimizer(
-            space_limits=[
-                self.cfg.environment.params.get("track_width"),
-                self.cfg.environment.params.get("track_length"),
-                self.cfg.environment.params.get("track_height")
-            ],
-            n_drones=int(self.num_drones),
-            n_waypoints=100,
-            start_positions=self.start_positions.tolist(),
-            end_positions=self.end_positions.tolist(),
-            obstacles=self.obstacles.data
-        )
-
     def run(self):
         print("Running experiment...")
-        self._init_components()
+
+        # 1. Create world and generate obstacles
+        self._init_world()
         self._init_obstacles()
-        self._init_nsga3_optimizer()
-        self.trajectories = self.nsga3_optimizer.run_optimization(
-            pop_size=self.cfg.algorithm.params.get("pop_size", 200),
-            n_gen=self.cfg.algorithm.params.get("n_gen", 100)
-        )
-        self.best_trajectories = self.nsga3_optimizer.get_best_trajectories(
-            self.trajectories, n=5
-        )
+
+        # 2. Compute trajectories via new optimizer flow
+        print("Computing trajectories via NSGA-III...")
+        trajectories = self._compute_trajectories()
+        print(f"Trajectories computed: shape {trajectories.shape}")
+
+        # 3. Create follower with ready trajectories
+        self._init_follower(trajectories)
+
+        # 4. Render world
         self.world.draw_obstacles(self.obstacles)
         self.world.reset()
 
+        # 5. Init logger and input handler
+        self._init_logger()
+        if self.cfg.simulation.gui:
+            self.input_handler = InputHandler(self.num_drones)
+
+        # 6. Simulation loop
         is_running = False
         current_step = 0
         max_steps = int(self.cfg.simulation.duration_sec * self.ctrl_freq)
-        
+
         if not self.cfg.simulation.gui:
             is_running = True
 
         start_real_time = time.time()
-        print(f"[DEBUG] Start symulacji na {max_steps} kroków. O godzinie: {start_real_time:.2f}s ---")
+        print(f"[DEBUG] Starting simulation for {max_steps} steps.")
         while current_step < max_steps:
             loop_start = time.time()
 
@@ -150,44 +160,36 @@ class ExperimentRunner:
                 if cmd:
                     if cmd.type == CommandType.TOGGLE_SIMULATION:
                         is_running = not is_running
-                    
                     elif cmd.type == CommandType.SWITCH_DRONE_CAMERA:
                         self.tracked_drone_id = cmd.payload
 
             all_states = [self.world._getDroneStateVector(d) for d in range(self.num_drones)]
             if is_running:
                 sim_time = current_step / self.ctrl_freq
-                
-                # A. Decyzja algorytmu
+
                 actions = self.algorithm.compute_actions(all_states, current_time=sim_time)
-                
-                # B. Krok fizyki
                 self.world.step(actions)
-                
-                # C. Logowanie
+
                 if self.logger:
                     self.logger.log_step(current_step, sim_time, all_states)
-                    for d_id, o_id in self.world.get_detailed_collisions():
-                        self.logger.log_collision(sim_time, d_id, o_id)
 
                 current_step += 1
 
             if self.cfg.simulation.gui:
                 self._update_camera(all_states)
                 self.world.render()
-                
-                # Utrzymanie stałego FPS
+
                 elapsed = time.time() - loop_start
                 target_period = 1.0 / self.ctrl_freq
-                
+
                 if elapsed < target_period:
                     time.sleep(target_period - elapsed)
-                
+
                 if not p.isConnected():
                     break
 
         duration = time.time() - start_real_time
-        print(f"[DEBUG] Koniec symulacji. Czas: {duration:.2f}s ---")
+        print(f"[DEBUG] Simulation finished. Duration: {duration:.2f}s")
         if self.logger:
             self.logger.save()
         self.world.close()

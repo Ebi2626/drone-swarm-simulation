@@ -1,6 +1,7 @@
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from src.environments.SwarmBaseWorld import SwarmBaseWorld
 from src.environments.abstraction.generate_obstacles import ObstaclesData, generate_obstacles, strategy_empty
+from src.environments.abstraction.generate_world_boundaries import generate_world_boundaries
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 from src.utils.ConfigValidator import ConfigValidator
 from src.utils.config_parser import sanitize_init_params
@@ -64,6 +65,9 @@ class EmptyWorld(SwarmBaseWorld):
                          obstacles=True,
                          **kwargs)
         
+
+    def _generate_world_def(self):
+        return generate_world_boundaries(self.track_width, self.track_length, self.track_height, self.ground_position)
 
     def generate_obstacles(self) -> ObstaclesData:
         return generate_obstacles(

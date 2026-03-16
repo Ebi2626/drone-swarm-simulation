@@ -1,0 +1,6 @@
+name: "pid"
+
+params:
+  acceptance_radius: 0.2
+  drone_model: "CF2X"
+  simulation_freq_hz: 240

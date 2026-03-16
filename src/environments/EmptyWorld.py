@@ -80,8 +80,8 @@ class EmptyWorld(SwarmBaseWorld):
             target_positions=positions_to_tensor(self.end_xyzs)
         )
     
-    def draw_obstacles(self) -> None:
-        print("[DEBUG] Generating empty environment...") 
+    def draw_obstacles(self, obstacles: ObstaclesData) -> None:
+        print("[DEBUG] Generating empty environment...")
         self._init_render_silently()
         self._setup_environment(self.track_length, self.track_width, self.track_height, ground_color=[0.4, 0.4, 0.45, 1.0])
         print("[DEBUG] Empty environment generated.")

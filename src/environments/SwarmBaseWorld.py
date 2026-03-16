@@ -103,5 +103,5 @@ class SwarmBaseWorld(BaseAviary):
         raise NotImplementedError("Subclasses must implement the generate_obstacles method.")
     
     @abstractmethod
-    def draw_obstacles(self):
+    def draw_obstacles(self, obstacles: ObstaclesData):
         raise NotImplementedError("Subclasses must implement the draw_obstacles method.")

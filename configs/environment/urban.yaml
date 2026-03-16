@@ -13,7 +13,7 @@ params:
   track_height: 120.0 # Z-axis (max)
 
   # Obstacles parameters
-  obstacles_number: 1
+  obstacles_number: 63
   obstacle_width: 15.0
   obstacle_length: 15.0
   obstacle_height: 15.0

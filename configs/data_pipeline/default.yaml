@@ -1,0 +1,15 @@
+name: "default"
+
+save:
+  enabled: true
+  output_dir: null
+  world_data: true
+  obstacles: true
+  trajectories: true
+  positions: true
+
+load:
+  enabled: false
+  input_dir: null
+  obstacles: true
+  trajectories: true

@@ -69,10 +69,16 @@ class UrbanWorld(SwarmBaseWorld):
         return generate_world_boundaries(self.track_width, self.track_length, self.track_height, self.ground_position)
 
     def _create_building(self, obstacle):
-        shade = np.random.uniform(0.6, 0.9)
+        palette = [
+            [0.82, 0.46, 0.28, 1.0],
+            [0.30, 0.55, 0.82, 1.0],
+            [0.42, 0.72, 0.40, 1.0],
+            [0.78, 0.72, 0.32, 1.0],
+            [0.62, 0.46, 0.78, 1.0],
+        ]
         x, y, z = obstacle[0], obstacle[1], obstacle[2]
-        length, width, height = obstacle[3], obstacle[4], obstacle[5]        
-        color = [shade, shade, shade, 1]
+        length, width, height = obstacle[3], obstacle[4], obstacle[5]
+        color = palette[np.random.randint(0, len(palette))]
 
         base_z = z + height/2
 

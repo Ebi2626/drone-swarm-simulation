@@ -3,12 +3,14 @@ defaults:
   - environment: empty
   - algorithm: trajectory
   - follower: pid
+  - data_pipeline: default
 
 num_drones: 5
 
 simulation:
-  duration_sec: 12
+  duration_sec: 120
   gui: true
+  autostart: true
   pyb_freq: 240
   ctrl_freq: 48
   drone_model: "CF2X"

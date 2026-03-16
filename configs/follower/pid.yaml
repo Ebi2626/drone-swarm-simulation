@@ -1,6 +1,8 @@
 name: "pid"
 
 params:
-  acceptance_radius: 0.2
+  acceptance_radius: 1.0
+  lookahead_steps: 2
+  min_target_z: 1.0
+  control_freq_hz: 48
   drone_model: "CF2X"
-  simulation_freq_hz: 240

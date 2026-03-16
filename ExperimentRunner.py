@@ -1,5 +1,7 @@
 import os
 import time
+from pathlib import Path
+
 import hydra
 import numpy as np
 import pybullet as p
@@ -11,6 +13,13 @@ from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgor
 from src.algorithms.abstraction.count_trajectories import count_trajectories
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import nsga3_swarm_strategy
 from src.environments.abstraction.generate_obstacles import ObstaclesData
+from src.utils.DataPipelineReader import load_obstacles_csv, load_trajectories_csv
+from src.utils.DataPipelineWriter import (
+    save_obstacles_csv,
+    save_start_end_positions_csv,
+    save_trajectories_csv,
+    save_world_data_csv,
+)
 from src.utils.SimulationLogger import SimulationLogger
 from src.utils.pybullet_utils import update_camera_position
 from src.utils.input_utils import InputHandler, CommandType
@@ -41,6 +50,7 @@ class ExperimentRunner:
         self.obstacle_width = cfg.environment.params.get("obstacle_width")
         self.obstacle_height = cfg.environment.params.get("obstacle_height")
         self.obstacle_length = cfg.environment.params.get("obstacle_length")
+        self.data_pipeline_cfg = cfg.get("data_pipeline")
 
     def _init_world(self):
         WorldClass = get_environment(self.cfg.environment.name)
@@ -80,7 +90,46 @@ class ExperimentRunner:
             target_positions=self.end_positions.astype(np.float64),
             algorithm_params=algorithm_params
         )
-        return trajectories
+        return world_data, trajectories
+
+    def _get_pipeline_output_dir(self) -> Path:
+        configured = self.data_pipeline_cfg.save.get("output_dir", None)
+        if configured:
+            return Path(configured)
+        try:
+            return Path(HydraConfig.get().runtime.output_dir) / "data"
+        except Exception:
+            return Path(os.getcwd()) / "data"
+
+    def _maybe_save_pipeline_data(self, world_data, obstacles, trajectories) -> None:
+        if not self.data_pipeline_cfg or not self.data_pipeline_cfg.save.enabled:
+            return
+
+        output_dir = self._get_pipeline_output_dir()
+        if self.data_pipeline_cfg.save.get("world_data", True):
+            save_world_data_csv(world_data, output_dir)
+        if self.data_pipeline_cfg.save.get("obstacles", True):
+            save_obstacles_csv(obstacles, output_dir)
+        if self.data_pipeline_cfg.save.get("trajectories", True):
+            save_trajectories_csv(trajectories, output_dir)
+        if self.data_pipeline_cfg.save.get("positions", True):
+            save_start_end_positions_csv(self.start_positions, self.end_positions, output_dir)
+
+    def _maybe_load_pipeline_data(self):
+        if not self.data_pipeline_cfg or not self.data_pipeline_cfg.load.enabled:
+            return None, None
+
+        input_dir = self.data_pipeline_cfg.load.get("input_dir")
+        if not input_dir:
+            raise ValueError("data_pipeline.load.enabled=true wymaga ustawienia data_pipeline.load.input_dir")
+
+        obstacles = self.obstacles
+        trajectories = None
+        if self.data_pipeline_cfg.load.get("obstacles", True):
+            obstacles = load_obstacles_csv(input_dir)
+        if self.data_pipeline_cfg.load.get("trajectories", True):
+            trajectories = load_trajectories_csv(input_dir, self.num_drones)
+        return obstacles, trajectories
 
     def _init_follower(self, trajectories):
         """Create trajectory follower with pre-computed trajectories."""
@@ -121,34 +170,50 @@ class ExperimentRunner:
     def run(self):
         print("Running experiment...")
 
-        # 1. Create world and generate obstacles
+        # 1. Create world and prepare data
         self._init_world()
         self._init_obstacles()
+        world_data = self.world._generate_world_def()
 
-        # 2. Compute trajectories via new optimizer flow
-        print("Computing trajectories via NSGA-III...")
-        trajectories = self._compute_trajectories()
-        print(f"Trajectories computed: shape {trajectories.shape}")
+        loaded_obstacles, loaded_trajectories = self._maybe_load_pipeline_data()
+        if loaded_obstacles is not None:
+            self.obstacles = loaded_obstacles
 
-        # 3. Create follower with ready trajectories
+        if loaded_trajectories is not None:
+            trajectories = loaded_trajectories
+            print(f"Loaded trajectories from CSV: shape {trajectories.shape}")
+        else:
+            print("Computing trajectories via NSGA-III...")
+            world_data, trajectories = self._compute_trajectories()
+            print(f"Trajectories computed: shape {trajectories.shape}")
+
+        self._maybe_save_pipeline_data(world_data, self.obstacles, trajectories)
+
+        # 2. Create follower with ready trajectories
         self._init_follower(trajectories)
 
-        # 4. Render world
-        self.world.draw_obstacles(self.obstacles)
+        # 3. Reset simulation first, then render the generated world on top of it.
+        # Calling reset() after draw_obstacles() recreates the default PyBullet scene
+        # and visually overwrites the generated environment with the gray plane.
         self.world.reset()
+        self.world.draw_obstacles(self.obstacles)
+        if self.cfg.simulation.gui:
+            self.world._finalize_render()
 
-        # 5. Init logger and input handler
+        # 4. Init logger and input handler
         self._init_logger()
         if self.cfg.simulation.gui:
             self.input_handler = InputHandler(self.num_drones)
 
-        # 6. Simulation loop
-        is_running = False
+        # 5. Simulation loop
+        is_running = bool(self.cfg.simulation.get("autostart", True))
         current_step = 0
         max_steps = int(self.cfg.simulation.duration_sec * self.ctrl_freq)
 
         if not self.cfg.simulation.gui:
             is_running = True
+        elif not is_running:
+            print("[INFO] Simulation paused. Press SPACE to start.")
 
         start_real_time = time.time()
         print(f"[DEBUG] Starting simulation for {max_steps} steps.")

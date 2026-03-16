@@ -1,0 +1,15 @@
+name: "replay"
+
+save:
+  enabled: false
+  output_dir: null
+  world_data: false
+  obstacles: false
+  trajectories: false
+  positions: false
+
+load:
+  enabled: true
+  input_dir: null
+  obstacles: true
+  trajectories: true

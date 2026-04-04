@@ -15,6 +15,7 @@ dependencies:
   - pip                        # Menedżer pakietów Pythona
   - pymoo>=0.6.0
   - conda-forge::libstdcxx-ng
+  - typing_extensions          # Do typu NotRequired
   - pip:
       - git+https://github.com/utiasDSL/gym-pybullet-drones.git
       - mealpy>=3.0.0

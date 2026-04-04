@@ -1,17 +1,18 @@
 defaults:
   - _self_
-  - environment: empty
-  - algorithm: trajectory
+  - environment: urban
+  - optimizer: nsga-3
 
 num_drones: 5
 
 simulation:
-  duration_sec: 12
+  duration_sec: 180
   gui: true
   pyb_freq: 240
   ctrl_freq: 48
   drone_model: "CF2X"
   physics: "PYB"
+  sim_speed_multiplier: 2.0
 
 seed: 42
 experiment_name: "test_run"
@@ -20,11 +21,13 @@ logging:
   enabled: true
   log_freq: 1.0
 
+number_of_waypoints: 30
+
 visualization:
   camera_follow: true
   tracked_drone_id: 0
   camera_distance: 3.0
-  camera_yaw: -90.0
+  camera_yaw: -45.0
   camera_pitch: -30.0
 
 hydra:

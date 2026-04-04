@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 # Pymoo imports
 from pymoo.core.problem import Problem
 from pymoo.core.sampling import Sampling
+from pymoo.core.termination import Termination
 from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.optimize import minimize
 from pymoo.util.ref_dirs import get_reference_directions
@@ -41,6 +42,30 @@ try:
 except ImportError:
     class WorldData: bounds: Any
     class ObstaclesData: pass
+
+
+class MultiConditionTermination(Termination):
+    def __init__(self, n_max_gen, min_feasible_needed):
+        super().__init__()
+        self.n_max_gen = n_max_gen
+        self.min_feasible_needed = min_feasible_needed
+
+    def _update(self, algorithm):
+        # Pobieramy aktualną generację
+        n_gen = algorithm.n_iter
+        
+        # Pobieramy populację i sprawdzamy, ile rozwiązań jest dopuszczalnych (feasible)
+        # algorithm.pop.get("feasible") zwraca wektor boolowski (True tam, gdzie G <= 0)
+        feasible_mask = algorithm.pop.get("feasible")
+        n_feasible = np.sum(feasible_mask) if feasible_mask is not None else 0
+
+        # Obliczamy stopień postępu (0.0 do 1.0)
+        # Terminacja następuje, gdy progress >= 1.0
+        gen_progress = n_gen / self.n_max_gen
+        feasible_progress = n_feasible / self.min_feasible_needed if self.min_feasible_needed > 0 else 0
+        
+        # Zwracamy maksymalny postęp - algorytm zakończy się, gdy dowolny warunek zostanie spełniony
+        return max(gen_progress, feasible_progress)
 
 
 # --- Helper: Resampling Polyline ---
@@ -113,7 +138,7 @@ class SwarmOptimizationProblem(Problem):
         n_drones: int, 
         n_inner_points: int,  
         n_output_samples: int, 
-        bounds: NDArray,
+        world_data: WorldData,
         evaluator: VectorizedEvaluator,
         start_pos: NDArray,
         target_pos: NDArray
@@ -132,10 +157,16 @@ class SwarmOptimizationProblem(Problem):
 
         # Rozszerzamy granice o margines
         margin = 50.0 
-        xl_one_point = bounds[:, 0] - margin
-        xu_one_point = bounds[:, 1] + margin
+        # Kopiujemy i rzutujemy na float, aby nie nadpisać oryginalnych danych
+        xl_one_point = np.array(world_data.min_bounds, dtype=float) - margin
+        xu_one_point = np.array(world_data.max_bounds, dtype=float) + margin
+        
+        # [POPRAWKA] Twarda podłoga dla osi Z. Bezpieczna minimalna wysokość (np. 0.5m)
+        MIN_Z_ALTITUDE = 0.5 
+        xl_one_point[2] = max(MIN_Z_ALTITUDE, world_data.min_bounds[2])
         
         print(f"[Problem Polyline] Zmienne: {n_var}, Granice X: {xl_one_point[0]:.1f} - {xu_one_point[0]:.1f}")
+        print(f"[Problem Polyline] Granice Z: {xl_one_point[2]:.1f} - {xu_one_point[2]:.1f}")
         
         # Powielamy granice
         xl = np.tile(xl_one_point, n_drones * n_inner_points)
@@ -191,20 +222,26 @@ class HeuristicSampling(Sampling):
         points = s + t * (e - s) # (1, Drones, Inner, 3)
         X = np.tile(points, (n_samples, 1, 1, 1))
         
-        # 2. Szum (Agresywny)
-        # Zamiast 0.2m, dajemy np. 20-50m rozrzutu w poziomie (X, Y)
-        # W pionie (Z) mniej, żeby nie latały pod ziemią lub w kosmosie
-        
-        # Szum XY: sigma = 30m
-        noise_xy = np.random.normal(0, 30.0, (n_samples, self.n_drones, self.n_inner_points, 2))
-        
-        # Szum Z: sigma = 5m (lekkie wahania wysokości)
-        noise_z = np.random.normal(0, 5.0, (n_samples, self.n_drones, self.n_inner_points, 1))
-        
+        # 2. Szum (Agresywny w poziomie, bezpieczny w pionie)
+        # Zwiększamy szum XY do 50.0, aby łatwiej omijać bazę dużych przeszkód
+        noise_xy = np.random.normal(0, 20.0, (n_samples, self.n_drones, self.n_inner_points, 2))
         X[..., :2] += noise_xy
-        X[..., 2] += noise_z
         
-        # 3. Spłaszczanie i przycinanie do granic świata
+        # [NOWE PODEJŚCIE DLA Z] - Przestrzeń warstwowa zamiast Gaussa z obcinaniem.
+        # Drony dostają losową wysokość w bezpiecznym korytarzu powietrznym.
+        min_safe_z = 1.0    # Bezpieczna "podłoga"
+        max_flight_z = 50.0 # Maksymalny pułap operacyjny dla optymalizacji
+        
+        # Zabezpieczenie przed przekroczeniem górnych limitów mapy/świata
+        if problem.xu is not None:
+            # Zakładamy, że indeks 2 to oś Z w spłaszczonej tablicy xu
+            max_flight_z = min(max_flight_z, problem.xu[2] - 1.0)
+            
+        # Losujemy wartości równomiernie, co w 100% zachowuje różnorodność genetyczną
+        random_z = np.random.uniform(min_safe_z, max_flight_z, (n_samples, self.n_drones, self.n_inner_points))
+        X[..., 2] = random_z
+        
+        # 3. Spłaszczanie i przycinanie do granic świata (XY)
         X_flat = X.reshape(n_samples, -1)
         
         if problem.xl is not None and problem.xu is not None:
@@ -237,18 +274,26 @@ def nsga3_swarm_strategy(
     params = algorithm_params or {}
     pop_size = params.get("pop_size", 100)
     n_gen = params.get("n_gen", 100)
+    eta_c = params.get("eta_c")
+    eta_m = params.get("eta_m")
+    crossover_prob = params.get("crossover_prob", 0.9)
+    mutation_prob = params.get("mutation_prob", 0.1)
+    min_ideal_solutions = params.get("min_ideal_solutions", 30)
     
     # Domyślna liczba punktów wewnętrznych (kontrolnych)
     n_inner = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
     
     decision_mode = params.get("decision_mode", "knee_point")
+
+    termination = MultiConditionTermination(
+        n_max_gen=n_gen, 
+        min_feasible_needed=min_ideal_solutions
+    )
     
     if isinstance(obstacles_data, list):
         obs_list = obstacles_data
     else:
         obs_list = [obstacles_data]
-
-    bounds = world_data.bounds
     
     # 2. NSGA-III Setup
     n_partitions = calculate_n_partitions(pop_size, n_obj=3)
@@ -269,7 +314,7 @@ def nsga3_swarm_strategy(
         n_drones=drone_swarm_size,
         n_inner_points=n_inner,
         n_output_samples=number_of_waypoints, 
-        bounds=bounds,
+        world_data=world_data,
         evaluator=evaluator,
         start_pos=start_positions,
         target_pos=target_positions
@@ -286,8 +331,8 @@ def nsga3_swarm_strategy(
         pop_size=pop_size,
         ref_dirs=ref_dirs,
         sampling=sampling,
-        crossover=SBX(prob=0.9, eta=10),
-        mutation=PM(eta=10, prob=0.3),
+        crossover=SBX(prob=crossover_prob, eta=eta_c),
+        mutation=PM(eta=eta_m, prob=mutation_prob),
         eliminate_duplicates=True
     )
     
@@ -295,7 +340,7 @@ def nsga3_swarm_strategy(
     res = minimize(
         problem,
         algorithm,
-        termination=('n_gen', n_gen),
+        termination=termination,
         seed=1,
         verbose=True,
         save_history=True
@@ -324,18 +369,25 @@ def nsga3_swarm_strategy(
         except Exception as e:
             print(f"[NSGA-III] Błąd podczas wyboru rozwiązania: {e}")
             # Fallback w razie błędu decydenta
-            t = np.linspace(0, 1, number_of_waypoints)
-            out = np.empty((drone_swarm_size, number_of_waypoints, 3))
-            for d in range(drone_swarm_size):
-                for i in range(3):
-                    out[d, :, i] = np.interp(t, [0, 1], [start_positions[d, i], target_positions[d, i]])
-            return out
+            raise LookupError("Results not found")
         
     else:
         print("[NSGA-III] Brak rozwiązań. Zwracam linię prostą.")
         t = np.linspace(0, 1, number_of_waypoints)
         out = np.empty((drone_swarm_size, number_of_waypoints, 3))
+
+        MIN_SAFE_ALTITUDE = params.get("min_safe_altitude", 1.0)  # metry nad ziemią
+        print("Target positions: ")
+
         for d in range(drone_swarm_size):
-            for i in range(3):
+            # Osie X i Y: zwykła interpolacja liniowa
+            for i in range(2):
                 out[d, :, i] = np.interp(t, [0, 1], [start_positions[d, i], target_positions[d, i]])
+                print(target_positions[d, i])
+            
+            # Oś Z: interpolacja z gwarantowaną minimalną wysokością
+            z_start  = max(start_positions[d, 2],  MIN_SAFE_ALTITUDE)
+            z_target = max(target_positions[d, 2], MIN_SAFE_ALTITUDE)
+            out[d, :, 2] = np.interp(t, [0, 1], [z_start, z_target])
+
         return out

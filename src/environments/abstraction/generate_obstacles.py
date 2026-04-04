@@ -1,8 +1,14 @@
 import numpy as np
-from typing import NamedTuple, Optional, Protocol
+from typing import NamedTuple, Optional, Protocol, TypedDict
+from typing_extensions import NotRequired
 from numpy.typing import NDArray
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.environments.obstacles.ObstacleShape import ObstacleShape
+
+class SizeParams(TypedDict):
+    height: float
+    width: float
+    length: NotRequired[float]
 
 class ObstaclesData(NamedTuple):
     """
@@ -185,12 +191,13 @@ def strategy_empty(
     # Zwraca pustą macierz o poprawnym kształcie (0 wierszy, 3 kolumny: X, Y, Z)
     return np.empty((0, 3), dtype=np.float64)
 
+
 def generate_obstacles(
     world: WorldData,
     n_obstacles: int,
-    shape_type: ObstacleShape = ObstacleShape.CYLINDER,
+    shape_type: ObstacleShape = ObstacleShape.BOX,
     placement_strategy: PlacementStrategy = strategy_random_uniform,
-    size_params: dict = {'radius': 5.0, 'height': 20.0, 'width': 5.0, 'length': 5.0},
+    size_params: SizeParams = {'height': 20.0, 'width': 5.0, 'length': 5.0},
     start_positions: np.ndarray = None,
     target_positions: np.ndarray = None,
     safe_radius: float = 15.0
@@ -229,7 +236,7 @@ def generate_obstacles(
     # Different shapes can be used depending on the requirements
     if shape_type == ObstacleShape.CYLINDER:
         # [radius, height, 0]
-        r = size_params.get('radius', 5.0)
+        r = size_params.get('width', 5.0)
         h = size_params.get('height', 10.0)
         dimensions[:, 0] = r
         dimensions[:, 1] = h

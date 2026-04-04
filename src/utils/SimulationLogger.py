@@ -1,5 +1,12 @@
 import os
 import csv
+from numpy.typing import NDArray
+import pandas as pd
+import numpy as np
+
+from src.environments.abstraction.generate_obstacles import ObstaclesData
+from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 class SimulationLogger:
     def __init__(self, output_dir, log_freq, ctrl_freq, num_drones):
@@ -46,6 +53,82 @@ class SimulationLogger:
             ))
             
             print(f"[LOGGER] Collision! Drone {drone_id} hit object {other_body_id} (t={current_time:.2f}s)")
+    
+    def _trajectory_to_dataframe(self, trajectory: NDArray) -> pd.DataFrame:
+        """
+        Konwertuje tablicę trajektorii do DataFrame gotowego do zapisu CSV.
+        
+        Args:
+            trajectory: NDArray kształtu (n_drones, n_waypoints, 3)
+            
+        Returns:
+            pd.DataFrame z kolumnami: drone_id, waypoint_id, x, y, z
+        """
+        n_drones, n_waypoints, _ = trajectory.shape
+        
+        # Tworzymy indeksy za pomocą meshgrid (w pełni wektoryzowane)
+        drone_ids, waypoint_ids = np.meshgrid(
+            np.arange(n_drones),
+            np.arange(n_waypoints),
+            indexing='ij'
+        )
+        
+        return pd.DataFrame({
+            "drone_id":    drone_ids.ravel(),
+            "waypoint_id": waypoint_ids.ravel(),
+            "x":           trajectory[:, :, 0].ravel(),
+            "y":           trajectory[:, :, 1].ravel(),
+            "z":           trajectory[:, :, 2].ravel(),
+        })
+
+    def _obstacles_to_dataframe(self, obstacles: ObstaclesData) -> pd.DataFrame:
+        columns = ['x', 'y', 'z']
+        shape_type = obstacles.shape_type
+        if shape_type == ObstacleShape.BOX:
+            columns.extend(["length", "width", "height"])
+        elif shape_type == ObstacleShape.CYLINDER:
+            columns.extend(["radius", "height", "unused_dim"])
+        else:
+            raise ValueError("Wrong obstacles shape type: ", shape_type)
+        
+        df = pd.DataFrame(obstacles.data, columns=columns)
+
+        if shape_type is ObstacleShape.CYLINDER:
+            df = df.drop(columns=['dim3_unused'])
+
+        return df
+    
+    def _world_to_dataframe(self, world: WorldData) -> pd.DataFrame:
+        data = {
+            'Dimension': world.dimensions,
+            'Min_Bound': world.min_bounds,
+            'Max_Bound': world.max_bounds,
+            'Center': world.center
+        }
+        
+        # Przekazanie etykiet osi X, Y, Z jako indeksów wierszy
+        df = pd.DataFrame(data, index=['X', 'Y', 'Z'])
+        
+        return df
+        
+
+    def log_chosen_trajectories(self, trajectories: NDArray):
+        trajectories_data_frame = self._trajectory_to_dataframe(trajectories)
+        path = os.path.join(self.output_dir, "counted_trajectories.csv")
+        trajectories_data_frame.to_csv(path, index=False, float_format="%.4f")
+        print(f"Zapisano {len(trajectories_data_frame)} punktów do: {path}")
+
+    def log_world_dimensions(self, world: WorldData):
+        world_data_frame = self._world_to_dataframe(world)
+        path = os.path.join(self.output_dir, "world_boundaries.csv")
+        world_data_frame.to_csv(path, index=True, index_label="Axis", float_format="%.4f")
+        print(f"Zapisano {len(world_data_frame)} punktów do: {path}")
+
+    def log_obstacles(self, obstacles: ObstaclesData):
+        obstacles_data_frame = self._obstacles_to_dataframe(obstacles)
+        path = os.path.join(self.output_dir, "generated_obstacles.csv")
+        obstacles_data_frame.to_csv(path, index=False, float_format="%.4f")
+        print(f"Zapisano {len(obstacles_data_frame)} pozycji przeszkód do: {path}")
 
     def save(self):
         print("[LOGGER] Saving data to disk...")

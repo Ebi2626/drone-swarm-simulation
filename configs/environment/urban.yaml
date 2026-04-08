@@ -1,5 +1,3 @@
-# configs/environment/urban.yaml
-
 _target_: src.environments.UrbanWorld.UrbanWorld
 
 name: "urban"
@@ -18,7 +16,7 @@ params:
   # Obstacles parameters
   shape_type: 'BOX'
   placement_strategy: 'strategy_grid_jitter'
-  obstacles_number: 63
+  obstacles_number: 37
   obstacle_width: 15.0
   obstacle_length: 15.0
   obstacle_height: 15.0

@@ -19,6 +19,7 @@ from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
 
 from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.core_math import get_xp
+from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 # Komponenty wewnętrzne
 # UWAGA: Upewnij się, że importujesz poprawnie swoje moduły
@@ -204,12 +205,22 @@ class HeuristicSampling(Sampling):
     Inicjalizuje populację punktami leżącymi wokół prostej Start->Cel.
     Generuje punkty z dużym rozrzutem, aby zwiększyć szansę na ominięcie przeszkód.
     """
-    def __init__(self, start_pos: NDArray, target_pos: NDArray, n_inner_points: int, n_drones: int):
+    def __init__(
+            self, 
+            start_pos: NDArray, 
+            target_pos: NDArray, 
+            n_inner_points: int, 
+            n_drones: int,
+            world_data: WorldData,
+            obstacles_data: ObstaclesData
+            ):
         super().__init__()
         self.start = start_pos
         self.target = target_pos
         self.n_inner_points = n_inner_points
         self.n_drones = n_drones
+        self.world_data = world_data
+        self.obstacles_data = obstacles_data
 
     def _do(self, problem, n_samples, **kwargs):
         # 1. Baza: Punkty na prostej
@@ -222,21 +233,27 @@ class HeuristicSampling(Sampling):
         points = s + t * (e - s) # (1, Drones, Inner, 3)
         X = np.tile(points, (n_samples, 1, 1, 1))
         
-        # 2. Szum (Agresywny w poziomie, bezpieczny w pionie)
-        # Zwiększamy szum XY do 50.0, aby łatwiej omijać bazę dużych przeszkód
-        noise_xy = np.random.normal(0, 20.0, (n_samples, self.n_drones, self.n_inner_points, 2))
-        X[..., :2] += noise_xy
+        # 2. Szum (Agresywny w poziomie (wymiar przeszkody), bezpieczny w pionie)
+        if self.obstacles_data is not None and self.obstacles_data.data is not None and len(self.obstacles_data.data) > 0 and self.obstacles_data.data[0] is not None:
+            if self.obstacles_data.shape_type == ObstacleShape.BOX:
+                horizontal_dims = self.obstacles_data.data[:, 3:5]
+            elif self.obstacles_data.shape_type == ObstacleShape.CYLINDER:
+                horizontal_dims = self.obstacles_data.data[:, 3:4]
+            max_horizontal_size = np.max(horizontal_dims)
+            noise_xy = np.random.normal(0, max_horizontal_size, (n_samples, self.n_drones, self.n_inner_points, 2))
+            X[..., :2] += noise_xy
         
-        # [NOWE PODEJŚCIE DLA Z] - Przestrzeń warstwowa zamiast Gaussa z obcinaniem.
+        # Przestrzeń warstwowa zamiast Gaussa z obcinaniem.
         # Drony dostają losową wysokość w bezpiecznym korytarzu powietrznym.
-        min_safe_z = 1.0    # Bezpieczna "podłoga"
-        max_flight_z = 50.0 # Maksymalny pułap operacyjny dla optymalizacji
+        min_safe_z = 0.5    # Bezpieczna "podłoga"
+        max_flight_z = self.world_data.max_bounds[2] # Maksymalny pułap operacyjny dla optymalizacji
         
         # Zabezpieczenie przed przekroczeniem górnych limitów mapy/świata
         if problem.xu is not None:
             # Zakładamy, że indeks 2 to oś Z w spłaszczonej tablicy xu
-            max_flight_z = min(max_flight_z, problem.xu[2] - 1.0)
+            max_flight_z = min(max_flight_z, problem.xu[2] - 3.0)
             
+        print("Lecimy poniżej: ", max_flight_z)
         # Losujemy wartości równomiernie, co w 100% zachowuje różnorodność genetyczną
         random_z = np.random.uniform(min_safe_z, max_flight_z, (n_samples, self.n_drones, self.n_inner_points))
         X[..., 2] = random_z
@@ -324,7 +341,9 @@ def nsga3_swarm_strategy(
         start_pos=start_positions,
         target_pos=target_positions,
         n_inner_points=n_inner,
-        n_drones=drone_swarm_size
+        n_drones=drone_swarm_size,
+        world_data=world_data,
+        obstacles_data=obstacles_data
     )
     
     algorithm = NSGA3(
@@ -350,9 +369,12 @@ def nsga3_swarm_strategy(
     if res.X is not None and len(res.X) > 0:
         dm: DecisionStrategyProtocol
         try:
-            if decision_mode == "safety": dm = SafetyPriorityDecision()
-            elif decision_mode == "equal": dm = EqualWeightsDecision()
-            else: dm = KneePointDecision()
+            if decision_mode == "safety": 
+                dm = SafetyPriorityDecision()
+            elif decision_mode == "equal": 
+                dm = EqualWeightsDecision()
+            else: 
+                dm = KneePointDecision()
             
             best_idx = dm.select_best(res.F, res.G)
             best_genotype_flat = res.X[best_idx]

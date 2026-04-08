@@ -125,6 +125,9 @@ class SimulationLogger:
         print(f"Zapisano {len(world_data_frame)} punktów do: {path}")
 
     def log_obstacles(self, obstacles: ObstaclesData):
+        if obstacles is None:
+            print("Brak przeszkód - plik z logami dotyczącymi pozycji przeszkód nie zostanie utworzony")
+            return
         obstacles_data_frame = self._obstacles_to_dataframe(obstacles)
         path = os.path.join(self.output_dir, "generated_obstacles.csv")
         obstacles_data_frame.to_csv(path, index=False, float_format="%.4f")

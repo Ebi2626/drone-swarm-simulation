@@ -107,7 +107,7 @@ def calc_elevation_changes(trajectories: NDArray[np.float64]) -> NDArray[np.floa
 
 def calc_collision_risk_segments(
     trajectories: NDArray[np.float64], 
-    obstacles_list: List[ObstaclesData], 
+    obstacles_list: Optional[List[ObstaclesData]], 
     safety_margin: float = 1.0
 ) -> NDArray[np.float64]:
     """
@@ -116,7 +116,7 @@ def calc_collision_risk_segments(
 
     Args:
         trajectories: Tensor (Pop, Drones, Waypoints, 3).
-        obstacles_list: Lista batchy przeszkód.
+        obstacles_list: Lista batchy przeszkód (opcjonalna - dla pustego świata).
         safety_margin: Dodatkowy bufor bezpieczeństwa dodawany do promienia przeszkody.
         
     Returns:
@@ -129,6 +129,9 @@ def calc_collision_risk_segments(
     seg_ends = trajectories[:, :, 1:, :].reshape(-1, 3)
     
     total_violation = xp.zeros(pop_size)
+
+    if obstacles_list is None or len(obstacles_list) == 0 or (len(obstacles_list) == 1 and obstacles_list[0] is None):
+        return total_violation
     
     for obs_batch in obstacles_list:
         data = to_device(obs_batch.data, xp)
@@ -298,12 +301,12 @@ class VectorizedEvaluator:
     
     def __init__(
         self, 
-        obstacles: List[ObstaclesData], 
+        obstacles: Optional[List[ObstaclesData]], 
         start_pos: NDArray, 
         target_pos: NDArray,
         params: Optional[Dict[str, Any]] = None
     ):
-        self.obstacles = obstacles
+        self.obstacles = obstacles if obstacles is not None else []
         self.start = start_pos
         self.target = target_pos
         self.params = params or {}

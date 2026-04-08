@@ -57,19 +57,70 @@ class PlacementStrategy(Protocol):
         """
         ...
 
-def strategy_random_uniform(min_b: np.ndarray, max_b: np.ndarray, count: int) -> np.ndarray:
+def strategy_random_uniform(
+    min_b: np.ndarray, 
+    max_b: np.ndarray, 
+    count: int, 
+    start_positions: Optional[np.ndarray] = None,
+    target_positions: Optional[np.ndarray] = None,
+    safe_radius: float = 15.0,
+    *args
+) -> np.ndarray:
     """
-    Simple strategy to generate obstacles in completly random way
+    Simple strategy to generate obstacles in a completely random way,
+    excluding safe zones around start and target positions.
 
     Args:
         min_b (np.ndarray): minimal values of x, y, z - np.ndarray [min_x, min_y, min_z]
         max_b (np.ndarray): maximum values of x, y, z - np.ndarray [max_x, max_y, max_z]
         count (int): int - number of obstacles
+        start_positions (Optional[np.ndarray]): Start positions of the drone swarm
+        target_positions (Optional[np.ndarray]): Target positions of the drone swarm
+        safe_radius (float): Minimum allowed distance from obstacles to start/target points
 
     Returns:
         np.ndarray: positions of obstacles (N, 3) [x, y, z]
     """
-    return np.random.uniform(low=min_b, high=max_b, size=(count, 3))
+    # 1. Agregacja i unifikacja wszystkich chronionych punktów do formatu 2D
+    protected_points = []
+    if start_positions is not None:
+        protected_points.append(np.atleast_2d(start_positions))
+    if target_positions is not None:
+        protected_points.append(np.atleast_2d(target_positions))
+        
+    if protected_points:
+        protected_array = np.vstack(protected_points)
+    else:
+        protected_array = np.empty((0, 3))
+        
+    positions = np.zeros((0, 3))
+    
+    # 2. Metoda akceptacji-odrzucenia (Rejection Sampling)
+    while len(positions) < count:
+        needed = count - len(positions)
+        
+        # Generowanie paczki kandydatów
+        candidates = np.random.uniform(low=min_b, high=max_b, size=(needed, 3))
+        
+        if len(protected_array) > 0:
+            # Wektoryzowane obliczanie odległości euklidesowych (Broadcasting)
+            # candidates kształt: (needed, 1, 3), protected_array kształt: (1, K, 3)
+            diff = candidates[:, np.newaxis, :] - protected_array[np.newaxis, :, :]
+            distances = np.linalg.norm(diff, axis=2) # kształt: (needed, K)
+            
+            # Pobranie najmniejszej odległości do JAKIEGOKOLWIEK punktu chronionego
+            min_distances = np.min(distances, axis=1)
+            
+            # Akceptacja tylko tych kandydatów, którzy są bezpiecznie oddaleni
+            valid_candidates = candidates[min_distances >= safe_radius]
+        else:
+            valid_candidates = candidates
+            
+        # Dodanie zaakceptowanych kandydatów do głównej puli
+        positions = np.vstack((positions, valid_candidates))
+        
+    return positions
+
 
 def strategy_grid_jitter(
     min_b: np.ndarray, 

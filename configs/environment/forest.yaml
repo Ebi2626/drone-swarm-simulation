@@ -1,25 +1,47 @@
+_target_: src.environments.ForestWorld.ForestWorld
+
 name: "forest"
-class_name: "ForestWorld"
 
 params:
+  # Drone parameters
   drone_model: "CF2X"
   num_drones: 5
-  physics: "PYB"
-  pyb_freq: 240
-  ctrl_freq: 48
-  gui: true
-  
-  track_length: 600.0
-  track_width: 60.0
-  track_height: 11.0
-  num_trees: 600
-  tree_height: 10.0
-  tree_radius: 1.0
 
-target_position: 
-  - [600.0, 0.0, 5.0]
-  - [600.0, 0.0, 5.0]
-  - [600.0, 0.0, 5.0]
-  - [600.0, 0.0, 5.0]
-  - [600.0, 0.0, 5.0]
+  # Grid parameters (min(x, y) are 0)
+  ground_position: 0.1    # Z-axis (min)
+  track_length: 600.0    # Y-axis
+  track_width: 60.0      # X-axis
+  track_height: 11.0     # Z-axis (max)
+  
+  # Obstacles parameters
+  shape_type: 'CYLINDER'
+  placement_strategy: 'strategy_random_uniform'
+  obstacles_number: 20
+  obstacle_width: 1.0
+  obstacle_length: 1.0
+  obstacle_height: 10.0
+
+# Starting positions
+initial_xyzs:
+  - [20.0, 1.0, 1.5]
+  - [25.0, 1.0, 1.5]
+  - [30.0, 1.0, 1.5]
+  - [35.0, 1.0, 1.5]
+  - [40.0, 1.0, 1.5]
+
+# Target positions
+end_xyzs:
+  - [20.0, 598.0, 1.5]
+  - [25.0, 598.0, 1.5]
+  - [30.0, 598.0, 1.5]
+  - [35.0, 598.0, 1.5]
+  - [40.0, 598.0, 1.5]
+
+# Drone RPYS (Roll/Pith/Yaw)
+initial_rpys:
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
 

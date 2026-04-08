@@ -3,8 +3,6 @@ defaults:
   - environment: urban
   - optimizer: nsga-3
 
-num_drones: 5
-
 simulation:
   duration_sec: 180
   gui: true
@@ -21,13 +19,11 @@ logging:
   enabled: true
   log_freq: 1.0
 
-number_of_waypoints: 30
-
 visualization:
   camera_follow: true
   tracked_drone_id: 0
-  camera_distance: 3.0
-  camera_yaw: -45.0
+  camera_distance: 1.0
+  camera_yaw: -15.0
   camera_pitch: -30.0
 
 hydra:

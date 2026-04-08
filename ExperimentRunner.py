@@ -10,7 +10,6 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 
 from configs.environment.strategies.placement_strategies import get_placement_strategy
-from src import get_environment
 from src.environments.EmptyWorld import EmptyWorld
 from src.environments.ForestWorld import ForestWorld
 from src.environments.UrbanWorld import UrbanWorld
@@ -27,12 +26,10 @@ class ExperimentRunner:
         self.cfg = cfg
         self.drone_model = cfg.simulation.get("drone_model", "CF2X")
         self.phyics = cfg.simulation.get("physics", "PYB")
-        self.num_drones = cfg.num_drones
+        self.num_drones = cfg.environment.params.get("num_drones")
         self.ctrl_freq = cfg.simulation.get("ctrl_freq", 48)
         self.pyb_freq = cfg.simulation.get("pyb_freq", 240)
         self.tracked_drone_id = cfg.visualization.get("tracked_drone_id", 0)
-        if self.tracked_drone_id >= self.num_drones:
-            self.tracked_drone_id = 0
         self.environemnt: EmptyWorld | ForestWorld | UrbanWorld | None = None
         self.world_data: WorldData | None = None
         self.obstacles_data: ObstaclesData | None = None
@@ -42,7 +39,7 @@ class ExperimentRunner:
         self.input_handler = None
         self.nsga3_optimizer = None 
         self.trajectories = None
-        self.number_of_waypoints = cfg.number_of_waypoints
+        self.number_of_waypoints = cfg.optimizer.algorithm_params.get("n_inner_waypoints")
         self.initial_rpys = cfg.environment.get("initial_rpys")
         self.start_positions = np.array(cfg.environment.get("initial_xyzs"), dtype=np.int64)
         self.end_positions = np.array(cfg.environment.get("end_xyzs"), dtype=np.int64)
@@ -57,6 +54,8 @@ class ExperimentRunner:
         self.obstacle_height = cfg.environment.params.get("obstacle_height")
         self.obstacle_length = cfg.environment.params.get("obstacle_length")
         self.sim_speed_multiplier = cfg.simulation.get("speed_multiplier", 5.0)
+        if self.tracked_drone_id >= self.num_drones:
+            self.tracked_drone_id = 0
 
     def _init_components(self):
         # Components initialization
@@ -70,19 +69,20 @@ class ExperimentRunner:
         )
 
         # 2. Obstacles initialization
-        self.obstacles_data = generate_obstacles(
-            self.world_data,
-            n_obstacles=self.obstacles_number,
-            shape_type=self.shape_type,
-            placement_strategy=get_placement_strategy(self.placement_strategy_name),
-            size_params={
-                'length': self.obstacle_length,
-                'width': self.obstacle_width,
-                'height': self.obstacle_height,
-            },
-            start_positions=self.start_positions,
-            target_positions=self.end_positions
-        )
+        if self.placement_strategy_name is not None:
+            self.obstacles_data = generate_obstacles(
+                self.world_data,
+                n_obstacles=self.obstacles_number,
+                shape_type=self.shape_type,
+                placement_strategy=get_placement_strategy(self.placement_strategy_name),
+                size_params={
+                    'length': self.obstacle_length,
+                    'width': self.obstacle_width,
+                    'height': self.obstacle_height,
+                },
+                start_positions=self.start_positions,
+                target_positions=self.end_positions
+            )
 
         # 3. Algorithm initialization (optimization algorithm class)
         self.counting_strategy = instantiate(self.cfg.optimizer)

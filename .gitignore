@@ -2,6 +2,10 @@
 results/
 docs/
 
+# visualizations
+trajectory_preview_bspline.png
+trajectory_preview.png
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

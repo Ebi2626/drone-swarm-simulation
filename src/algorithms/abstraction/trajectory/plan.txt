@@ -1,0 +1,62 @@
+Świetnie. Zastosowanie **Segment-based Collision Detection** podnosi jakość naszej symulacji do poziomu profesjonalnego *Path Planningu*, eliminując ryzyko tunelowania, jednocześnie zachowując wydajność GPU (dzięki wektoryzacji wzoru na dystans punkt-odcinek).
+
+Oto zaktualizowany, ostateczny plan podziału na pliki w folderze `src/strategies/nsga3_components/`.
+
+***
+
+### 1. Plik: `core_math.py` (Silnik Macierzowy)
+**Odpowiedzialność:** Czysta matematyka tensorowa, niezależna od fizyki. Obsługa CPU (NumPy) i GPU (CuPy).
+
+*   **Kluczowe Funkcje:**
+    *   `get_xp(data)`: Helper dynamicznie zwracający moduł `numpy` lub `cupy` zależnie od danych wejściowych.
+    *   `precompute_bspline_matrix(n_control, n_waypoints)`:
+        *   Tworzy stałą macierz transformacji $M$ (B-Spline Basis).
+    *   `trajectory_from_genotype(pop_matrix, basis_matrix)`:
+        *   Oblicza $T = P \times M^T$ (dla całej populacji naraz).
+    *   **NOWOŚĆ:** `vectorized_segment_distance(seg_start, seg_end, points)`:
+        *   Oblicza minimalną odległość między zbiorem punktów (przeszkód) a zbiorem odcinków.
+        *   Używa wzoru projekcji wektorowej, w pełni równoległa na GPU.
+
+### 2. Plik: `objectives_constraints.py` (Fizyka i Ocena)
+**Odpowiedzialność:** Tłumaczenie trajektorii na liczby (Cele i Ograniczenia) z uwzględnieniem ciągłości ruchu.
+
+*   **Kluczowe Funkcje (Wszystkie wektoryzowane dla tensora Populacji):**
+    *   `calc_path_length`: Suma długości odcinków.
+    *   `calc_elevation_changes`: Koszt energetyczny zmian wysokości.
+    *   `calc_collision_risk_segments`:
+        *   **Zaktualizowana logika:** Zamiast sprawdzać punkty, iteruje po odcinkach trasy i wywołuje `vectorized_segment_distance` względem środków przeszkód.
+        *   Zwraca: Odwrotność minimalnego dystansu (im bliżej, tym większa kara).
+    *   `constr_inter_agent_separation_segments`:
+        *   **Zaktualizowana logika:** Sprawdza minimalny dystans między odcinkami trajektorii różnych dronów w tym samym przedziale czasu $t \to t+1$.
+        *   Zawiera logikę *Safe Zone* (ignorowanie startu/mety).
+    *   Klasa `VectorizedEvaluator`: Wrapper spinający powyższe funkcje dla biblioteki `pymoo`.
+
+### 3. Plik: `decision_maker.py` (Logika Decyzyjna)
+**Odpowiedzialność:** Wybór najlepszego rozwiązania z Frontu Pareto *po* zakończeniu ewolucji.
+
+*   **Kluczowe Elementy:**
+    *   Protokół `DecisionStrategyProtocol`: Metoda `select_best(F, G)`.
+    *   Implementacje:
+        *   `EqualWeightsDecision`: Zbalansowany kompromis.
+        *   `SafetyFirstDecision`: Priorytet unikania kolizji (maksymalizacja odstępu).
+        *   `EnergyEfficientDecision`: Priorytet baterii (przy zachowaniu twardych limitów bezpieczeństwa).
+
+### 4. Plik: `swarm_evolution_strategy.py` (Orchestrator)
+**Odpowiedzialność:** Główny plik scalający system. Implementuje interfejs wymagany przez Twój notebook (`TrajectoryStrategyProtocol`).
+
+*   **Kluczowe Elementy:**
+    *   Klasa `SwarmOptimizationProblem`:
+        *   W metodzie `_evaluate` wywołuje `core_math` (generacja tras) -> `objectives_constraints` (ocena).
+    *   Klasa `HeuristicSampling`:
+        *   Inicjalizuje populację "prostymi liniami" (z szumem), aby uniknąć problemu braku rozwiązań na starcie.
+    *   Funkcja `nsga3_swarm_strategy`:
+        *   Wykrywa GPU.
+        *   Konfiguruje i uruchamia `pymoo.minimize`.
+        *   Przekazuje wynik do `DecisionMaker`.
+        *   Zwraca finalną trajektorię jako `numpy.ndarray`.
+
+***
+
+Plan jest kompletny, spójny i uwzględnia wszystkie Twoje wymagania badawcze (B-Spline, GPU, Multi-Objective, Segment Collision, Decision Maker).
+
+Możemy przystąpić do pisania kodu. Zacznę od pliku `core_math.py`, który zawiera krytyczną logikę wektorową.

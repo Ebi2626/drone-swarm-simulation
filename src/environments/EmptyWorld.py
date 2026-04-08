@@ -1,47 +1,40 @@
-import numpy as np
-import pybullet as p
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 from src.environments.SwarmBaseWorld import SwarmBaseWorld
+from src.environments.abstraction.generate_obstacles import ObstaclesData
+from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.utils.config_parser import sanitize_init_params
 
 class EmptyWorld(SwarmBaseWorld):
-    def __init__(self,
-                 drone_model: DroneModel = DroneModel.CF2X,
-                 num_drones: int = 1,
-                 neighbourhood_radius: float = np.inf,
-                 initial_xyzs=None,
-                 initial_rpys=None,
-                 physics: Physics = Physics.PYB,
-                 pyb_freq: int = 240,
-                 ctrl_freq: int = 48,
-                 gui: bool = True,
-                 record: bool = False,
-                 obstacles: bool = True,
-                 user_debug_gui: bool = True
-                 ):
+    def __init__(
+            self,
+            world_data: WorldData,        # ← wymiary świata
+            obstacles_data: ObstaclesData, # ← dane o przeszkodach
+            drone_model: DroneModel = DroneModel.CF2X,
+            physics: Physics = Physics.PYB,
+            initial_xyzs=None,
+            end_xyzs=None,
+            initial_rpys=None,
+            **kwargs
+            ):
         
-        drone_model, physics, initial_xyzs, initial_rpys = sanitize_init_params(
-            drone_model, physics, initial_xyzs, initial_rpys
+        drone_model, physics, initial_xyzs, end_xyzs, initial_rpys = sanitize_init_params(
+            drone_model, physics, initial_xyzs, end_xyzs, initial_rpys
         )
-        
-        super().__init__(drone_model=drone_model,
-                         num_drones=num_drones,
-                         neighbourhood_radius=neighbourhood_radius,
-                         initial_xyzs=initial_xyzs,
-                         initial_rpys=initial_rpys,
-                         physics=physics,
-                         pyb_freq=pyb_freq,
-                         ctrl_freq=ctrl_freq,
-                         gui=gui,
-                         record=record,
-                         obstacles=obstacles,
-                         user_debug_gui=user_debug_gui
-                         )
-        
-    def _addObstacles(self):
-        print("[DEBUG] Setting up empty world...")
-        self._init_render_silently()
 
-        self._setup_environment(length=500.0, width=500.0, ceiling_height=0.0, ground_color=[0.5, 0.5, 0.55, 1.0])
+        self.end_xyzs = end_xyzs
 
-        print("[DEBUG] Empty world setup complete.")
+        super().__init__(
+            world_data=world_data,
+            obstacles_data=obstacles_data,
+            drone_model=drone_model,
+            physics=physics,
+            num_drones=len(initial_xyzs),
+            initial_xyzs=initial_xyzs,
+            initial_rpys=initial_rpys,
+            obstacles=True,
+            **kwargs
+        )
+
+        
+    def draw_obstacles(self) -> None:
+        print("[DEBUG] Generating empty environment...") 

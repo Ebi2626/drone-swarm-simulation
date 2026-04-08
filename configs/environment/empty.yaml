@@ -1,17 +1,29 @@
+_target_: src.environments.EmptyWorld.EmptyWorld
+
 name: "empty"
-class_name: "EmptyWorld"
 
 params:
+  # Drone parameters
   drone_model: "CF2X"
-  num_drones: 1
-  physics: "PYB"
-  neighbourhood_radius: .inf
-  pyb_freq: 240
-  ctrl_freq: 48
-  gui: true
-  record: false
+  num_drones: 2
 
-initial_xyzs: 
-  - [0.0, 0.0, 0.1]
+  # Grid parameters (min(x, y) are 0)
+  ground_position: 0.1    # Z-axis (min)
+  track_length: 100.0    # Y-axis
+  track_width: 30.0      # X-axis
+  track_height: 12.0     # Z-axis (max)
 
-target_position: [1200.0, 0.0, 50.0]
+# Starting positions
+initial_xyzs:
+  - [15.0, 1.0, 5.0]
+  - [20.0, 1.0, 5.0]
+
+# Target positions
+end_xyzs:
+  - [15.0, 99.0, 5.0]
+  - [20.0, 99.0, 5.0]
+
+# Drone RPYS (Roll/Pith/Yaw)
+initial_rpys:
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]

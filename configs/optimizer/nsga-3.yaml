@@ -1,0 +1,19 @@
+_target_: src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy.nsga3_swarm_strategy
+_partial_: true
+_convert_: "all" 
+
+# Parametry specyficzne dla NSGA-III
+algorithm_params:
+  pop_size: 300
+  n_gen: 2500
+  min_ideal_solutions: 10
+  crossover_prob: 0.95
+  mutation_prob: 0.1
+  eta_c: 20  # parametr rozkładu dla Simulated Binary Crossover (SBX)
+  eta_m: 15  # parametr rozkładu dla mutacji wielomianowej
+  decision_mode: "safety" # knee_point | safety | equal
+  n_inner_waypoints: 5
+  min_dist: 0.5
+  ignore_ratio: 0.4
+  uniformity_std: 5.0
+  max_jerk: 10.0

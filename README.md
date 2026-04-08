@@ -3,13 +3,21 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 
 ## Project structure
 - `/configs` - files for hydra to make experiments and their results easier to parametrize and analyze
-    - `/algorithm` - parameters for different algorithms
     - `/environment` - parameters for different worlds
+    - `/optimizer` - parameters for different optimization algorithms
+    - `config.yaml` - global parameters for experiment
 - `/experiments` - launch scripts for experiments
-- `/notebooks` - notes about the project
+- `/notebooks` - notebook explaining project details
+- `/results` - logs from specific launch
 - `/src` - main logic
+    - `/algorithms` - logic for optimization
     - `/environments` - worlds for simulations
+    - `/trajectory` - logic for smooth handling flight over calculated waypoints
+    - `/utils` - helper functions, validators, parsers
 - `/tests` - tests
+- `ExperimentRunner.py` - file to launch specific simulation based on hydra config files
+- `environment.yamls` - project dependecies
+- `mypy.ini` - types restriction config (mypy)
 
 ## Main concepts
 - experiments should be reproducible
@@ -46,8 +54,15 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 
 ## Run simulation
 1. Enter environment with `conda activate drone-swarm-env`
-2. Call experiment eg. from gym-pybullet-drones `python ~/miniconda3/envs/drone-swarm-env/lib/python3.10/site-packages/gym_pybullet_drones/examples/pid.py`
-3. Check results in the `/results`
+2. Call experiment eg. `python ./ExperimentRunner.py environment=forest`
+3. Check results in the `/results/{current-date}/{current-time}_{world-name}/`
+
+## Notebooks
+To verify building blocks of this simulation you can use prepared in that purpose notebooks.
+In the main catalog you have to activate conda envirionment and simple call `jupyter notebook` to lauch server which will be avialable under the address: `http://localhost:8888/`.
+Notebooks are located in `notebooks` folder. There are such files as:
+- `world_generation.ipynb` - it allow call mathematical abstracion to create random worlds with different parameters
+- `draw_trajectory.ipynb` - it's using world generation from previous notebook to create world and allow draw example trajectories with given algorithms in this abstract mathematical space
 
 ## My setup
 - Procesor: AMD Ryzen 7 7700

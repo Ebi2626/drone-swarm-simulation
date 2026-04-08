@@ -33,10 +33,11 @@ def _parse_coordinates(coords_input):
     # Needed to cast to list() to fix Hydra ListConfig issue
     return np.array(list(coords_input))
 
-def sanitize_init_params(drone_model, physics, xyzs, rpys):
+def sanitize_init_params(drone_model, physics, start_xyzs, end_xyzs, initial_rpys):
     return (
         _parse_drone_model(drone_model),
         _parse_physics(physics),
-        _parse_coordinates(xyzs),
-        _parse_coordinates(rpys)
+        _parse_coordinates(start_xyzs),
+        _parse_coordinates(end_xyzs),
+        _parse_coordinates(initial_rpys)
     )

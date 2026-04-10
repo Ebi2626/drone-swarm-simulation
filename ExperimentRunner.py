@@ -170,9 +170,10 @@ class ExperimentRunner:
     def offilne_trajectory_counting(self):
         self._init_components() # Initialization world and algorithm classes based on hydra config
         self.trajectories = self._count_trajectories(self.counting_protocol) # counting trajectories based on optimization class from hydra config
-        self.logger.log_chosen_trajectories(self.trajectories)
-        self.logger.log_world_dimensions(self.world_data)
-        self.logger.log_obstacles(self.obstacles_data)
+        if self.logger is not None:
+            self.logger.log_chosen_trajectories(self.trajectories)
+            self.logger.log_world_dimensions(self.world_data)
+            self.logger.log_obstacles(self.obstacles_data)
         self._init_trajectory_following_algorithm() # Initialize trajectory following algorithm
 
     def initialize_world(self):

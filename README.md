@@ -57,6 +57,10 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
 2. Call experiment eg. `python ./ExperimentRunner.py environment=forest`
 3. Check results in the `/results/{current-date}/{current-time}_{world-name}/`
 
+## Run tests
+Tests are located in `/tests` directory and it reflects folder structure from the `/src` directory.
+To run unit tests simply call `python -m pytest`
+
 ## Notebooks
 To verify building blocks of this simulation you can use prepared in that purpose notebooks.
 In the main catalog you have to activate conda envirionment and simple call `jupyter notebook` to lauch server which will be avialable under the address: `http://localhost:8888/`.

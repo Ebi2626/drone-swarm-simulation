@@ -25,7 +25,7 @@ class InputHandler:
 
         for k, v in keys.items():
             if (v & p.KEY_WAS_TRIGGERED):
-                if ord('0') < k < ord('9'):
+                if ord('0') < k <= ord('9'):
                     selected_id = k - ord('1')
                     if selected_id < self.num_drones:
                         return SimulationCommand(

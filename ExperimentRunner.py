@@ -30,6 +30,8 @@ class ExperimentRunner:
         self.ctrl_freq = cfg.simulation.get("ctrl_freq", 48)
         self.pyb_freq = cfg.simulation.get("pyb_freq", 240)
         self.tracked_drone_id = cfg.visualization.get("tracked_drone_id", 0)
+        self.show_lidar_rays = cfg.visualization.get("show_lidar_rays", False)
+        self.lidar_draw_interval = cfg.visualization.get("lidar_draw_interval", 5)
         self.environemnt: EmptyWorld | ForestWorld | UrbanWorld | None = None
         self.world_data: WorldData | None = None
         self.obstacles_data: ObstaclesData | None = None
@@ -167,6 +169,46 @@ class ExperimentRunner:
             pitch=self.cfg.visualization.camera_pitch
         )
     
+    def _init_active_drones(self):
+        """Inicjalizacja zbioru aktywnych dronów oraz parametrów akceptacji."""
+        self.active_drones = set(range(self.num_drones))
+        self.acceptance_radius = self.trajectory_controller.params.get("acceptance_radius", 0.2)
+
+    def _process_collisions(self, sim_time: float, current_step: int):
+        """Wykrywanie kolizji, logowanie zdarzeń oraz usuwanie dronów rozbitych ze zbioru aktywnych."""
+        for d_id, o_id in self.environemnt.get_detailed_collisions():
+            if self.logger:
+                self.logger.log_collision(sim_time, d_id, o_id)
+            if d_id in self.active_drones:
+                self.active_drones.remove(d_id)
+                print(f"[INFO] Dron {d_id} uległ kolizji w czasie {sim_time:.2f}s (krok {current_step}).")
+
+    def _process_arrivals(self, all_states: list, sim_time: float):
+        """Weryfikacja dystansu do celu i usuwanie z aktywnych tych dronów, które osiągnęły zadany punkt."""
+        
+        # Upewniamy się, że acceptance_radius jest zrzutowany na zwykłą liczbę (skalar)
+        # Jeśli na tym etapie poleci TypeError, to wiesz, że źle zainicjalizowano zmienną
+        try:
+            radius = float(np.squeeze(self.acceptance_radius))
+        except (TypeError, ValueError):
+            raise ValueError(f"Błędny promień akceptacji! Obecna wartość: {self.acceptance_radius}")
+
+        for d_id in list(self.active_drones):
+            # Flatten zapobiega problemom, gdyby tablice były zagnieżdżone np. [[x, y, z]]
+            pos = np.array(all_states[d_id][0:3]).flatten()
+            target = np.array(self.end_positions[d_id]).flatten()
+            
+            # Pomijanie pustych danych, jeśli framework nie zdążył ich wysłać
+            if pos.size == 0 or target.size == 0:
+                continue
+                
+            # Wyliczenie dystansu jako bezpieczny float
+            dist = float(np.linalg.norm(pos - target))
+            
+            if dist <= radius:
+                self.active_drones.remove(d_id)
+                print(f"[INFO] Dron {d_id} osiągnął cel w czasie {sim_time:.2f}s.")
+    
     def offilne_trajectory_counting(self):
         self._init_components() # Initialization world and algorithm classes based on hydra config
         self.trajectories = self._count_trajectories(self.counting_protocol) # counting trajectories based on optimization class from hydra config
@@ -193,6 +235,7 @@ class ExperimentRunner:
     def run(self):
         print("Running experiment...")
         self.initialize_world()
+        self.trajectory_controller.init_lidars(self.environemnt.CLIENT)
 
         is_running = False
         current_step = 0
@@ -200,6 +243,8 @@ class ExperimentRunner:
         
         if not self.cfg.simulation.gui:
             is_running = True
+
+        self._init_active_drones()
 
         start_real_time = time.time()
         print(f"[DEBUG] Start symulacji na {max_steps} kroków. O godzinie: {start_real_time:.2f}s ---")
@@ -216,12 +261,22 @@ class ExperimentRunner:
                     elif cmd.type == CommandType.SWITCH_DRONE_CAMERA:
                         self.tracked_drone_id = cmd.payload
 
+                    elif cmd.type == CommandType.TOGGLE_LIDAR_RAYS:
+                        self.show_lidar_rays = not self.show_lidar_rays
+                        if not self.show_lidar_rays and hasattr(self.trajectory_controller, "clear_lidar_rays"):
+                            self.trajectory_controller.clear_lidar_rays()
+
             all_states = [self.environemnt._getDroneStateVector(d) for d in range(self.num_drones)]
             if is_running:
                 sim_time = current_step / self.ctrl_freq
                 
                 # A. Decyzja algorytmu
-                actions = self.trajectory_controller.compute_actions(all_states, current_time=sim_time)                
+                actions = self.trajectory_controller.compute_actions(all_states, current_time=sim_time)
+
+                # A.1 Wizualizacja promieni lidaru (co K-tą klatkę)
+                if self.show_lidar_rays and self.cfg.simulation.gui:
+                    if current_step % self.lidar_draw_interval == 0:
+                        self.trajectory_controller.draw_lidar_rays(all_states, self.tracked_drone_id)
 
                 # B. Krok fizyki
                 self.environemnt.step(actions)
@@ -231,6 +286,15 @@ class ExperimentRunner:
                     self.logger.log_step(current_step, sim_time, all_states)
                     for d_id, o_id in self.environemnt.get_detailed_collisions():
                         self.logger.log_collision(sim_time, d_id, o_id)
+
+                # D. Logika weryfikacji floty (Rozdzielone odpowiedzialności)
+                self._process_collisions(sim_time, current_step)
+                self._process_arrivals(all_states, sim_time)
+
+                # E. Warunek wyjścia
+                if not self.active_drones:
+                    print(f"[DEBUG] Wszystkie drony zakończyły lot. Przerwano symulację w kroku {current_step}.")
+                    break
 
                 current_step += 1
 

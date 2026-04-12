@@ -3,7 +3,7 @@ _partial_: true
 _convert_: "all"
 
 algorithm_params:
-  pop_size: 350
+  pop_size: 400
   epochs: 2000
   n_inner_waypoints: 5
   seed: 42

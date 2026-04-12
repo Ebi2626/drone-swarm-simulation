@@ -18,7 +18,7 @@ from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
 
 # Komponenty wewnętrzne
-from .objective_constrains import VectorizedEvaluator
+from ...objective_constrains import VectorizedEvaluator
 from .decision_maker import (
     DecisionStrategyProtocol, 
     EqualWeightsDecision, 

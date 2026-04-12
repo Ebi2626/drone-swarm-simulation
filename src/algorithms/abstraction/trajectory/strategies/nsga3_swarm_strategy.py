@@ -25,7 +25,7 @@ from src.environments.obstacles.ObstacleShape import ObstacleShape
 # UWAGA: Upewnij się, że importujesz poprawnie swoje moduły
 # Jeśli masz problem z importem VectorizedEvaluator, sprawdź ścieżkę
 try:
-    from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.objective_constrains import VectorizedEvaluator
+    from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
     from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.decision_maker import (
         DecisionStrategyProtocol, 
         EqualWeightsDecision, 
@@ -274,7 +274,8 @@ class HeuristicSampling(Sampling):
 # --- Helper: Dynamiczne partycje ---
 
 def calculate_n_partitions(pop_size: int, n_obj: int = 3) -> int:
-    if n_obj != 3: return 12 
+    if n_obj != 3: 
+        return 12 
     p = int(np.sqrt(2 * pop_size))
     return max(2, p - 1)
 

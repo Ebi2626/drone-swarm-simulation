@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import importlib
-TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.nsga3_utils.objective_constrains"
+TARGET_MODULE = "src.algorithms.abstraction.trajectory.objective_constrains"
 EvaluatorModule = importlib.import_module(TARGET_MODULE)
 
 # ==========================================

@@ -1,0 +1,33 @@
+_target_: src.algorithms.abstraction.trajectory.strategies.msffoa_strategy.msffoa_strategy
+_partial_: true
+_convert_: "all"
+
+algorithm_params:
+  pop_size: 350
+  epochs: 2000
+  n_inner_waypoints: 5
+  seed: 42
+
+  # --- Objective weights (after F_ref normalization) ---
+  # Objectives are divided by F_ref (straight-line reference) before weighting,
+  # so weights operate on a dimensionless ~1.0 scale.
+  objective_weights: [1.0, 2.0, 0.5]
+  #   [0]: w_path_length    — trajectory length
+  #   [1]: w_collision_risk  — obstacle penetration (dominant weight)
+  #   [2]: w_elevation       — altitude changes
+
+  # --- Constraint penalty ---
+  # Weakest-link: the worst single constraint violation (np.max, not np.sum)
+  # is multiplied by this weight. High value enforces feasibility.
+  penalty_weight: 50.0
+
+  # --- MSFFOA-specific hyperparameters ---
+  levy_beta: 1.5              # Levy exponent for Strategy 2 (heavy-tail jumps)
+  sigma_min_fraction: 0.01    # Minimum Gaussian sigma as fraction of world size
+
+  # --- VectorizedEvaluator parameters (shared across all optimizers) ---
+  min_dist: 0.5
+  ignore_ratio: 0.4
+  safety_margin: 3.0
+  uniformity_std: 50.0
+  max_jerk: 50.0

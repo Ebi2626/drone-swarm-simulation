@@ -160,7 +160,7 @@ def calc_collision_risk_segments(
             max_side = xp.maximum(d1, d2)
             radii = (max_side / 2.0 * 1.414) + safety_margin 
             heights = d3
-            batch_violation = _dist_segment_to_cylinder(
+            batch_violation = _dist_segment_to_box(
                 seg_starts, seg_ends, centers, radii, heights
             )
         

@@ -239,6 +239,11 @@ class HeuristicSampling(Sampling):
                 horizontal_dims = self.obstacles_data.data[:, 3:5]
             elif self.obstacles_data.shape_type == ObstacleShape.CYLINDER:
                 horizontal_dims = self.obstacles_data.data[:, 3:4]
+            else:
+                raise ValueError(
+                    f"Unsupported obstacle shape type: {self.obstacles_data.shape_type}. "
+                    "Cannot calculate noise scale for sampling."
+                )
             max_horizontal_size = np.max(horizontal_dims)
             noise_xy = np.random.normal(0, max_horizontal_size, (n_samples, self.n_drones, self.n_inner_points, 2))
             X[..., :2] += noise_xy

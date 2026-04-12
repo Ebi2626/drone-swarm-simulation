@@ -1,7 +1,7 @@
 import numpy as np
 from pymoo.core.problem import Problem  # ZMIANA 1: Dziedziczymy po Problem, nie ElementwiseProblem
 
-class UAVSwarmPathPlanningProblem(Problem):
+class ElementWiseProblem(Problem):
     def __init__(self, 
                  space_limits: list, 
                  n_drones: int, 

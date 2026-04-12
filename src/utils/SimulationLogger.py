@@ -94,7 +94,7 @@ class SimulationLogger:
         df = pd.DataFrame(obstacles.data, columns=columns)
 
         if shape_type is ObstacleShape.CYLINDER:
-            df = df.drop(columns=['dim3_unused'])
+            df = df.drop(columns=['unused_dim'])
 
         return df
     

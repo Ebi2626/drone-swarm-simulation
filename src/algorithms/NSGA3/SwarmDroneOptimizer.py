@@ -3,7 +3,7 @@ from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.optimize import minimize
 
-from src.algorithms.NSGA3.ElementWiseProblem import UAVSwarmPathPlanningProblem
+from src.algorithms.NSGA3.ElementWiseProblem import ElementWiseProblem
 
 class SwarmDroneOptimizer:
     def __init__(self, 
@@ -21,7 +21,7 @@ class SwarmDroneOptimizer:
         self.end_positions = end_positions
         self.obstacles = obstacles
         self.space_limits = space_limits
-        self.problem = UAVSwarmPathPlanningProblem(
+        self.problem = ElementWiseProblem(
             space_limits=space_limits,
             n_drones=n_drones,
             n_waypoints=n_waypoints,

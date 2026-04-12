@@ -20,7 +20,7 @@ from mealpy import FloatVar
 from mealpy import Problem as MealpyProblem
 from mealpy.swarm_based.OOA import OriginalOOA
 
-from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.objective_constrains import (
+from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
 from src.environments.abstraction.generate_obstacles import ObstaclesData

@@ -18,7 +18,7 @@ from numpy.typing import NDArray
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 # Importy helperów
-from .core_math import get_xp, to_device
+from .strategies.nsga3_utils.core_math import get_xp, to_device
 from src.environments.abstraction.generate_obstacles import ObstaclesData
 
 # --- Helpery Geometryczne (Wektoryzowane) ---

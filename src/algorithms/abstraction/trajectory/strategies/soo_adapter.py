@@ -17,7 +17,7 @@ from typing import Any, Dict
 import numpy as np
 from numpy.typing import NDArray
 
-from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.objective_constrains import (
+from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
 from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (

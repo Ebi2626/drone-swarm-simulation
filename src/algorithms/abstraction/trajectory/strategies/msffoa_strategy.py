@@ -19,7 +19,7 @@ from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (
 from src.algorithms.abstraction.trajectory.strategies.soo_adapter import (
     TrajectorySOOAdapter,
 )
-from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.objective_constrains import (
+from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
 from src.environments.abstraction.generate_world_boundaries import WorldData

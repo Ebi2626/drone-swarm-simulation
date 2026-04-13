@@ -1,8 +1,5 @@
-_target_: src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy.nsga3_swarm_strategy
-_partial_: true
-_convert_: "all" 
+For forest with 47 trees
 
-# Parametry specyficzne dla NSGA-III
 algorithm_params:
   pop_size: 300
   n_gen: 3500

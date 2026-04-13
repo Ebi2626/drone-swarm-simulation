@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - environment: urban
-  - optimizer: msffoa
+  - optimizer: nsga-3
 
 simulation:
   duration_sec: 180
@@ -10,7 +10,7 @@ simulation:
   ctrl_freq: 48
   drone_model: "CF2X"
   physics: "PYB"
-  sim_speed_multiplier: 2.0
+  sim_speed_multiplier: 5.0
 
 seed: 42
 experiment_name: "test_run"

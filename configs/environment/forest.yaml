@@ -16,7 +16,7 @@ params:
   # Obstacles parameters
   shape_type: 'CYLINDER'
   placement_strategy: 'strategy_random_uniform'
-  obstacles_number: 100
+  obstacles_number: 37
   obstacle_width: 1.0
   obstacle_length: 1.0
   obstacle_height: 10.0

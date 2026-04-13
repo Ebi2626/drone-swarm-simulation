@@ -1,0 +1,63 @@
+import functools
+from typing import TYPE_CHECKING
+from hydra.utils import instantiate
+
+from configs.environment.strategies.placement_strategies import get_placement_strategy
+from src.environments.abstraction.generate_obstacles import generate_obstacles
+from src.environments.abstraction.generate_world_boundaries import generate_world_boundaries
+from src.runner.ExperimentDataStrategy import ExperimentDataStrategy
+
+if TYPE_CHECKING:
+    from main import ExperimentRunner
+
+
+class GenerationDataStrategy(ExperimentDataStrategy):
+    def prepare_data(self, runner: "ExperimentRunner"):
+        print("[INFO] Generowanie nowego środowiska i optymalizacja trajektorii (Offline Path-Planning)...")
+        
+        # 1. Generowanie granic świata
+        runner.world_data = generate_world_boundaries(
+            width=runner.track_width, 
+            length=runner.track_length,
+            height=runner.track_height, 
+            ground_height=runner.ground_position
+        )
+        
+        # 2. Generowanie przeszkód
+        if runner.placement_strategy_name is not None:
+            runner.obstacles_data = generate_obstacles(
+                runner.world_data,
+                n_obstacles=runner.obstacles_number,
+                shape_type=runner.shape_type,
+                placement_strategy=get_placement_strategy(runner.placement_strategy_name),
+                size_params={
+                    'length': runner.obstacle_length,
+                    'width': runner.obstacle_width,
+                    'height': runner.obstacle_height,
+                },
+                start_positions=runner.start_positions,
+                target_positions=runner.end_positions
+            )
+        
+        # 3. Zgodnie z oryginałem - wstrzykujemy DOKŁADNIE 6 argumentów do strategii.
+        # Wcześniejsze dodanie "algorithm_params" uaktywniło inny tryb obliczeniowy kary 
+        # i spowodowało przekazanie 5 argumentów zamiast 4 do funkcji `_dist_segment_to_box`.
+        counting_strategy = instantiate(runner.cfg.optimizer)
+        counting_protocol = functools.partial(
+            counting_strategy,
+            start_positions=runner.start_positions,
+            target_positions=runner.end_positions,
+            obstacles_data=runner.obstacles_data,
+            world_data=runner.world_data,
+            number_of_waypoints=runner.number_of_waypoints,
+            drone_swarm_size=runner.num_drones
+        )
+        
+        print(f"\n🚀 Uruchamianie obliczeń algorytmu metaheurystycznego...")
+        runner.trajectories = counting_protocol()
+        
+        # 4. Archiwizacja stanu początkowego
+        if runner.logger is not None:
+            runner.logger.log_chosen_trajectories(runner.trajectories)
+            runner.logger.log_world_dimensions(runner.world_data)
+            runner.logger.log_obstacles(runner.obstacles_data)

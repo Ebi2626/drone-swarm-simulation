@@ -25,6 +25,8 @@ visualization:
   camera_distance: 1.0
   camera_yaw: -15.0
   camera_pitch: -30.0
+  show_lidar_rays: false
+  lidar_draw_interval: 5
 
 hydra:
   run:

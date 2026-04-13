@@ -6,6 +6,7 @@ from typing import Optional
 class CommandType(Enum):
     TOGGLE_SIMULATION = auto()
     SWITCH_DRONE_CAMERA = auto()
+    TOGGLE_LIDAR_RAYS = auto()
     EXIT = auto()
 
 @dataclass
@@ -22,6 +23,10 @@ class InputHandler:
         
         if ord(' ') in keys and (keys[ord(' ')] & p.KEY_WAS_TRIGGERED):            
             return SimulationCommand(CommandType.TOGGLE_SIMULATION)
+        
+        if (ord('l') in keys and (keys[ord('l')] & p.KEY_WAS_TRIGGERED)) or \
+           (ord('L') in keys and (keys[ord('L')] & p.KEY_WAS_TRIGGERED)):
+            return SimulationCommand(CommandType.TOGGLE_LIDAR_RAYS)
 
         for k, v in keys.items():
             if (v & p.KEY_WAS_TRIGGERED):

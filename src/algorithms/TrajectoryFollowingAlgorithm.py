@@ -1,5 +1,6 @@
 import numpy as np
 from src.algorithms.BaseAlgorithm import BaseAlgorithm
+from src.sensors.LidarSensor import LidarSensor, LidarHit
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.enums import DroneModel
 import matplotlib.pyplot as plt
@@ -17,16 +18,48 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             for _ in range(num_drones)
         ]
         self._cached_trajectories = None
-        
+        self._lidars: list[LidarSensor] | None = None
+        self.latest_scans: list[list[LidarHit]] = [[] for _ in range(num_drones)]
+
         # Parametry ogólne
         self._ctrl_timestep = 1.0 / self.params.get("ctrl_freq", 48)
         self.hover_duration = self.params.get("hover_duration", 3.0)
         self.finish_radius = self.params.get("finish_radius", 0.5)
-        
+
         # Nowe parametry dla B-Spline i Profilu Trapezowego
         self.cruise_speed = self.params.get("cruise_speed", 8.0)
         self.max_accel = self.params.get("max_accel", 2.0)
         self.safe_radius = self.params.get("safe_radius", 0.4)
+
+    def init_lidars(self, physics_client_id: int) -> None:
+        """Inicjalizuje sensory lidar po utworzeniu świata PyBullet."""
+        self._physics_client_id: int = physics_client_id
+        self._lidars = [
+            LidarSensor(physics_client_id) for _ in range(self.num_drones)
+        ]
+
+    def draw_lidar_rays(self, current_states: list, tracked_drone_idx: int) -> None:
+        """Rysuje promienie lidaru tylko dla śledzonego drona w GUI PyBullet.
+        
+        Args:
+            current_states: Lista stanów wszystkich dronów.
+            tracked_drone_idx: Indeks drona, którego lidar ma być wizualizowany.
+        """
+        if self._lidars is None:
+            return
+            
+        # Zabezpieczenie przed błędnym indeksem
+        if not (0 <= tracked_drone_idx < self.num_drones):
+            return
+
+        # Rysujemy promienie tylko dla wybranego drona
+        self._lidars[tracked_drone_idx].draw_debug_lines(current_states[tracked_drone_idx][0:3])
+        
+        # Czyścimy promienie dla pozostałych dronów, aby uniknąć "zamrożonych" 
+        # linii w przypadku zmiany śledzonego drona w trakcie symulacji
+        for i in range(self.num_drones):
+            if i != tracked_drone_idx:
+                self._lidars[i].clear_debug_lines()
 
     def _prepare_trajectories(self):
         """Pobiera waypointy, generuje splajny i sprawdza kolizje w pętli."""
@@ -142,11 +175,20 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         if self._cached_trajectories is None:
             self._cached_trajectories = self._prepare_trajectories()
 
+        # Zbiorczy skan lidarowy — jedno wywołanie rayTestBatch dla N dronów
+        if self._lidars is not None:
+            positions = np.array([s[0:3] for s in current_states], dtype=np.float64)
+            num_rays = LidarSensor._num_rays
+            all_results = LidarSensor.batch_ray_test(positions, self._physics_client_id)
+            for i in range(self.num_drones):
+                chunk = all_results[i * num_rays : (i + 1) * num_rays]
+                self.latest_scans[i] = self._lidars[i].process_batch_results(chunk)
+
         actions = []
         for i in range(self.num_drones):
             state = current_states[i]
             spline_traj = self._cached_trajectories[i]
-            
+
             # Czas liczony od startu misji (po zakończeniu fazy hover)
             flight_time = current_time - self.hover_duration
 

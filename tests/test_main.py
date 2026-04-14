@@ -182,12 +182,14 @@ class TestPrepareExperiment:
 
     @patch(f"{MODULE}.SimulationLogger")
     @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
-    def test_logger_fallback_when_hydra_unavailable(self, mock_tfa, mock_sim_logger, base_cfg, mock_strategy):
-        """Gdy HydraConfig nie jest dostępny, logger powinien użyć os.getcwd()."""
+    def test_logger_uses_output_dir_from_config(self, mock_tfa, mock_sim_logger, base_cfg, mock_strategy):
+        """Gdy logging.output_dir jest ustawiony w konfiguracji, logger powinien go użyć."""
         base_cfg.logging.enabled = True
+        base_cfg.logging.output_dir = "/tmp/replay_output"
         r = ExperimentRunner(base_cfg, mock_strategy)
         r.prepare_experiment()
         mock_sim_logger.assert_called_once()
+        assert mock_sim_logger.call_args.kwargs["output_dir"] == "/tmp/replay_output"
 
     @patch(f"{MODULE}.InputHandler")
     @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")

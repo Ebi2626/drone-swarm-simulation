@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 import hydra
@@ -74,10 +73,9 @@ class ExperimentRunner:
 
         # Inicjalizacja loggera (przydatne zarówno dla generacji jak i powtórek)
         if self.cfg.logging.enabled:
-            try:
+            output_dir = self.cfg.logging.get("output_dir")
+            if output_dir is None:
                 output_dir = HydraConfig.get().runtime.output_dir
-            except Exception:
-                output_dir = os.getcwd()
             self.logger = SimulationLogger(
                 output_dir=output_dir, log_freq=self.cfg.logging.log_freq,
                 ctrl_freq=self.ctrl_freq, num_drones=self.num_drones
@@ -246,6 +244,10 @@ def main_replay(results_dir: str, headless: bool = False):
         sys.exit(1)
 
     cfg = OmegaConf.load(cfg_path)
+    replay_output_dir = results_path / "replay"
+    replay_output_dir.mkdir(exist_ok=True)
+    OmegaConf.update(cfg, "logging.enabled", False)
+    OmegaConf.update(cfg, "logging.output_dir", str(replay_output_dir))
     if headless:
         OmegaConf.update(cfg, "simulation.gui", False)
     runner = ExperimentRunner(cfg, ReplayDataStrategy(results_path))

@@ -13,6 +13,7 @@ dependencies:
   - jupyter                    # Do notatników
   - pytest                     # Do testów
   - pip                        # Menedżer pakietów Pythona
+  - h5py                       # Do zapisu wsadowego danych optymalizacyjnych 
   - pymoo>=0.6.0
   - conda-forge::libstdcxx-ng
   - typing_extensions          # Do typu NotRequired

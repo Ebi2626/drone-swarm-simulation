@@ -11,10 +11,14 @@ co eliminuje problem roznych rzedow wielkosci pomiedzy F1, F2 i F3.
 Fitness = w1*(F1/F1_ref) + w2*(F2/F2_ref) + w3*(F3/F3_ref) + penalty_weight * sum(G)
 """
 
-from typing import Any, Dict, List, Optional, Union
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 
 import numpy as np
 from numpy.typing import NDArray
+from hydra.core.hydra_config import HydraConfig
 
 from mealpy import FloatVar
 from mealpy import Problem as MealpyProblem
@@ -25,6 +29,9 @@ from src.algorithms.abstraction.trajectory.objective_constrains import (
 )
 from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.abstraction.generate_world_boundaries import WorldData
+
+if TYPE_CHECKING:
+    from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +96,8 @@ class OspreyProblemAdapter(MealpyProblem):
         n_output_samples: int,
         weights: Dict[str, float],
         penalty_weight: float,
+        history_writer: OptimizationHistoryWriter | None = None,
+        expected_pop_size: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(bounds=bounds, minmax="min", **kwargs)
@@ -102,6 +111,12 @@ class OspreyProblemAdapter(MealpyProblem):
         self.w2 = weights.get("w_collision_risk", 5.0)
         self.w3 = weights.get("w_elevation", 0.5)
         self.penalty_weight = penalty_weight
+
+        # Logowanie historii optymalizacji
+        self._history_writer = history_writer
+        self._expected_pop_size = expected_pop_size
+        self._gen_buffer_x: list[np.ndarray] = []
+        self._gen_buffer_f: list[np.ndarray] = []
 
         # Pre-compute broadcast shapes (1, Drones, 1, 3)
         self._starts_bc = start_pos[np.newaxis, :, np.newaxis, :]
@@ -164,6 +179,17 @@ class OspreyProblemAdapter(MealpyProblem):
 
         obj_value = self.w1 * F_norm[0] + self.w2 * F_norm[1] + self.w3 * F_norm[2]
         constraint_penalty = self.penalty_weight * float(np.sum(np.maximum(0.0, G)))
+
+        if self._history_writer is not None and self._expected_pop_size > 0:
+            self._gen_buffer_x.append(x.copy())
+            self._gen_buffer_f.append(F.copy())
+            if len(self._gen_buffer_x) >= self._expected_pop_size:
+                self._history_writer.put_generation_data({
+                    "objectives_matrix": np.stack(self._gen_buffer_f),
+                    "decisions_matrix": np.stack(self._gen_buffer_x),
+                })
+                self._gen_buffer_x.clear()
+                self._gen_buffer_f.clear()
 
         return float(obj_value + constraint_penalty)
 
@@ -332,6 +358,13 @@ def osprey_swarm_strategy(
     xl = np.tile(xl_point, drone_swarm_size * n_inner)
     xu = np.tile(xu_point, drone_swarm_size * n_inner)
 
+    from src.utils.optimization_history_writer import OptimizationHistoryWriter
+
+    hydra_output_dir = HydraConfig.get().runtime.output_dir
+    writer = OptimizationHistoryWriter(
+        output_dir=os.path.join(hydra_output_dir, "optimization_history")
+    )
+
     print(
         f"[OOA] Start. Pop: {pop_size}, Epochs: {n_epochs}, "
         f"Inner Pts: {n_inner}, Vars: {n_var}, Mode: {mode}, Workers: {n_workers}"
@@ -356,6 +389,8 @@ def osprey_swarm_strategy(
         n_output_samples=number_of_waypoints,
         weights=weights,
         penalty_weight=penalty_weight,
+        history_writer=writer,
+        expected_pop_size=pop_size,
         log_to="console",
     )
 
@@ -406,6 +441,8 @@ def osprey_swarm_strategy(
 
     except Exception as e:
         print(f"[OOA] Blad optymalizacji: {e}. Zwracam linie prosta.")
+    finally:
+        writer.close()
 
     # --- Fallback: linia prosta ---
     print("[OOA] Fallback: generowanie linii prostej.")

@@ -4,11 +4,15 @@ Główny punkt wejścia dla strategii NSGA-III (Wersja Polyline).
 Zamiast B-Spline używa interpolowanej łamanej z ograniczeniami geometrycznymi.
 """
 
+import os
 from typing import Any, Dict, Optional, List, Union
+
 import numpy as np
 from numpy.typing import NDArray
+from hydra.core.hydra_config import HydraConfig
 
 # Pymoo imports
+from pymoo.core.callback import Callback
 from pymoo.core.problem import Problem
 from pymoo.core.sampling import Sampling
 from pymoo.core.termination import Termination
@@ -20,6 +24,7 @@ from pymoo.operators.mutation.pm import PM
 
 from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.core_math import get_xp
 from src.environments.obstacles.ObstacleShape import ObstacleShape
+from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 # Komponenty wewnętrzne
 # UWAGA: Upewnij się, że importujesz poprawnie swoje moduły
@@ -273,6 +278,24 @@ class HeuristicSampling(Sampling):
 
 # --- Helper: Dynamiczne partycje ---
 
+class _HistoryCallback(Callback):
+    """Pymoo callback — loguje stan populacji po każdej generacji."""
+
+    def __init__(self, writer: OptimizationHistoryWriter):
+        super().__init__()
+        self._writer = writer
+
+    def notify(self, algorithm):
+        pop = algorithm.pop
+        objectives = pop.get("F")
+        decisions = pop.get("X")
+        if objectives is not None and decisions is not None:
+            self._writer.put_generation_data({
+                "objectives_matrix": objectives.copy(),
+                "decisions_matrix": decisions.copy(),
+            })
+
+
 def calculate_n_partitions(pop_size: int, n_obj: int = 3) -> int:
     if n_obj != 3: 
         return 12 
@@ -323,6 +346,11 @@ def nsga3_swarm_strategy(
     ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=n_partitions)
     actual_pop_size = ref_dirs.shape[0]
     
+    output_dir = HydraConfig.get().runtime.output_dir
+    writer = OptimizationHistoryWriter(
+        output_dir=os.path.join(output_dir, "optimization_history")
+    )
+
     print(f"[NSGA-III Polyline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Inner Pts: {n_inner}")
 
     # 3. Inicjalizacja
@@ -362,14 +390,21 @@ def nsga3_swarm_strategy(
     )
     
     # 4. Optymalizacja
-    res = minimize(
-        problem,
-        algorithm,
-        termination=termination,
-        seed=1,
-        verbose=True,
-        save_history=True
-    )
+    callback = _HistoryCallback(writer)
+    try:
+        res = minimize(
+            problem,
+            algorithm,
+            termination=termination,
+            seed=1,
+            verbose=True,
+            save_history=True,
+            callback=callback,
+        )
+    except Exception:
+        raise
+    finally:
+        writer.close()
 
     # 5. Wybór rozwiązania
     if res.X is not None and len(res.X) > 0:

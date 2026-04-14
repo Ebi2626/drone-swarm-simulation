@@ -75,19 +75,25 @@ def test_heuristic_sampling_logic(mock_world_data, mock_obstacles_data):
     assert np.all(z_values >= 0.5)
     assert np.all(z_values <= 20.0)
 
+@patch(f"{TARGET_MODULE}.HydraConfig")  # Dodany mock dla Hydry
 @patch(f"{TARGET_MODULE}.minimize")
-def test_nsga3_strategy_fallback_with_altitude(mock_minimize, mock_world_data):
+def test_nsga3_strategy_fallback_with_altitude(mock_minimize, mock_hydraconfig, mock_world_data):
     """
     Testuje, czy w razie braku rozwiązań, linia prosta jest generowana
     nad minimalną bezpieczną wysokością (np. 2.0m).
     """
+    # 1. Konfiguracja mocka dla Hydry, aby .get().runtime.output_dir zwróciło fałszywą ścieżkę
+    mock_hydraconfig.get.return_value.runtime.output_dir = "mocked_output_dir"
+    
+    # 2. Symulacja błędu optymalizacji (brak rozwiązań)
     mock_res = MagicMock()
-    mock_res.X = None # Symulacja błędu optymalizacji
+    mock_res.X = None 
     mock_minimize.return_value = mock_res
     
     start = np.array([[0.0, 0.0, 0.0]])
     target = np.array([[10.0, 10.0, 0.0]])
     
+    # 3. Wywołanie funkcji
     result = NSGA3Module.nsga3_swarm_strategy(
         start_positions=start,
         target_positions=target,
@@ -101,7 +107,7 @@ def test_nsga3_strategy_fallback_with_altitude(mock_minimize, mock_world_data):
     # Oś Z (indeks 2) powinna wynosić 2.0 dla wszystkich 5 punktów
     expected_z = np.full(5, 2.0)
     np.testing.assert_array_almost_equal(result[0, :, 2], expected_z)
-
+    
 def test_resample_polyline_batch_correctness():
     """Weryfikacja wektoryzowanej interpolacji."""
     # Start (0,0,0), Środek (10,0,0), Koniec (10,10,0)

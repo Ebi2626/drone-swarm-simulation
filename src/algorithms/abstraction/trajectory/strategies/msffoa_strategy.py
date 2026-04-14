@@ -8,10 +8,12 @@ G: 5 constraints) into a scalar fitness via TrajectorySOOAdapter, then drives
 MSFFOAOptimizer through smell-based and vision-based search phases.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 from numpy.typing import NDArray
+from hydra.core.hydra_config import HydraConfig
 
 from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (
     MSFFOAOptimizer,
@@ -23,6 +25,7 @@ from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
 from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 
 def msffoa_strategy(
@@ -82,6 +85,11 @@ def msffoa_strategy(
         f"Penalty: {penalty_weight}, Levy beta: {levy_beta}"
     )
 
+    output_dir = HydraConfig.get().runtime.output_dir
+    writer = OptimizationHistoryWriter(
+        output_dir=os.path.join(output_dir, "optimization_history")
+    )
+
     try:
         # --- VectorizedEvaluator ---
         evaluator = VectorizedEvaluator(
@@ -101,6 +109,7 @@ def msffoa_strategy(
             n_output_samples=number_of_waypoints,
             weights=weights,
             penalty_weight=penalty_weight,
+            history_writer=writer,
         )
 
         print(f"[MSFFOA] F_ref (normalization scales): {adapter._f_ref}")
@@ -137,6 +146,8 @@ def msffoa_strategy(
 
     except Exception as e:
         print(f"[MSFFOA] Optimization error: {e}. Returning straight-line fallback.")
+    finally:
+        writer.close()
 
     # --- Fallback: straight-line trajectory ---
     print("[MSFFOA] Fallback: generating straight-line trajectory.")

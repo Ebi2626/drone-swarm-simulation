@@ -79,13 +79,53 @@ def _dist_segment_to_box(
     obs_dims: NDArray
 ) -> NDArray:
     """
-    Uproszczona detekcja kolizji Odcinek vs AABB.
+    Wektoryzowana detekcja kolizji: Odcinek vs AABB (Prostopadłościan).
+    Zwraca macierz kar (penetracja > 0 w przypadku kolizji, 0 w przypadku braku).
+    
+    Args:
+        seg_start: (K, 3) - początki odcinków
+        seg_end: (K, 3) - końce odcinków
+        obs_center: (M, 3) - środki prostopadłościanów
+        obs_dims: (M, 3) - wymiary prostopadłościanów [długość, szerokość, wysokość]
     """
     xp = get_xp(seg_start)
-    radius = xp.maximum(obs_dims[:, 0], obs_dims[:, 1]) / 2.0
-    height = obs_dims[:, 2]
-    return _dist_segment_to_cylinder(seg_start, seg_end, obs_center, radius, height)
-
+    
+    # 1. Rozszerzenie wymiarów do postaci (K, M, 3) do operacji wektorowych
+    A = xp.expand_dims(seg_start, axis=1)    # (K, 1, 3)
+    B = xp.expand_dims(seg_end, axis=1)      # (K, 1, 3)
+    C = xp.expand_dims(obs_center, axis=0)   # (1, M, 3)
+    dims = xp.expand_dims(obs_dims, axis=0)  # (1, M, 3)
+    
+    # 2. Obliczenie wektora kierunkowego odcinka AB
+    AB = B - A  # (K, 1, 3)
+    
+    # 3. Znalezienie parametru 't' dla rzutu środka przeszkody na prostą AB
+    C_minus_A = C - A
+    dot_C_AB = xp.sum(C_minus_A * AB, axis=-1)  # (K, M)
+    dot_AB_AB = xp.sum(AB * AB, axis=-1)        # (K, 1)
+    
+    # Unikamy dzielenia przez zero dla odcinków o zerowej długości (stojące drony)
+    t = dot_C_AB / (dot_AB_AB + 1e-8)  # (K, M)
+    
+    # Ograniczamy 't' do przedziału [0, 1], żeby punkt pozostał stricte na odcinku
+    t_clipped = xp.clip(t, 0.0, 1.0)  # (K, M)
+    
+    # 4. Znalezienie najbliższego punktu na odcinku względem środka AABB
+    P_closest = A + xp.expand_dims(t_clipped, axis=-1) * AB  # (K, M, 3)
+    
+    # 5. Obliczenie dystansu do granic prostopadłościanu
+    # Różnica absolutna między punktem a środkiem minus połowa wymiarów
+    half_extents = dims / 2.0  
+    dist_vector = xp.abs(P_closest - C) - half_extents  # (K, M, 3)
+    
+    # Punkt jest wewnątrz AABB wtedy i tylko wtedy, gdy wszystkie osie (X, Y, Z) są < 0.
+    # Używamy maksimum wzdłuż osi wymiarów (axis=-1), aby znaleźć "najpłytszą" oś penetracji.
+    max_dist = xp.max(dist_vector, axis=-1)  # (K, M)
+    
+    # 6. Wartość kary: im głębiej wewnątrz bryły, tym większa dodatnia kara. Brak kolizji = 0.
+    violation = xp.maximum(0.0, -max_dist)
+    
+    return violation
 
 # --- 1. Funkcje Celu (Objectives) ---
 
@@ -157,11 +197,17 @@ def calc_collision_risk_segments(
             )
             
         elif shape == ObstacleShape.BOX:
-            max_side = xp.maximum(d1, d2)
-            radii = (max_side / 2.0 * 1.414) + safety_margin 
-            heights = d3
+            # Składamy wymiary (d1=length, d2=width, d3=height) w wektor (M, 3)
+            # Dodajemy safety_margin * 2, ponieważ margines zwiększa bryłę z obu stron osi
+            obs_dims = xp.stack([
+                d1 + (safety_margin * 2), 
+                d2 + (safety_margin * 2), 
+                d3 + (safety_margin * 2)
+            ], axis=-1)
+            
+            # Wektoryzowane i precyzyjne wywołanie 4-argumentowe
             batch_violation = _dist_segment_to_box(
-                seg_starts, seg_ends, centers, radii, heights
+                seg_starts, seg_ends, centers, obs_dims
             )
         
         if batch_violation is not None:

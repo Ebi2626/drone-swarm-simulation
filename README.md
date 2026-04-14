@@ -16,7 +16,10 @@ Simulation of drone swarms path planning with modern biologically inspired heuri
     - `/utils` - helper functions, validators, parsers
 - `/tests` - tests
 - `ExperimentRunner.py` - file to launch specific simulation based on hydra config files
-- `environment.yamls` - project dependecies
+- `main.py` - experiment runner with two launch modes:
+    - `default` - `python main.py` - will launch new simulation on new world with dynamically created obstacles
+    - `replay` - `python main.py --replay /results/2026-04-13/` - will rerun simulation from file
+- `environment.yaml` - project dependecies
 - `mypy.ini` - types restriction config (mypy)
 
 ## Main concepts

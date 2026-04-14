@@ -12,7 +12,9 @@ Golden Rules enforced:
      diluted by four clean constraints.
 """
 
-from typing import Any, Dict
+from __future__ import annotations
+
+from typing import Any, Dict, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,6 +25,9 @@ from src.algorithms.abstraction.trajectory.objective_constrains import (
 from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (
     _generate_bezier_curve
 )
+
+if TYPE_CHECKING:
+    from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 class TrajectorySOOAdapter:
     """Converts VectorizedEvaluator outputs into a single scalar fitness.
@@ -60,6 +65,7 @@ class TrajectorySOOAdapter:
         n_output_samples: int,
         weights: NDArray[np.float64],
         penalty_weight: float = 100.0,
+        history_writer: OptimizationHistoryWriter | None = None,
     ) -> None:
         self.evaluator = evaluator
         self.n_drones = n_drones
@@ -67,6 +73,7 @@ class TrajectorySOOAdapter:
         self.n_output_samples = n_output_samples
         self.weights = np.asarray(weights, dtype=np.float64)  # (3,)
         self.penalty_weight = penalty_weight
+        self._history_writer = history_writer
 
         # Broadcast-ready endpoint shapes: (1, D, 1, 3)
         self._starts_bc = start_positions[np.newaxis, :, np.newaxis, :]
@@ -135,6 +142,16 @@ class TrajectorySOOAdapter:
 
         F = out["F"]  # (Pop_size, 3)
         G = out["G"]  # (Pop_size, 5)
+
+        # Udostępnij surowe wartości dla loggera w MSFFOAOptimizer
+        self._last_objectives = F
+        self._last_constraints = G
+
+        if self._history_writer is not None:
+            self._history_writer.put_generation_data({
+                "objectives_matrix": F.copy(),
+                "decisions_matrix": inner_waypoints.reshape(pop_size, -1).copy(),
+            })
 
         # 4. Golden Rule #1: Normalize objectives by reference scales
         F_norm = F / self._f_ref[np.newaxis, :]  # (Pop_size, 3)

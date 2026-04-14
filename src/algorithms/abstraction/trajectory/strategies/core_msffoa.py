@@ -16,10 +16,15 @@ References:
     Multi-strategy variants: adaptive strategy allocation per generation.
 """
 
-from typing import Callable, Tuple
+from __future__ import annotations
+
+from typing import Callable, Tuple, TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +154,7 @@ class MSFFOAOptimizer:
         levy_beta: float = 1.5,
         sigma_min_fraction: float = 0.01,
         bounds_margin: float = 50.0,
+        history_writer: OptimizationHistoryWriter | None = None,
     ) -> None:
         self.pop_size = pop_size
         self.n_drones = n_drones
@@ -178,6 +184,7 @@ class MSFFOAOptimizer:
         # Minimum Gaussian sigma to prevent search stagnation
         self._sigma_min = self.world_size * sigma_min_fraction  # (3,)
 
+        self._history_writer = history_writer
         self.rng = np.random.default_rng(seed)
 
         # State — populated by optimize()
@@ -453,6 +460,12 @@ class MSFFOAOptimizer:
 
             # Update strategy rewards for next generation
             self._update_rewards(assignments, improved)
+
+            if self._history_writer is not None:
+                self._history_writer.put_generation_data({
+                    "objectives_matrix": self.fitness.copy().reshape(-1, 1),
+                    "decisions_matrix": self.population.reshape(self.pop_size, -1).copy(),
+                })
 
             if (gen + 1) % max(1, self.max_generations // 10) == 0:
                 n_improved = int(np.sum(improved))

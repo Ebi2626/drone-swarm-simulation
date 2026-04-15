@@ -95,6 +95,7 @@ class ExperimentRunner:
             params={
                 "acceptance_radius": 0.2,
                 "ctrl_freq": self.ctrl_freq,
+                "collision_radius": 0.5
             }
         )
 

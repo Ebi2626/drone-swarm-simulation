@@ -1,0 +1,27 @@
+_target_: src.algorithms.abstraction.trajectory.strategies.ssa_strategy.ssa_swarm_strategy
+_partial_: true
+_convert_: "all" 
+
+# Parametry optymalizacji dla Sparrow Search Algorithm (SSA)
+algorithm_params:
+  pop_size: 200
+  n_gen: 4000
+  
+  # --- Parametry biologiczne modelu SSA ---
+  st: 0.95           # Safety Threshold (Próg bezpieczeństwa) - wartość zalecana w literaturze: 0.8
+  pd_ratio: 0.3     # Odsetek Producentów (Producers) w populacji - wyznacza kierunek lotu (zwykle 20%)
+  sd_ratio: 0.4   # Odsetek Zwiadowców (Scouts) - zapobiega wpadaniu w lokalne minima (zalecane od 10% do 20%)
+  
+  # --- Agregacja i Kary (Skalaryzacja do jednego wymiaru oceny) ---
+  penalty_weight: 10000.0   # Twarda kara za naruszenie ograniczeń G (wlot w przeszkodę, zderzenie dronów)
+  weight_distance: 3.0      # Waga priorytetu dla najkrótszej drogi
+  weight_smoothness: 2.0    # Waga priorytetu dla gładkości (brak ostrych zakrętów)
+  weight_uniformity: 100.0    # Waga dla jednolitych odstępów między waypointami
+  
+  # --- Parametry ewaluatora (środowiskowe, bez zmian względem NSGA-III) ---
+  n_inner_waypoints: 15
+  min_dist: 1.5
+  ignore_ratio: 0.1
+  safety_margin: 2.0
+  uniformity_std: 50.0
+  max_jerk: 100.0

@@ -36,7 +36,8 @@ class GenerationDataStrategy(ExperimentDataStrategy):
                     'height': runner.obstacle_height,
                 },
                 start_positions=runner.start_positions,
-                target_positions=runner.end_positions
+                target_positions=runner.end_positions,
+                safe_radius=runner.safe_radius
             )
         
         # 3. Zgodnie z oryginałem - wstrzykujemy DOKŁADNIE 6 argumentów do strategii.

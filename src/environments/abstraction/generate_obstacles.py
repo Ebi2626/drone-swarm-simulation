@@ -63,7 +63,7 @@ def strategy_random_uniform(
     count: int, 
     start_positions: Optional[np.ndarray] = None,
     target_positions: Optional[np.ndarray] = None,
-    safe_radius: float = 15.0,
+    safe_radius: float = 30.0,
     *args
 ) -> np.ndarray:
     """
@@ -268,7 +268,6 @@ def generate_obstacles(
             data (np.ndarray): Matrix (N, 6)  conatining coordinates of obstacles and their dimensions. \n
             shape_type (str): 'CYLINDER' lub 'BOX'
     """
-
     # Creating copy of world boundaries to avoid modifying the original data
     spawn_min = world.min_bounds.copy()
     spawn_max = world.max_bounds.copy()

@@ -41,6 +41,7 @@ def mock_runner():
     runner.world_data = None
     runner.obstacles_data = None
     runner.trajectories = None
+    runner.safe_radius = 10.0
     return runner
 
 
@@ -117,6 +118,7 @@ def test_world_boundaries_params_forwarded(
     mock_runner.track_length = 84.0
     mock_runner.track_height = 21.0
     mock_runner.ground_position = 1.5
+    mock_runner.safe_radius = 10.0
 
     strategy.prepare_data(mock_runner)
 
@@ -155,6 +157,7 @@ def test_obstacles_params_forwarded(
         },
         start_positions=mock_runner.start_positions,
         target_positions=mock_runner.end_positions,
+        safe_radius=mock_runner.safe_radius
     )
 
 

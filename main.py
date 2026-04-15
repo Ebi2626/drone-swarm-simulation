@@ -60,6 +60,7 @@ class ExperimentRunner:
         self.obstacle_width = cfg.environment.params.get("obstacle_width")
         self.obstacle_height = cfg.environment.params.get("obstacle_height")
         self.obstacle_length = cfg.environment.params.get("obstacle_length")
+        self.safe_radius = cfg.environment.params.get("safe_radius")
 
         # Ustawienia optymalizatora
         self.number_of_waypoints = cfg.optimizer.algorithm_params.get("n_inner_waypoints")
@@ -94,6 +95,7 @@ class ExperimentRunner:
             params={
                 "acceptance_radius": 0.2,
                 "ctrl_freq": self.ctrl_freq,
+                "collision_radius": 0.5
             }
         )
 

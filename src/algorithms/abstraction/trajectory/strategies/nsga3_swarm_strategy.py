@@ -250,7 +250,7 @@ class HeuristicSampling(Sampling):
                     "Cannot calculate noise scale for sampling."
                 )
             max_horizontal_size = np.max(horizontal_dims)
-            noise_xy = np.random.normal(0, max_horizontal_size, (n_samples, self.n_drones, self.n_inner_points, 2))
+            noise_xy = np.random.normal(0, max_horizontal_size * 2, (n_samples, self.n_drones, self.n_inner_points, 2))
             X[..., :2] += noise_xy
         
         # Przestrzeń warstwowa zamiast Gaussa z obcinaniem.

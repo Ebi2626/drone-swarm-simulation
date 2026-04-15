@@ -4,16 +4,17 @@ _convert_: "all"
 
 # Parametry specyficzne dla NSGA-III
 algorithm_params:
-  pop_size: 300
-  n_gen: 3500
-  min_ideal_solutions: 10
+  pop_size: 500
+  n_gen: 2000
+  min_ideal_solutions: 100
   crossover_prob: 0.95
   mutation_prob: 0.4
-  eta_c: 2  # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja
-  eta_m: 5  # parametr rozkładu dla mutacji wielomianowej - im więcej tym mniej mutacji 
+  eta_c: 5 # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja
+  eta_m: 3  # parametr rozkładu dla mutacji wielomianowej - im więcej tym mniej mutacji 
   decision_mode: "safety" # knee_point | safety | equal
-  n_inner_waypoints: 8
-  min_dist: 0.5
-  ignore_ratio: 0.4
-  uniformity_std: 25.0
-  max_jerk: 50.0
+  n_inner_waypoints: 11
+  safety_margin: 1.5
+  min_dist: 1.0
+  ignore_ratio: 0.1
+  uniformity_std: 100.0
+  max_jerk: 100.0

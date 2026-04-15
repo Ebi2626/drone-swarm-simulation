@@ -1,7 +1,7 @@
 defaults:
   - _self_
-  - environment: forest
-  - optimizer: msffoa
+  - environment: urban
+  - optimizer: ssa
 
 simulation:
   duration_sec: 180
@@ -12,7 +12,7 @@ simulation:
   physics: "PYB"
   sim_speed_multiplier: 5.0
 
-seed: 42
+seed: 43
 experiment_name: "test_run"
 debug: true
 logging:

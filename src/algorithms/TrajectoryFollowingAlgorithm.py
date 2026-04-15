@@ -29,7 +29,7 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         # Nowe parametry dla B-Spline i Profilu Trapezowego
         self.cruise_speed = self.params.get("cruise_speed", 8.0)
         self.max_accel = self.params.get("max_accel", 2.0)
-        self.safe_radius = self.params.get("safe_radius", 0.4)
+        self.collision_radius = self.params.get("collision_radius", 0.4)
 
     def init_lidars(self, physics_client_id: int) -> None:
         """Inicjalizuje sensory lidar po utworzeniu świata PyBullet."""
@@ -111,7 +111,7 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             for i in range(self.num_drones):
                 for j in range(i + 1, self.num_drones):
                     dist = np.linalg.norm(positions[i] - positions[j])
-                    if dist < self.safe_radius:
+                    if dist < self.collision_radius:
                         # Zwracamy pierwszą znalezioną kolizję: (id_drona_1, id_drona_2, pos_1, pos_2)
                         return (i, j, positions[i], positions[j])
         return ()

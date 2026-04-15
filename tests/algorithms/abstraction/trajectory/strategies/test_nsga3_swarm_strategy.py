@@ -77,13 +77,13 @@ def test_heuristic_sampling_logic(mock_world_data, mock_obstacles_data):
 
 @patch(f"{TARGET_MODULE}.HydraConfig")  # Dodany mock dla Hydry
 @patch(f"{TARGET_MODULE}.minimize")
-def test_nsga3_strategy_fallback_with_altitude(mock_minimize, mock_hydraconfig, mock_world_data):
+def test_nsga3_strategy_fallback_with_altitude(mock_minimize, mock_hydraconfig, mock_world_data, tmp_path):
     """
     Testuje, czy w razie braku rozwiązań, linia prosta jest generowana
     nad minimalną bezpieczną wysokością (np. 2.0m).
     """
-    # 1. Konfiguracja mocka dla Hydry, aby .get().runtime.output_dir zwróciło fałszywą ścieżkę
-    mock_hydraconfig.get.return_value.runtime.output_dir = "mocked_output_dir"
+    # 1. Konfiguracja mocka dla Hydry, aby .get().runtime.output_dir zwróciło tymczasową ścieżkę
+    mock_hydraconfig.get.return_value.runtime.output_dir = str(tmp_path)
     
     # 2. Symulacja błędu optymalizacji (brak rozwiązań)
     mock_res = MagicMock()

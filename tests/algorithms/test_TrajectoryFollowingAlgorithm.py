@@ -105,7 +105,7 @@ def test_insert_midpoint_near(mock_parent):
 def test_verify_trajectories_detects_collision(MockSpline, mock_parent):
     """Intencja: Upewnienie się, że sprawdzanie w pętli czasowej wykryje przecięcie stref."""
     algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
-    algo.safe_radius = 1.0
+    algo.collision_radius = 1.0
     
     spline1, spline2 = MagicMock(), MagicMock()
     spline1.total_duration = 5.0

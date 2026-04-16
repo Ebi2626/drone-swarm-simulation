@@ -183,3 +183,147 @@ def test_save_does_not_create_empty_collision_file(logger, tmp_path):
     
     assert (tmp_path / "trajectories.csv").exists()
     assert not (tmp_path / "collisions.csv").exists()
+
+
+# ==========================================
+# TESTY OPTIMIZATION TIMING
+# ==========================================
+
+def test_log_optimization_timing_full_record(logger, tmp_path):
+    """All fields provided — record is buffered and written correctly."""
+    logger.log_optimization_timing(
+        run_id="run-001",
+        algorithm_name="MSFFOA",
+        stage_name="optimization",
+        wall_time_s=12.345,
+        cpu_time_s=10.1,
+        success=True,
+        n_drones=5,
+        number_of_waypoints=100,
+        population_size=200,
+        max_generations=500,
+        extra_params={"levy_beta": 1.5},
+        created_at_utc="2026-04-16T10:00:00.000+00:00",
+    )
+
+    assert len(logger.optimization_timing_buffer) == 1
+
+    logger.save()
+
+    path = tmp_path / "optimization_timings.csv"
+    assert path.exists()
+
+    df = pd.read_csv(path)
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["run_id"] == "run-001"
+    assert row["algorithm_name"] == "MSFFOA"
+    assert row["stage_name"] == "optimization"
+    assert row["wall_time_s"] == pytest.approx(12.345)
+    assert row["cpu_time_s"] == pytest.approx(10.1)
+    assert row["success"] == True
+    assert row["n_drones"] == 5
+    assert row["number_of_waypoints"] == 100
+    assert row["population_size"] == 200
+    assert row["max_generations"] == 500
+    assert '"levy_beta": 1.5' in row["extra_params_json"]
+    assert row["created_at_utc"] == "2026-04-16T10:00:00.000+00:00"
+
+    # Buffer cleared after save
+    assert len(logger.optimization_timing_buffer) == 0
+
+
+def test_log_optimization_timing_partial_fields(logger, tmp_path):
+    """Only algorithm_name and wall_time_s provided — rest defaults gracefully."""
+    logger.log_optimization_timing(
+        algorithm_name="SSA",
+        wall_time_s=3.0,
+    )
+    logger.save()
+
+    df = pd.read_csv(tmp_path / "optimization_timings.csv")
+    row = df.iloc[0]
+    assert row["algorithm_name"] == "SSA"
+    assert row["wall_time_s"] == pytest.approx(3.0)
+    # Missing optional fields should be empty / NaN, not crash
+    assert pd.isna(row["n_drones"]) or row["n_drones"] == ""
+
+
+def test_log_optimization_timing_multiple_stages(logger, tmp_path):
+    """Multiple stages buffered before a single save()."""
+    logger.log_optimization_timing(
+        algorithm_name="NSGA-III",
+        stage_name="initialization",
+        wall_time_s=0.5,
+    )
+    logger.log_optimization_timing(
+        algorithm_name="NSGA-III",
+        stage_name="optimization",
+        wall_time_s=45.2,
+    )
+    logger.log_optimization_timing(
+        algorithm_name="NSGA-III",
+        stage_name="decision_selection",
+        wall_time_s=0.01,
+    )
+
+    assert len(logger.optimization_timing_buffer) == 3
+
+    logger.save()
+
+    df = pd.read_csv(tmp_path / "optimization_timings.csv")
+    assert len(df) == 3
+    assert list(df["stage_name"]) == [
+        "initialization",
+        "optimization",
+        "decision_selection",
+    ]
+
+
+def test_save_no_timing_file_when_buffer_empty(logger, tmp_path):
+    """No optimization_timings.csv created when no timing records logged."""
+    logger.trajectory_buffer.append((1.0, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0))
+    logger.save()
+
+    assert (tmp_path / "trajectories.csv").exists()
+    assert not (tmp_path / "optimization_timings.csv").exists()
+
+
+def test_timing_does_not_interfere_with_trajectories(logger, tmp_path):
+    """Timing records and trajectory records stay in separate files."""
+    logger.trajectory_buffer.append((1.0, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0))
+    logger.collision_buffer.append((2.0, 1, 42))
+    logger.log_optimization_timing(
+        algorithm_name="OOA",
+        stage_name="full_run",
+        wall_time_s=60.0,
+    )
+
+    logger.save()
+
+    traj_df = pd.read_csv(tmp_path / "trajectories.csv")
+    coll_df = pd.read_csv(tmp_path / "collisions.csv")
+    timing_df = pd.read_csv(tmp_path / "optimization_timings.csv")
+
+    assert len(traj_df) == 1
+    assert "algorithm_name" not in traj_df.columns
+
+    assert len(coll_df) == 1
+    assert "algorithm_name" not in coll_df.columns
+
+    assert len(timing_df) == 1
+    assert "drone_id" not in timing_df.columns
+
+
+def test_log_optimization_timing_empty_extra_params(logger, tmp_path):
+    """extra_params=None produces an empty string, not a crash."""
+    logger.log_optimization_timing(
+        algorithm_name="Test",
+        stage_name="s",
+        wall_time_s=1.0,
+        extra_params=None,
+    )
+    logger.save()
+
+    df = pd.read_csv(tmp_path / "optimization_timings.csv")
+    assert df.iloc[0]["extra_params_json"] == "" or pd.isna(df.iloc[0]["extra_params_json"])

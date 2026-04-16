@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+from contextlib import nullcontext
 
 import numpy as np
 from numpy.typing import NDArray
@@ -32,6 +33,7 @@ from src.environments.abstraction.generate_world_boundaries import WorldData
 
 if TYPE_CHECKING:
     from src.utils.optimization_history_writer import OptimizationHistoryWriter
+    from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +301,7 @@ def osprey_swarm_strategy(
     number_of_waypoints: int,
     drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
+    timing: Optional["TimingCollector"] = None,
 ) -> NDArray[np.float64]:
     """Strategia generowania trajektorii roju dronow za pomoca Osprey Optimization Algorithm.
 
@@ -321,142 +324,170 @@ def osprey_swarm_strategy(
         number_of_waypoints: liczba punktow gestej trajektorii wyjsciowej.
         drone_swarm_size: liczba dronow w roju.
         algorithm_params: parametry konfiguracyjne algorytmu OOA.
+        timing: opcjonalny kolektor czasowy logujacy dzialanie algorytmu.
 
     Returns:
         NDArray o ksztalcie (N_drones, N_waypoints, 3).
     """
-    params = algorithm_params or {}
+    local_timing = False
+    if timing is None:
+        try:
+            from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
+            timing = TimingCollector("OOA_Swarm")
+            local_timing = True
+        except ImportError:
+            timing = None
 
-    # --- Parametry OOA ---
-    pop_size: int = params.get("pop_size", 100)
-    n_epochs: int = params.get("n_gen", 500)
-    n_inner: int = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
-
-    weights = {
-        "w_path_length": params.get("w_path_length", 1.0),
-        "w_collision_risk": params.get("w_collision_risk", 5.0),
-        "w_elevation": params.get("w_elevation", 0.5),
-    }
-    penalty_weight: float = params.get("penalty_weight", 100.0)
-
-    # --- Multithreading ---
-    n_workers: int = params.get("n_workers", 4)
-    mode: str = "thread" if n_workers > 1 else "swarm"
-
-    # --- Normalizacja listy przeszkod ---
-    obs_list: List[Any] = obstacles_data if isinstance(obstacles_data, list) else [obstacles_data]
-
-    # --- Granice zmiennych decyzyjnych ---
-    margin = 50.0
-    MIN_Z_ALTITUDE = 0.5
-
-    xl_point = np.array(world_data.min_bounds, dtype=float) - margin
-    xu_point = np.array(world_data.max_bounds, dtype=float) + margin
-    xl_point[2] = max(MIN_Z_ALTITUDE, float(world_data.min_bounds[2]))
-
-    n_var = drone_swarm_size * n_inner * 3
-    xl = np.tile(xl_point, drone_swarm_size * n_inner)
-    xu = np.tile(xu_point, drone_swarm_size * n_inner)
-
-    from src.utils.optimization_history_writer import OptimizationHistoryWriter
-
-    hydra_output_dir = HydraConfig.get().runtime.output_dir
-    writer = OptimizationHistoryWriter(
-        output_dir=os.path.join(hydra_output_dir, "optimization_history")
-    )
-
-    print(
-        f"[OOA] Start. Pop: {pop_size}, Epochs: {n_epochs}, "
-        f"Inner Pts: {n_inner}, Vars: {n_var}, Mode: {mode}, Workers: {n_workers}"
-    )
-
-    # --- Evaluator ---
-    evaluator = VectorizedEvaluator(
-        obstacles=obs_list,
-        start_pos=start_positions,
-        target_pos=target_positions,
-        params=params,
-    )
-
-    # --- Problem (mealpy.Problem subclass) ---
-    problem = OspreyProblemAdapter(
-        bounds=FloatVar(lb=xl, ub=xu),
-        evaluator=evaluator,
-        start_pos=start_positions,
-        target_pos=target_positions,
-        n_drones=drone_swarm_size,
-        n_inner=n_inner,
-        n_output_samples=number_of_waypoints,
-        weights=weights,
-        penalty_weight=penalty_weight,
-        history_writer=writer,
-        expected_pop_size=pop_size,
-        log_to="console",
-    )
-
-    # --- Populacja poczatkowa (heurystyczna) ---
-    first_obs = None
-    if isinstance(obstacles_data, list) and len(obstacles_data) > 0:
-        first_obs = obstacles_data[0]
-    elif not isinstance(obstacles_data, list):
-        first_obs = obstacles_data
-
-    starting_solutions = _generate_starting_solutions(
-        start_pos=start_positions,
-        target_pos=target_positions,
-        n_drones=drone_swarm_size,
-        n_inner=n_inner,
-        pop_size=pop_size,
-        world_data=world_data,
-        obstacles_data=first_obs,
-        xl=xl,
-        xu=xu,
-    )
-
-    # --- Uruchomienie OOA ---
-    model = OriginalOOA(epoch=n_epochs, pop_size=pop_size)
+    _measure = timing.measure if timing is not None else lambda *a, **kw: nullcontext()
+    writer = None
 
     try:
-        best_agent = model.solve(
-            problem=problem,
-            mode=mode,
-            n_workers=n_workers,
-            starting_solutions=starting_solutions,
-            seed=params.get("seed", 1),
-        )
+        with _measure("total_optimization"):
+            with _measure("initialization"):
+                params = algorithm_params or {}
 
-        best_x = best_agent.solution
-        best_fitness = best_agent.target.fitness
-        print(f"[OOA] Zakonczono. Najlepszy fitness: {best_fitness:.4f}")
-        print(f"[OOA] Skale normalizacji F_ref: {problem._f_scale}")
+                # --- Parametry OOA ---
+                pop_size: int = params.get("pop_size", 100)
+                n_epochs: int = params.get("n_gen", 500)
+                n_inner: int = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
 
-        # --- Rekonstrukcja trajektorii ---
-        inner = best_x.reshape(1, drone_swarm_size, n_inner, 3)
-        s = start_positions[np.newaxis, :, np.newaxis, :]
-        t = target_positions[np.newaxis, :, np.newaxis, :]
-        sparse = np.concatenate([s, inner, t], axis=2)
-        final_traj = _resample_polyline(sparse, num_samples=number_of_waypoints)
+                weights = {
+                    "w_path_length": params.get("w_path_length", 1.0),
+                    "w_collision_risk": params.get("w_collision_risk", 5.0),
+                    "w_elevation": params.get("w_elevation", 0.5),
+                }
+                penalty_weight: float = params.get("penalty_weight", 100.0)
 
-        return final_traj[0]  # (N_drones, N_waypoints, 3)
+                # --- Multithreading ---
+                n_workers: int = params.get("n_workers", 4)
+                mode: str = "thread" if n_workers > 1 else "swarm"
 
-    except Exception as e:
-        print(f"[OOA] Blad optymalizacji: {e}. Zwracam linie prosta.")
+                # --- Normalizacja listy przeszkod ---
+                obs_list: List[Any] = obstacles_data if isinstance(obstacles_data, list) else [obstacles_data]
+
+                # --- Granice zmiennych decyzyjnych ---
+                margin = 50.0
+                MIN_Z_ALTITUDE = 0.5
+
+                xl_point = np.array(world_data.min_bounds, dtype=float) - margin
+                xu_point = np.array(world_data.max_bounds, dtype=float) + margin
+                xl_point[2] = max(MIN_Z_ALTITUDE, float(world_data.min_bounds[2]))
+
+                n_var = drone_swarm_size * n_inner * 3
+                xl = np.tile(xl_point, drone_swarm_size * n_inner)
+                xu = np.tile(xu_point, drone_swarm_size * n_inner)
+
+                from src.utils.optimization_history_writer import OptimizationHistoryWriter
+
+                hydra_output_dir = HydraConfig.get().runtime.output_dir
+                writer = OptimizationHistoryWriter(
+                    output_dir=os.path.join(hydra_output_dir, "optimization_history")
+                )
+
+                print(
+                    f"[OOA] Start. Pop: {pop_size}, Epochs: {n_epochs}, "
+                    f"Inner Pts: {n_inner}, Vars: {n_var}, Mode: {mode}, Workers: {n_workers}"
+                )
+
+                # --- Evaluator ---
+                evaluator = VectorizedEvaluator(
+                    obstacles=obs_list,
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    params=params,
+                )
+
+                # --- Problem (mealpy.Problem subclass) ---
+                problem = OspreyProblemAdapter(
+                    bounds=FloatVar(lb=xl, ub=xu),
+                    evaluator=evaluator,
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    n_drones=drone_swarm_size,
+                    n_inner=n_inner,
+                    n_output_samples=number_of_waypoints,
+                    weights=weights,
+                    penalty_weight=penalty_weight,
+                    history_writer=writer,
+                    expected_pop_size=pop_size,
+                    log_to="console",
+                )
+
+                # --- Populacja poczatkowa (heurystyczna) ---
+                first_obs = None
+                if isinstance(obstacles_data, list) and len(obstacles_data) > 0:
+                    first_obs = obstacles_data[0]
+                elif not isinstance(obstacles_data, list):
+                    first_obs = obstacles_data
+
+                starting_solutions = _generate_starting_solutions(
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    n_drones=drone_swarm_size,
+                    n_inner=n_inner,
+                    pop_size=pop_size,
+                    world_data=world_data,
+                    obstacles_data=first_obs,
+                    xl=xl,
+                    xu=xu,
+                )
+
+                # --- Uruchomienie OOA ---
+                model = OriginalOOA(epoch=n_epochs, pop_size=pop_size)
+
+            try:
+                with _measure("optimization"):
+                    best_agent = model.solve(
+                        problem=problem,
+                        mode=mode,
+                        n_workers=n_workers,
+                        starting_solutions=starting_solutions,
+                        seed=params.get("seed", 1),
+                    )
+
+                    best_x = best_agent.solution
+                    best_fitness = best_agent.target.fitness
+                    print(f"[OOA] Zakonczono. Najlepszy fitness: {best_fitness:.4f}")
+                    print(f"[OOA] Skale normalizacji F_ref: {problem._f_scale}")
+
+                with _measure("decision_and_reconstruction"):
+                    # --- Rekonstrukcja trajektorii ---
+                    inner = best_x.reshape(1, drone_swarm_size, n_inner, 3)
+                    s = start_positions[np.newaxis, :, np.newaxis, :]
+                    t = target_positions[np.newaxis, :, np.newaxis, :]
+                    sparse = np.concatenate([s, inner, t], axis=2)
+                    final_traj = _resample_polyline(sparse, num_samples=number_of_waypoints)
+
+                    return final_traj[0]  # (N_drones, N_waypoints, 3)
+
+            except Exception as e:
+                with _measure("fallback"):
+                    print(f"[OOA] Blad optymalizacji: {e}. Zwracam linie prosta.")
+                    print("[OOA] Fallback: generowanie linii prostej.")
+                    t_line = np.linspace(0, 1, number_of_waypoints)
+                    out = np.empty((drone_swarm_size, number_of_waypoints, 3))
+                    min_safe_alt = params.get("min_safe_altitude", 1.0)
+
+                    for d in range(drone_swarm_size):
+                        for axis in range(2):
+                            out[d, :, axis] = np.interp(
+                                t_line, [0, 1], [start_positions[d, axis], target_positions[d, axis]]
+                            )
+                        z_start = max(float(start_positions[d, 2]), min_safe_alt)
+                        z_target = max(float(target_positions[d, 2]), min_safe_alt)
+                        out[d, :, 2] = np.interp(t_line, [0, 1], [z_start, z_target])
+
+                    return out
+
     finally:
-        writer.close()
-
-    # --- Fallback: linia prosta ---
-    print("[OOA] Fallback: generowanie linii prostej.")
-    t_line = np.linspace(0, 1, number_of_waypoints)
-    out = np.empty((drone_swarm_size, number_of_waypoints, 3))
-    min_safe_alt = params.get("min_safe_altitude", 1.0)
-
-    for d in range(drone_swarm_size):
-        for axis in range(2):
-            out[d, :, axis] = np.interp(
-                t_line, [0, 1], [start_positions[d, axis], target_positions[d, axis]]
-            )
-        z_start = max(float(start_positions[d, 2]), min_safe_alt)
-        z_target = max(float(target_positions[d, 2]), min_safe_alt)
-        out[d, :, 2] = np.interp(t_line, [0, 1], [z_start, z_target])
-
-    return out
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        if local_timing and timing is not None:
+            try:
+                out_dir = HydraConfig.get().runtime.output_dir
+                timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
+            except Exception as e:
+                print(f"[OOA] Nie udało się zapisać logów czasowych: {e}")

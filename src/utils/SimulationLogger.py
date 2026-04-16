@@ -1,5 +1,8 @@
+import json
 import os
 import csv
+from typing import Any, Dict, List, Optional
+
 from numpy.typing import NDArray
 import pandas as pd
 import numpy as np
@@ -8,13 +11,30 @@ from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 
+_TIMING_HEADERS = [
+    "run_id",
+    "algorithm_name",
+    "stage_name",
+    "wall_time_s",
+    "cpu_time_s",
+    "success",
+    "n_drones",
+    "number_of_waypoints",
+    "population_size",
+    "max_generations",
+    "extra_params_json",
+    "created_at_utc",
+]
+
+
 class SimulationLogger:
     def __init__(self, output_dir, log_freq, ctrl_freq, num_drones):
         self.output_dir = output_dir
         self.log_step_interval = max(1, int(ctrl_freq / log_freq))
-        self.num_drones = num_drones        
+        self.num_drones = num_drones
         self.trajectory_buffer = []
-        self.collision_buffer = []        
+        self.collision_buffer = []
+        self.optimization_timing_buffer: List[Dict[str, Any]] = []
         self.crashed_drones = set()
         print("[LOGGER] Buffering in RAM. Writing to disk after completion.")
 
@@ -133,30 +153,78 @@ class SimulationLogger:
         obstacles_data_frame.to_csv(path, index=False, float_format="%.4f")
         print(f"Zapisano {len(obstacles_data_frame)} pozycji przeszkód do: {path}")
 
+    def log_optimization_timing(
+        self,
+        *,
+        run_id: str = "",
+        algorithm_name: str = "",
+        stage_name: str = "",
+        wall_time_s: Optional[float] = None,
+        cpu_time_s: Optional[float] = None,
+        success: Optional[bool] = None,
+        n_drones: Optional[int] = None,
+        number_of_waypoints: Optional[int] = None,
+        population_size: Optional[int] = None,
+        max_generations: Optional[int] = None,
+        extra_params: Optional[Dict[str, Any]] = None,
+        created_at_utc: str = "",
+    ) -> None:
+        """Buffer a single optimization timing record.
+
+        All parameters are keyword-only with safe defaults so the logger
+        keeps working even when the caller provides only a subset.
+        """
+        self.optimization_timing_buffer.append({
+            "run_id": run_id,
+            "algorithm_name": algorithm_name,
+            "stage_name": stage_name,
+            "wall_time_s": wall_time_s,
+            "cpu_time_s": cpu_time_s,
+            "success": success,
+            "n_drones": n_drones,
+            "number_of_waypoints": number_of_waypoints,
+            "population_size": population_size,
+            "max_generations": max_generations,
+            "extra_params_json": json.dumps(extra_params) if extra_params else "",
+            "created_at_utc": created_at_utc,
+        })
+
     def save(self):
         print("[LOGGER] Saving data to disk...")
-        
+
         if self.trajectory_buffer:
             path = os.path.join(self.output_dir, "trajectories.csv")
             headers = ["time", "drone_id", "x", "y", "z", "roll", "pitch", "yaw", "vx", "vy", "vz"]
-            
+
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
                 writer.writerows(self.trajectory_buffer)
             print("[LOGGER] Trajectories saved: trajectories.csv")
             self.trajectory_buffer.clear()
-        
+
         if self.collision_buffer:
             path = os.path.join(self.output_dir, "collisions.csv")
             headers = ["time", "drone_id", "other_body_id"]
-            
+
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
                 writer.writerows(self.collision_buffer)
-                
+
             print(f"[LOGGER] Collisions saved: collisions.csv ({len(self.collision_buffer)} events)")
             self.collision_buffer.clear()
         else:
             print("[LOGGER] No collisions - file collisions.csv not created.")
+
+        if self.optimization_timing_buffer:
+            path = os.path.join(self.output_dir, "optimization_timings.csv")
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=_TIMING_HEADERS)
+                writer.writeheader()
+                writer.writerows(self.optimization_timing_buffer)
+            print(
+                f"[LOGGER] Optimization timings saved: optimization_timings.csv "
+                f"({len(self.optimization_timing_buffer)} records)"
+            )
+            self.optimization_timing_buffer.clear()

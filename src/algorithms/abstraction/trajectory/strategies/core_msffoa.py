@@ -19,11 +19,13 @@ References:
 from __future__ import annotations
 
 from typing import Callable, Tuple, TYPE_CHECKING
+from contextlib import nullcontext
 
 import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
+    from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
     from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 
@@ -98,6 +100,7 @@ def _generate_bezier_curve(
         curve += cp_i * bernstein_4d
         
     return curve
+
 # ---------------------------------------------------------------------------
 # MSFFOA Optimizer
 # ---------------------------------------------------------------------------
@@ -155,6 +158,7 @@ class MSFFOAOptimizer:
         sigma_min_fraction: float = 0.01,
         bounds_margin: float = 50.0,
         history_writer: OptimizationHistoryWriter | None = None,
+        timing: "TimingCollector | None" = None,
     ) -> None:
         self.pop_size = pop_size
         self.n_drones = n_drones
@@ -185,6 +189,24 @@ class MSFFOAOptimizer:
         self._sigma_min = self.world_size * sigma_min_fraction  # (3,)
 
         self._history_writer = history_writer
+
+        # Obsługa lokalnego fallbacku dla pomiaru czasu
+        self._local_timing = False
+        if timing is None:
+            try:
+                from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
+                self._timing = TimingCollector("MSFFOA")
+                self._local_timing = True
+            except ImportError:
+                self._timing = None
+        else:
+            self._timing = timing
+            
+        if self._timing is not None:
+            self._measure = self._timing.measure
+        else:
+            self._measure = lambda *a, **kw: nullcontext()
+
         self.rng = np.random.default_rng(seed)
 
         # State — populated by optimize()
@@ -230,7 +252,7 @@ class MSFFOAOptimizer:
             0.0, 1.0,
             size=(self.pop_size, self.n_drones, self.n_inner, 3),
         )
-        noise = self._smooth_perturbation(noise) # <--- NOWE
+        noise = self._smooth_perturbation(noise)
         noise *= noise_scale[np.newaxis, np.newaxis, np.newaxis, :] 
         noise[:, :, :, 2] += (noise_scale[2] * 0.5)
 
@@ -298,7 +320,7 @@ class MSFFOAOptimizer:
             (K, D, Inner, 3) candidate positions.
         """
         noise = self.rng.normal(0.0, 1.0, size=positions.shape)
-        noise = self._smooth_perturbation(noise) # <--- NOWE
+        noise = self._smooth_perturbation(noise)
         noise *= sigma[np.newaxis, np.newaxis, np.newaxis, :]
         return self._clip_to_bounds(positions + noise)
 
@@ -315,7 +337,7 @@ class MSFFOAOptimizer:
             (K, D, Inner, 3) candidate positions.
         """
         steps = _levy_step(positions.shape, beta=self.levy_beta, rng=self.rng)
-        steps = self._smooth_perturbation(steps) # <--- NOWE
+        steps = self._smooth_perturbation(steps)
         steps *= scale[np.newaxis, np.newaxis, np.newaxis, :]
         return self._clip_to_bounds(positions + steps)
 
@@ -397,86 +419,100 @@ class MSFFOAOptimizer:
             best_trajectory: (N_drones, N_inner, 3) best inner waypoints found.
             best_fitness: Scalar fitness of the best trajectory.
         """
-        # --- Initialization ---
-        self.population = self._initialize_population()
-        self.fitness = self._evaluate(self.population)
+        try:
+            with self._measure("total_optimization"):
+                # --- Initialization ---
+                with self._measure("population_initialization"):
+                    self.population = self._initialize_population()
+                    self.fitness = self._evaluate(self.population)
 
-        best_idx = int(np.argmin(self.fitness))
-        self.global_best_pos = self.population[best_idx].copy()
-        self.global_best_fitness = float(self.fitness[best_idx])
+                    best_idx = int(np.argmin(self.fitness))
+                    self.global_best_pos = self.population[best_idx].copy()
+                    self.global_best_fitness = float(self.fitness[best_idx])
 
-        print(
-            f"[MSFFOA] Init complete. Pop: {self.pop_size}, "
-            f"Gens: {self.max_generations}, Inner pts: {self.n_inner}, "
-            f"Best fitness: {self.global_best_fitness:.6f}"
-        )
-
-        # --- Generation loop ---
-        for gen in range(self.max_generations):
-            progress = gen / max(self.max_generations - 1, 1)  # 0 -> 1
-
-            # Adaptive parameters: sigma decays, attraction grows
-            sigma = self.world_size * (0.15 * (1 - progress) + 0.01)
-            sigma = np.maximum(sigma, self._sigma_min)
-            
-            # FIX: Zabezpieczenie Levy Scale przed spadkiem do zera (minimum 1.5% wielkości świata)
-            # Inaczej w późnych epokach algorytm traci zdolność przenikania przez ściany (duże skoki)
-            levy_scale = self.world_size * np.maximum(0.02 * (1 - progress), 0.005)            
-            attraction = 0.3 + 0.5 * progress  # 0.3 -> 0.8
-
-            # ---- Phase 1: Smell-based search (Osphresis) ----
-            assignments = self._allocate_strategies()
-            candidates = np.empty_like(self.population)
-
-            mask_s1 = assignments == 0
-            mask_s2 = assignments == 1
-            mask_s3 = assignments == 2
-
-            if mask_s1.any():
-                candidates[mask_s1] = self._strategy_gaussian(
-                    self.population[mask_s1], sigma,
-                )
-            if mask_s2.any():
-                candidates[mask_s2] = self._strategy_levy(
-                    self.population[mask_s2], levy_scale,
-                )
-            if mask_s3.any():
-                candidates[mask_s3] = self._strategy_global_best(
-                    self.population[mask_s3], self.global_best_pos, attraction,
-                )
-
-            # ---- Phase 2: Vision-based search (greedy selection) ----
-            candidate_fitness = self._evaluate(candidates)
-
-            improved = candidate_fitness < self.fitness
-            self.population[improved] = candidates[improved]
-            self.fitness[improved] = candidate_fitness[improved]
-
-            # Update global best
-            gen_best_idx = int(np.argmin(self.fitness))
-            if self.fitness[gen_best_idx] < self.global_best_fitness:
-                self.global_best_pos = self.population[gen_best_idx].copy()
-                self.global_best_fitness = float(self.fitness[gen_best_idx])
-
-            # Update strategy rewards for next generation
-            self._update_rewards(assignments, improved)
-
-            if self._history_writer is not None:
-                self._history_writer.put_generation_data({
-                    "objectives_matrix": self.fitness.copy().reshape(-1, 1),
-                    "decisions_matrix": self.population.reshape(self.pop_size, -1).copy(),
-                })
-
-            if (gen + 1) % max(1, self.max_generations // 10) == 0:
-                n_improved = int(np.sum(improved))
                 print(
-                    f"[MSFFOA] Gen {gen + 1}/{self.max_generations} | "
-                    f"Best: {self.global_best_fitness:.6f} | "
-                    f"Improved: {n_improved}/{self.pop_size} | "
-                    f"Strategy probs: [{self._strategy_rewards / self._strategy_rewards.sum()}]"
+                    f"[MSFFOA] Init complete. Pop: {self.pop_size}, "
+                    f"Gens: {self.max_generations}, Inner pts: {self.n_inner}, "
+                    f"Best fitness: {self.global_best_fitness:.6f}"
                 )
 
-        print(f"[MSFFOA] Finished. Best fitness: {self.global_best_fitness:.6f}")
+                # --- Generation loop ---
+                with self._measure("generation_loop"):
+                    for gen in range(self.max_generations):
+                        progress = gen / max(self.max_generations - 1, 1)  # 0 -> 1
+
+                        # Adaptive parameters: sigma decays, attraction grows
+                        sigma = self.world_size * (0.15 * (1 - progress) + 0.01)
+                        sigma = np.maximum(sigma, self._sigma_min)
+
+                        # FIX: Zabezpieczenie Levy Scale przed spadkiem do zera
+                        levy_scale = self.world_size * np.maximum(0.02 * (1 - progress), 0.005)
+                        attraction = 0.3 + 0.5 * progress  # 0.3 -> 0.8
+
+                        # ---- Phase 1: Smell-based search (Osphresis) ----
+                        assignments = self._allocate_strategies()
+                        candidates = np.empty_like(self.population)
+
+                        mask_s1 = assignments == 0
+                        mask_s2 = assignments == 1
+                        mask_s3 = assignments == 2
+
+                        if mask_s1.any():
+                            candidates[mask_s1] = self._strategy_gaussian(
+                                self.population[mask_s1], sigma,
+                            )
+                        if mask_s2.any():
+                            candidates[mask_s2] = self._strategy_levy(
+                                self.population[mask_s2], levy_scale,
+                            )
+                        if mask_s3.any():
+                            candidates[mask_s3] = self._strategy_global_best(
+                                self.population[mask_s3], self.global_best_pos, attraction,
+                            )
+
+                        # ---- Phase 2: Vision-based search (greedy selection) ----
+                        candidate_fitness = self._evaluate(candidates)
+
+                        improved = candidate_fitness < self.fitness
+                        self.population[improved] = candidates[improved]
+                        self.fitness[improved] = candidate_fitness[improved]
+
+                        # Update global best
+                        gen_best_idx = int(np.argmin(self.fitness))
+                        if self.fitness[gen_best_idx] < self.global_best_fitness:
+                            self.global_best_pos = self.population[gen_best_idx].copy()
+                            self.global_best_fitness = float(self.fitness[gen_best_idx])
+
+                        # Update strategy rewards for next generation
+                        self._update_rewards(assignments, improved)
+
+                        if self._history_writer is not None:
+                            self._history_writer.put_generation_data({
+                                "objectives_matrix": self.fitness.copy().reshape(-1, 1),
+                                "decisions_matrix": self.population.reshape(self.pop_size, -1).copy(),
+                            })
+
+                        if (gen + 1) % max(1, self.max_generations // 10) == 0:
+                            n_improved = int(np.sum(improved))
+                            print(
+                                f"[MSFFOA] Gen {gen + 1}/{self.max_generations} | "
+                                f"Best: {self.global_best_fitness:.6f} | "
+                                f"Improved: {n_improved}/{self.pop_size} | "
+                                f"Strategy probs: [{self._strategy_rewards / self._strategy_rewards.sum()}]"
+                            )
+
+                print(f"[MSFFOA] Finished. Best fitness: {self.global_best_fitness:.6f}")
+        
+        finally:
+            if getattr(self, "_local_timing", False) and self._timing is not None:
+                try:
+                    import os
+                    from hydra.core.hydra_config import HydraConfig
+                    out_dir = HydraConfig.get().runtime.output_dir
+                    self._timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
+                except Exception as e:
+                    print(f"[MSFFOA] Nie udało się zapisać logów czasowych: {e}")
+
         return self.global_best_pos.copy(), self.global_best_fitness
 
     # ------------------------------------------------------------------
@@ -489,8 +525,10 @@ class MSFFOAOptimizer:
         Returns:
             (N_drones, N_output_samples, 3) dense trajectory with start/target.
         """
-        inner = self.global_best_pos[np.newaxis, :, :, :]  # (1, D, Inner, 3)
-        dense = self._build_dense(inner)
+        with self._measure("dense_trajectory_reconstruction"):
+            inner = self.global_best_pos[np.newaxis, :, :, :]  # (1, D, Inner, 3)
+            dense = self._build_dense(inner)
+            
         return dense[0]  # (D, N_out, 3)
     
     def _smooth_perturbation(self, noise: NDArray[np.float64]) -> NDArray[np.float64]:

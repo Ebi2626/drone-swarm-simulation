@@ -1,4 +1,4 @@
-_target_: src.algorithms.abstraction.trajectory.strategies.osprey_swarm_strategy.osprey_swarm_strategy
+_target_: src.algorithms.abstraction.trajectory.strategies.ooa_strategy.osprey_swarm_strategy
 _partial_: true
 _convert_: "all"
 

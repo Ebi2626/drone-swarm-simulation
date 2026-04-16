@@ -24,6 +24,7 @@ from pymoo.operators.mutation.pm import PM
 
 from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.core_math import get_xp
 from src.environments.obstacles.ObstacleShape import ObstacleShape
+from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 # Komponenty wewnętrzne
@@ -304,153 +305,185 @@ def calculate_n_partitions(pop_size: int, n_obj: int = 3) -> int:
 
 
 # --- Główna Funkcja Strategii ---
-
 def nsga3_swarm_strategy(
     *, 
     start_positions: NDArray[np.float64],
     target_positions: NDArray[np.float64],
     obstacles_data: Union[Any, List[Any]], 
-    world_data: WorldData,
+    world_data: "WorldData", # Typ wg. Twojego kodu
     number_of_waypoints: int, 
     drone_swarm_size: int, 
-    algorithm_params: Optional[Dict[str, Any]] = None
+    algorithm_params: Optional[Dict[str, Any]] = None,
+    timing: Optional["TimingCollector"] = None  # <--- Dodany opcjonalny parametr
 ) -> NDArray[np.float64]:
     
-    # 1. Konfiguracja Parametrów
-    params = algorithm_params or {}
-    pop_size = params.get("pop_size", 100)
-    n_gen = params.get("n_gen", 100)
-    eta_c = params.get("eta_c")
-    eta_m = params.get("eta_m")
-    crossover_prob = params.get("crossover_prob", 0.9)
-    mutation_prob = params.get("mutation_prob", 0.1)
-    min_ideal_solutions = params.get("min_ideal_solutions", 30)
-    
-    # Domyślna liczba punktów wewnętrznych (kontrolnych)
-    n_inner = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
-    
-    decision_mode = params.get("decision_mode", "knee_point")
-
-    termination = MultiConditionTermination(
-        n_max_gen=n_gen, 
-        min_feasible_needed=min_ideal_solutions
-    )
-    
-    if isinstance(obstacles_data, list):
-        obs_list = obstacles_data
-    else:
-        obs_list = [obstacles_data]
-    
-    # 2. NSGA-III Setup
-    n_partitions = calculate_n_partitions(pop_size, n_obj=3)
-    ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=n_partitions)
-    actual_pop_size = ref_dirs.shape[0]
-    
-    output_dir = HydraConfig.get().runtime.output_dir
-    writer = OptimizationHistoryWriter(
-        output_dir=os.path.join(output_dir, "optimization_history")
-    )
-
-    print(f"[NSGA-III Polyline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Inner Pts: {n_inner}")
-
-    # 3. Inicjalizacja
-    evaluator = VectorizedEvaluator(
-        obstacles=obs_list,
-        start_pos=start_positions,
-        target_pos=target_positions,
-        params=params
-    )
-    
-    problem = SwarmOptimizationProblem(
-        n_drones=drone_swarm_size,
-        n_inner_points=n_inner,
-        n_output_samples=number_of_waypoints, 
-        world_data=world_data,
-        evaluator=evaluator,
-        start_pos=start_positions,
-        target_pos=target_positions
-    )
-    
-    sampling = HeuristicSampling(
-        start_pos=start_positions,
-        target_pos=target_positions,
-        n_inner_points=n_inner,
-        n_drones=drone_swarm_size,
-        world_data=world_data,
-        obstacles_data=obstacles_data
-    )
-    
-    algorithm = NSGA3(
-        pop_size=pop_size,
-        ref_dirs=ref_dirs,
-        sampling=sampling,
-        crossover=SBX(prob=crossover_prob, eta=eta_c),
-        mutation=PM(eta=eta_m, prob=mutation_prob),
-        eliminate_duplicates=True
-    )
-    
-    # 4. Optymalizacja
-    callback = _HistoryCallback(writer)
-    try:
-        res = minimize(
-            problem,
-            algorithm,
-            termination=termination,
-            seed=1,
-            verbose=True,
-            save_history=True,
-            callback=callback,
-        )
-    except Exception:
-        raise
-    finally:
-        writer.close()
-
-    # 5. Wybór rozwiązania
-    if res.X is not None and len(res.X) > 0:
-        dm: DecisionStrategyProtocol
+    # --- Konfiguracja pomiaru czasu (lokalny fallback) ---
+    local_timing = False
+    if timing is None:
         try:
-            if decision_mode == "safety": 
-                dm = SafetyPriorityDecision()
-            elif decision_mode == "equal": 
-                dm = EqualWeightsDecision()
-            else: 
-                dm = KneePointDecision()
-            
-            best_idx = dm.select_best(res.F, res.G)
-            best_genotype_flat = res.X[best_idx]
-            
-            # Rekonstrukcja
-            inner = best_genotype_flat.reshape(1, drone_swarm_size, n_inner, 3)
-            s = start_positions[None, :, None, :]
-            t = target_positions[None, :, None, :]
-            sparse = np.concatenate([s, inner, t], axis=2)
-            final_traj = resample_polyline_batch(sparse, num_samples=number_of_waypoints)
-            
-            print(f"[NSGA-III] Wybrano rozwiązanie indeks: {best_idx}")
-            return final_traj[0]
-        except Exception as e:
-            print(f"[NSGA-III] Błąd podczas wyboru rozwiązania: {e}")
-            # Fallback w razie błędu decydenta
-            raise LookupError("Results not found")
-        
-    else:
-        print("[NSGA-III] Brak rozwiązań. Zwracam linię prostą.")
-        t = np.linspace(0, 1, number_of_waypoints)
-        out = np.empty((drone_swarm_size, number_of_waypoints, 3))
+            from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
+            timing = TimingCollector("NSGA3_Swarm")
+            local_timing = True
+        except ImportError:
+            timing = None
 
-        MIN_SAFE_ALTITUDE = params.get("min_safe_altitude", 1.0)  # metry nad ziemią
-        print("Target positions: ")
+    from contextlib import nullcontext
+    _measure = timing.measure if timing is not None else lambda *a, **kw: nullcontext()
+    # -----------------------------------------------------
 
-        for d in range(drone_swarm_size):
-            # Osie X i Y: zwykła interpolacja liniowa
-            for i in range(2):
-                out[d, :, i] = np.interp(t, [0, 1], [start_positions[d, i], target_positions[d, i]])
-                print(target_positions[d, i])
+    try:
+        with _measure("total_optimization"):
             
-            # Oś Z: interpolacja z gwarantowaną minimalną wysokością
-            z_start  = max(start_positions[d, 2],  MIN_SAFE_ALTITUDE)
-            z_target = max(target_positions[d, 2], MIN_SAFE_ALTITUDE)
-            out[d, :, 2] = np.interp(t, [0, 1], [z_start, z_target])
+            # 1. Konfiguracja Parametrów
+            params = algorithm_params or {}
+            pop_size = params.get("pop_size", 100)
+            n_gen = params.get("n_gen", 100)
+            eta_c = params.get("eta_c")
+            eta_m = params.get("eta_m")
+            crossover_prob = params.get("crossover_prob", 0.9)
+            mutation_prob = params.get("mutation_prob", 0.1)
+            min_ideal_solutions = params.get("min_ideal_solutions", 30)
+            
+            # Domyślna liczba punktów wewnętrznych (kontrolnych)
+            n_inner = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
+            
+            decision_mode = params.get("decision_mode", "knee_point")
 
-        return out
+            termination = MultiConditionTermination(
+                n_max_gen=n_gen, 
+                min_feasible_needed=min_ideal_solutions
+            )
+            
+            if isinstance(obstacles_data, list):
+                obs_list = obstacles_data
+            else:
+                obs_list = [obstacles_data]
+            
+            # 2. NSGA-III Setup
+            n_partitions = calculate_n_partitions(pop_size, n_obj=3)
+            ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=n_partitions)
+            actual_pop_size = ref_dirs.shape[0]
+            
+            from hydra.core.hydra_config import HydraConfig
+            output_dir = HydraConfig.get().runtime.output_dir
+            writer = OptimizationHistoryWriter(
+                output_dir=os.path.join(output_dir, "optimization_history")
+            )
+
+            print(f"[NSGA-III Polyline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Inner Pts: {n_inner}")
+
+            # 3. Inicjalizacja
+            with _measure("initialization"):
+                evaluator = VectorizedEvaluator(
+                    obstacles=obs_list,
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    params=params
+                )
+                
+                problem = SwarmOptimizationProblem(
+                    n_drones=drone_swarm_size,
+                    n_inner_points=n_inner,
+                    n_output_samples=number_of_waypoints, 
+                    world_data=world_data,
+                    evaluator=evaluator,
+                    start_pos=start_positions,
+                    target_pos=target_positions
+                )
+                
+                sampling = HeuristicSampling(
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    n_inner_points=n_inner,
+                    n_drones=drone_swarm_size,
+                    world_data=world_data,
+                    obstacles_data=obstacles_data
+                )
+                
+                algorithm = NSGA3(
+                    pop_size=pop_size,
+                    ref_dirs=ref_dirs,
+                    sampling=sampling,
+                    crossover=SBX(prob=crossover_prob, eta=eta_c),
+                    mutation=PM(eta=eta_m, prob=mutation_prob),
+                    eliminate_duplicates=True
+                )
+            
+            # 4. Optymalizacja
+            with _measure("optimization"):
+                callback = _HistoryCallback(writer)
+                try:
+                    res = minimize(
+                        problem,
+                        algorithm,
+                        termination=termination,
+                        seed=1,
+                        verbose=True,
+                        save_history=True,
+                        callback=callback,
+                    )
+                except Exception:
+                    raise
+                finally:
+                    writer.close()
+
+            # 5. Wybór rozwiązania
+            if res.X is not None and len(res.X) > 0:
+                with _measure("decision_and_reconstruction"):
+                    dm: DecisionStrategyProtocol
+                    try:
+                        if decision_mode == "safety": 
+                            dm = SafetyPriorityDecision()
+                        elif decision_mode == "equal": 
+                            dm = EqualWeightsDecision()
+                        else: 
+                            dm = KneePointDecision()
+                        
+                        best_idx = dm.select_best(res.F, res.G)
+                        best_genotype_flat = res.X[best_idx]
+                        
+                        # Rekonstrukcja
+                        inner = best_genotype_flat.reshape(1, drone_swarm_size, n_inner, 3)
+                        s = start_positions[None, :, None, :]
+                        t = target_positions[None, :, None, :]
+                        sparse = np.concatenate([s, inner, t], axis=2)
+                        final_traj = resample_polyline_batch(sparse, num_samples=number_of_waypoints)
+                        
+                        print(f"[NSGA-III] Wybrano rozwiązanie indeks: {best_idx}")
+                        return final_traj[0]
+                    except Exception as e:
+                        print(f"[NSGA-III] Błąd podczas wyboru rozwiązania: {e}")
+                        # Fallback w razie błędu decydenta
+                        raise LookupError("Results not found")
+                
+            else:
+                with _measure("fallback"):
+                    print("[NSGA-III] Brak rozwiązań. Zwracam linię prostą.")
+                    t = np.linspace(0, 1, number_of_waypoints)
+                    out = np.empty((drone_swarm_size, number_of_waypoints, 3))
+
+                    MIN_SAFE_ALTITUDE = params.get("min_safe_altitude", 1.0)  # metry nad ziemią
+                    print("Target positions: ")
+
+                    for d in range(drone_swarm_size):
+                        # Osie X i Y: zwykła interpolacja liniowa
+                        for i in range(2):
+                            out[d, :, i] = np.interp(t, [0, 1], [start_positions[d, i], target_positions[d, i]])
+                            print(target_positions[d, i])
+                        
+                        # Oś Z: interpolacja z gwarantowaną minimalną wysokością
+                        z_start  = max(start_positions[d, 2],  MIN_SAFE_ALTITUDE)
+                        z_target = max(target_positions[d, 2], MIN_SAFE_ALTITUDE)
+                        out[d, :, 2] = np.interp(t, [0, 1], [z_start, z_target])
+
+                    return out
+
+    finally:
+        # 6. Zapisywanie logów, jeżeli użyto mechanizmu w trybie lokalnym
+        if local_timing and timing is not None:
+            try:
+                from hydra.core.hydra_config import HydraConfig
+                out_dir = HydraConfig.get().runtime.output_dir
+                timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
+            except Exception as e:
+                print(f"[NSGA-III] Nie udało się zapisać logów czasowych: {e}")

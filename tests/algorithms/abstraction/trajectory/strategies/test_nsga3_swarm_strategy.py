@@ -75,7 +75,7 @@ def test_heuristic_sampling_logic(mock_world_data, mock_obstacles_data):
     assert np.all(z_values >= 0.5)
     assert np.all(z_values <= 20.0)
 
-@patch(f"{TARGET_MODULE}.HydraConfig")  # Dodany mock dla Hydry
+@patch("hydra.core.hydra_config.HydraConfig")
 @patch(f"{TARGET_MODULE}.minimize")
 def test_nsga3_strategy_fallback_with_altitude(mock_minimize, mock_hydraconfig, mock_world_data, tmp_path):
     """

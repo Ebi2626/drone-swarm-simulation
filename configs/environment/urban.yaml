@@ -16,7 +16,7 @@ params:
   # Obstacles parameters
   shape_type: 'BOX'
   placement_strategy: 'strategy_grid_jitter'
-  obstacles_number: 31
+  obstacles_number: 27
   obstacle_width: 15.0
   obstacle_length: 15.0
   obstacle_height: 15.0

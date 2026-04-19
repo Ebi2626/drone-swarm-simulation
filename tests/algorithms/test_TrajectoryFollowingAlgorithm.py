@@ -17,7 +17,7 @@ def mock_parent():
     """Atrapa obiektu zarządzającego (np. środowiska/NSGA), z którego algorytm czerpie dane."""
     parent = MagicMock()
     # Przykładowe trasy NSGA dla 2 dronów
-    parent.trajectories = [
+    parent.drones_trajectories = [
         np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]]),
         np.array([[0.0, 1.0, 0.0], [2.0, 1.0, 0.0], [4.0, 1.0, 0.0]])
     ]
@@ -56,8 +56,8 @@ def test_initialization(mock_parent):
         "cruise_speed": 10.0
     }
     
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, params=params)
-    
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False, params=params)
+
     assert algo._ctrl_timestep == 1.0 / 100
     assert algo.hover_duration == 5.0
     assert algo.finish_radius == 0.2
@@ -73,8 +73,8 @@ def test_insert_midpoint_near(mock_parent):
     Intencja: Najważniejszy test matematyczny. Czy algorytm poprawnie wstawia 
     punkt pośrodku właściwego odcinka łamanej?
     """
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1)
-    
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
+
     waypoints = np.array([
         [0.0, 0.0, 0.0],
         [2.0, 0.0, 0.0],
@@ -104,7 +104,7 @@ def test_insert_midpoint_near(mock_parent):
 @patch(f"{TARGET_MODULE}.BSplineTrajectory")
 def test_verify_trajectories_detects_collision(MockSpline, mock_parent):
     """Intencja: Upewnienie się, że sprawdzanie w pętli czasowej wykryje przecięcie stref."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
     algo.collision_radius = 1.0
     
     spline1, spline2 = MagicMock(), MagicMock()
@@ -132,8 +132,8 @@ def test_prepare_trajectories_repair_loop(MockSpline, mock_visualize, mock_verif
     Intencja: Sprawdzenie pętli retry. Jeśli w pierwszej próbie jest kolizja,
     algorytm musi naprawić trasę i spróbować ponownie.
     """
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
-    
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+
     # Symulacja: Za pierwszym wywołaniem (_verify_trajectories) zwraca kolizję, za drugim () pusto (bezpiecznie)
     fake_collision = (0, 1, np.array([1,1,1]), np.array([1,1,1]))
     mock_verify.side_effect = [fake_collision, ()]
@@ -158,7 +158,7 @@ def test_compute_actions_hover_and_flight(mock_prepare, mock_parent):
     Intencja: Weryfikacja fazy lotu. Przed upływem 'hover_duration' drony stoją w miejscu, 
     a dopiero po jego upływie zaczynają pobierać punkty z trajektorii.
     """
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1)
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
     algo.hover_duration = 3.0
     
     # Przygotowujemy atrapę wygenerowanej trajektorii
@@ -181,7 +181,7 @@ def test_compute_actions_hover_and_flight(mock_prepare, mock_parent):
 @patch.object(TrajectoryFollowingAlgorithm, '_prepare_trajectories')
 def test_all_finished(mock_prepare, mock_parent):
     """Intencja: Metoda all_finished sprawdza bliskość do OSTATNIEGO waypointu."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
     algo.finish_radius = 1.0
     
     mock_spline1 = MagicMock()
@@ -205,3 +205,110 @@ def test_all_finished(mock_prepare, mock_parent):
     # Odsunięcie drugiego drona z dala od celu (X = 1.0)
     mock_parent.current_states[1][0] = 1.0
     assert algo.all_finished is False
+
+# ==========================================
+# TESTY LOGIKI DYNAMICZNYCH PRZESZKÓD
+# ==========================================
+
+def test_is_obstacle_flag_stored(mock_parent):
+    """Flaga is_obstacle powinna być wiernie przechowywana w instancji."""
+    algo_main = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo_obs = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    assert algo_main.is_obstacle is False
+    assert algo_obs.is_obstacle is True
+
+
+def test_init_lidars_skipped_for_obstacles(mock_parent):
+    """Dynamiczne przeszkody nie mają LiDARu – init_lidars kończy się wcześnie."""
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo.init_lidars(physics_client_id=99)
+    assert algo._lidars is None  # nie zostały stworzone
+
+
+@patch(f"{TARGET_MODULE}.LidarSensor")
+def test_init_lidars_created_for_main_drones(MockLidar, mock_parent):
+    """Dla dronów głównych każdy agent dostaje sensor LiDAR."""
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo.init_lidars(physics_client_id=99)
+    assert MockLidar.call_count == 2
+    assert algo._lidars is not None
+    assert len(algo._lidars) == 2
+
+
+@patch.object(TrajectoryFollowingAlgorithm, '_visualize_trajectories')
+@patch(f"{TARGET_MODULE}.BSplineTrajectory")
+def test_obstacle_trajectories_are_flipped_versions_of_main(MockSpline, mock_visualize, mock_parent):
+    """
+    Intencja: Trajektorie przeszkód powinny odpowiadać punktom trajektorii
+    głównych dronów, ale w odwrotnej kolejności (lot w przeciwną stronę).
+    """
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo._prepare_trajectories()
+
+    # Każdy wywołany BSplineTrajectory powinien dostać waypointy odwrócone (np.flipud)
+    expected_0 = np.flipud(mock_parent.drones_trajectories[0])
+    expected_1 = np.flipud(mock_parent.drones_trajectories[1])
+
+    actual_0 = MockSpline.call_args_list[0].args[0]
+    actual_1 = MockSpline.call_args_list[1].args[0]
+
+    np.testing.assert_array_equal(actual_0, expected_0)
+    np.testing.assert_array_equal(actual_1, expected_1)
+
+    # Dodatkowo: start przeszkody == cel drona głównego (i odwrotnie)
+    np.testing.assert_array_equal(actual_0[0], mock_parent.drones_trajectories[0][-1])
+    np.testing.assert_array_equal(actual_0[-1], mock_parent.drones_trajectories[0][0])
+
+
+@patch.object(TrajectoryFollowingAlgorithm, '_verify_trajectories')
+@patch.object(TrajectoryFollowingAlgorithm, '_visualize_trajectories')
+@patch(f"{TARGET_MODULE}.BSplineTrajectory")
+def test_obstacles_skip_collision_verification(MockSpline, mock_visualize, mock_verify, mock_parent):
+    """Przeszkody nie sprawdzają kolizji między sobą — pętla naprawcza ich nie dotyczy."""
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo._prepare_trajectories()
+    mock_verify.assert_not_called()
+
+
+@patch.object(TrajectoryFollowingAlgorithm, '_verify_trajectories', return_value=())
+@patch.object(TrajectoryFollowingAlgorithm, '_visualize_trajectories')
+@patch(f"{TARGET_MODULE}.BSplineTrajectory")
+def test_main_drones_run_collision_verification(MockSpline, mock_visualize, mock_verify, mock_parent):
+    """Kontrast dla powyższego: drony główne MUSZĄ przejść weryfikację kolizji."""
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo._prepare_trajectories()
+    assert mock_verify.call_count >= 1
+
+
+def test_prepare_trajectories_raises_when_source_missing(mock_parent):
+    """Bez trajektorii w parent obie gałęzie (dron i przeszkoda) powinny zgłosić błąd."""
+    mock_parent.drones_trajectories = None
+
+    algo_obs = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    with pytest.raises(ValueError, match="Brak trajektorii"):
+        algo_obs._prepare_trajectories()
+
+    algo_main = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    with pytest.raises(ValueError, match="Brak wyników optymalizacji"):
+        algo_main._prepare_trajectories()
+
+
+def test_visualize_uses_different_file_for_obstacles(mock_parent, mock_dependencies):
+    """Wizualizacja przeszkód trafia do osobnego pliku PNG niż wizualizacja dronów."""
+    _, mock_plt = mock_dependencies
+
+    # Jeden lekki spline dla testu
+    spline = MagicMock()
+    spline.waypoints = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+    spline.total_duration = 1.0
+    spline.get_state_at_time.return_value = (np.array([0.5, 0.5, 0.5]), np.zeros(3))
+
+    algo_obs = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=True)
+    algo_obs._visualize_trajectories([spline])
+    assert mock_plt.savefig.call_args.args[0] == "trajectory_preview_obstacles.png"
+
+    mock_plt.reset_mock()
+
+    algo_main = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
+    algo_main._visualize_trajectories([spline])
+    assert mock_plt.savefig.call_args.args[0] == "trajectory_preview_bspline.png"

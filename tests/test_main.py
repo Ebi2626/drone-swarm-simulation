@@ -140,12 +140,30 @@ class TestExperimentRunnerInit:
         assert runner.environemnt is None
         assert runner.world_data is None
         assert runner.obstacles_data is None
-        assert runner.trajectories is None
+        assert runner.drones_trajectories is None
         assert runner.logger is None
         assert runner.input_handler is None
 
     def test_number_of_waypoints(self, runner):
         assert runner.number_of_waypoints == 5
+
+    def test_dynamic_obstacles_disabled_by_default(self, runner):
+        """Bez flagi w configu nie tworzymy żadnych przeszkód dynamicznych."""
+        assert runner.use_dynamic_obstacles is False
+        assert runner.num_dynamic_obstacles == 0
+        assert runner.total_agents == runner.num_drones
+
+    def test_dynamic_obstacles_flag_doubles_total_agents(self, base_cfg, mock_strategy):
+        """Po włączeniu flagi liczba wszystkich agentów powinna być x2."""
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        assert r.use_dynamic_obstacles is True
+        assert r.num_dynamic_obstacles == r.num_drones
+        assert r.total_agents == 2 * r.num_drones
+
+    def test_dynamic_obstacle_controller_starts_as_none(self, runner):
+        """Kontroler dynamicznych przeszkód to pole, które domyślnie jest None."""
+        assert runner.dynamic_obstacle_trajectory_controller is None
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +224,40 @@ class TestPrepareExperiment:
         r.prepare_experiment()
         mock_ih.assert_called_once_with(2)
 
+    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    def test_single_controller_without_dynamic_obstacles(self, mock_tfa, runner):
+        """Gdy flaga dynamic_obstacles wyłączona, tworzymy wyłącznie kontroler dronów głównych."""
+        runner.prepare_experiment()
+        assert mock_tfa.call_count == 1
+        first_call_kwargs = mock_tfa.call_args_list[0].kwargs
+        assert first_call_kwargs["is_obstacle"] is False
+        assert first_call_kwargs["num_drones"] == runner.num_drones
+        # Kontroler przeszkód pozostaje None
+        assert runner.dynamic_obstacle_trajectory_controller is None
+
+    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    def test_two_controllers_when_dynamic_obstacles_enabled(self, mock_tfa, base_cfg, mock_strategy):
+        """Włączona flaga tworzy dwa osobne kontrolery: jeden dla dronów, drugi dla przeszkód."""
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        r.prepare_experiment()
+
+        assert mock_tfa.call_count == 2
+
+        # Pierwszy: drony główne
+        first = mock_tfa.call_args_list[0].kwargs
+        assert first["is_obstacle"] is False
+        assert first["num_drones"] == r.num_drones
+
+        # Drugi: przeszkody
+        second = mock_tfa.call_args_list[1].kwargs
+        assert second["is_obstacle"] is True
+        assert second["num_drones"] == r.num_dynamic_obstacles
+
+        # Oba pola muszą być przypisane
+        assert r.trajectory_controller is not None
+        assert r.dynamic_obstacle_trajectory_controller is not None
+
 
 # ---------------------------------------------------------------------------
 # initialize_world
@@ -226,6 +278,75 @@ class TestInitializeWorld:
         assert kwargs["ctrl_freq"] == 48
         assert kwargs["pyb_freq"] == 240
         np.testing.assert_array_equal(kwargs["initial_xyzs"], runner.start_positions)
+
+    @patch(f"{MODULE}.instantiate")
+    def test_env_kwargs_without_dynamic_obstacles(self, mock_inst, runner):
+        """Bez dynamicznych przeszkód środowisko dostaje same drony (num_drones == primary)."""
+        runner.initialize_world()
+        kwargs = mock_inst.call_args[1]
+        assert kwargs["num_drones"] == runner.num_drones
+        assert kwargs["primary_num_drones"] == runner.num_drones
+        assert kwargs["dynamic_obstacles_enabled"] is False
+        assert kwargs["num_dynamic_obstacles"] == 0
+        np.testing.assert_array_equal(kwargs["initial_xyzs"], runner.start_positions)
+        np.testing.assert_array_equal(kwargs["end_xyzs"], runner.end_positions)
+
+
+class TestInitializeWorldDynamicObstacles:
+    """Weryfikuje, że przy dynamic_obstacles=True punkty startowe/celowe są odpowiednio rozszerzone."""
+
+    @patch(f"{MODULE}.instantiate")
+    def test_total_agents_passed_to_env(self, mock_inst, base_cfg, mock_strategy):
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        r.initialize_world()
+        kwargs = mock_inst.call_args[1]
+        # Liczba wszystkich agentów w środowisku to 2x liczba dronów
+        assert kwargs["num_drones"] == r.total_agents == 2 * r.num_drones
+        # Ale "prawdziwych" dronów jest tylko połowa
+        assert kwargs["primary_num_drones"] == r.num_drones
+        assert kwargs["dynamic_obstacles_enabled"] is True
+        assert kwargs["num_dynamic_obstacles"] == r.num_drones
+
+    @patch(f"{MODULE}.instantiate")
+    def test_positions_stacked_and_reversed(self, mock_inst, base_cfg, mock_strategy):
+        """Pierwsza połowa startuje zgodnie z configiem, druga — z końcowych pozycji dronów."""
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        r.initialize_world()
+
+        kwargs = mock_inst.call_args[1]
+        expected_initial = np.vstack((r.start_positions, r.end_positions))
+        expected_end = np.vstack((r.end_positions, r.start_positions))
+
+        np.testing.assert_array_equal(kwargs["initial_xyzs"], expected_initial)
+        np.testing.assert_array_equal(kwargs["end_xyzs"], expected_end)
+
+        # Sprawdźmy konkretnie: pierwszy dron startuje w swojej pozycji, a
+        # pierwsza przeszkoda startuje w pozycji DOCELOWEJ tego drona.
+        np.testing.assert_array_equal(kwargs["initial_xyzs"][0], r.start_positions[0])
+        np.testing.assert_array_equal(kwargs["initial_xyzs"][r.num_drones], r.end_positions[0])
+
+    @patch(f"{MODULE}.instantiate")
+    def test_rpys_doubled_when_provided(self, mock_inst, base_cfg, mock_strategy):
+        """Kąty startowe są powielane dla przeszkód (ten sam rozkład orientacji)."""
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        r.initialize_world()
+        kwargs = mock_inst.call_args[1]
+        expected_rpys = np.vstack((r.initial_rpys, r.initial_rpys))
+        np.testing.assert_array_equal(kwargs["initial_rpys"], expected_rpys)
+        assert kwargs["initial_rpys"].shape == (2 * r.num_drones, 3)
+
+    @patch(f"{MODULE}.instantiate")
+    def test_rpys_none_passes_none(self, mock_inst, base_cfg, mock_strategy):
+        """Gdy initial_rpys jest None, środowisko dostaje też None — nie pustą tablicę."""
+        base_cfg.simulation.dynamic_obstacles = True
+        base_cfg.environment.initial_rpys = None
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        r.initialize_world()
+        kwargs = mock_inst.call_args[1]
+        assert kwargs["initial_rpys"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +417,24 @@ class TestProcessCollisions:
         runner._process_collisions(sim_time=1.0, current_step=48)
         assert runner.active_drones == {1}
 
+    def test_dynamic_obstacle_collisions_are_ignored(self, base_cfg, mock_strategy):
+        """Kolizje o d_id >= num_drones (dynamiczne przeszkody) nie są logowane ani nie deaktywują dronów."""
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+        r.active_drones = {0, 1}
+        r.logger = MagicMock()
+        r.environemnt = MagicMock()
+        # (0, …) to prawdziwy dron — liczy się.
+        # (2, …) i (3, …) to dynamiczne przeszkody (num_drones=2) — ignorowane.
+        r.environemnt.get_detailed_collisions.return_value = [(0, 99), (2, 88), (3, 77)]
+
+        r._process_collisions(sim_time=1.0, current_step=48)
+
+        # Tylko dron 0 zgłoszony do loggera
+        r.logger.log_collision.assert_called_once_with(1.0, 0, 99)
+        # Dron 1 nadal aktywny — jego stan nie był dotknięty
+        assert r.active_drones == {1}
+
 
 # ---------------------------------------------------------------------------
 # _process_arrivals
@@ -342,6 +481,58 @@ class TestProcessArrivals:
         states = [_make_state(0, 0, 0)]
         with pytest.raises(ValueError, match="Błędny promień akceptacji"):
             runner._process_arrivals(states, sim_time=1.0)
+
+
+# ---------------------------------------------------------------------------
+# _split_states / _merge_actions – mechanika roz/scalania ruchu agentów
+# ---------------------------------------------------------------------------
+
+class TestSplitStates:
+
+    def test_no_obstacles_returns_empty_obstacle_list(self, runner):
+        """Gdy flaga wyłączona, druga lista jest zawsze pusta — niezależnie od wejścia."""
+        states = [_make_state(i) for i in range(2)]
+        drones, obstacles = runner._split_states(states)
+        assert len(drones) == 2
+        assert obstacles == []
+
+    def test_with_obstacles_splits_at_num_drones(self, base_cfg, mock_strategy):
+        """Granicą podziału jest num_drones: do niej drony, od niej przeszkody."""
+        base_cfg.simulation.dynamic_obstacles = True
+        r = ExperimentRunner(base_cfg, mock_strategy)
+
+        states = [_make_state(i) for i in range(r.total_agents)]  # 4 agentów
+        drones, obstacles = r._split_states(states)
+
+        assert len(drones) == r.num_drones
+        assert len(obstacles) == r.num_dynamic_obstacles
+        # Drony — pierwsze r.num_drones pozycji (id 0 i 1)
+        np.testing.assert_array_equal(drones[0], states[0])
+        np.testing.assert_array_equal(drones[1], states[1])
+        # Przeszkody — reszta (id 2 i 3)
+        np.testing.assert_array_equal(obstacles[0], states[2])
+        np.testing.assert_array_equal(obstacles[1], states[3])
+
+
+class TestMergeActions:
+
+    def test_merge_without_obstacles_passes_through(self, runner):
+        drone_acts = np.array([[1, 1, 1, 1], [2, 2, 2, 2]])
+        merged = runner._merge_actions(drone_acts, None)
+        np.testing.assert_array_equal(merged, drone_acts)
+        # Akcje przeszkód nie są dodawane — wynikowa tablica ma dokładnie num_drones wierszy
+        assert merged.shape == drone_acts.shape
+
+    def test_merge_stacks_obstacle_actions_after_drone_actions(self, runner):
+        """Kolejność scalania musi pasować do indeksowania w środowisku: drony, potem przeszkody."""
+        drone_acts = np.array([[1, 1, 1, 1], [2, 2, 2, 2]])
+        obstacle_acts = np.array([[3, 3, 3, 3], [4, 4, 4, 4]])
+        merged = runner._merge_actions(drone_acts, obstacle_acts)
+        assert merged.shape == (4, 4)
+        # Drony idą pierwsze
+        np.testing.assert_array_equal(merged[:2], drone_acts)
+        # Przeszkody — po dronach
+        np.testing.assert_array_equal(merged[2:], obstacle_acts)
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +669,76 @@ class TestRunHeadless:
 
         runner.run()
         mock_ctrl.init_lidars.assert_called_once_with(mock_env.CLIENT)
+
+    @patch(f"{MODULE}.instantiate")
+    def test_log_step_receives_only_main_drones(self, mock_inst, base_cfg, mock_strategy):
+        """
+        Z włączonymi dynamicznymi przeszkodami logger dostaje WYŁĄCZNIE stany dronów głównych,
+        nawet jeśli w środowisku fizycznie lata 2x tyle agentów.
+        """
+        base_cfg.simulation.dynamic_obstacles = True
+        base_cfg.simulation.duration_sec = 0.05  # ~1 krok
+        r = ExperimentRunner(base_cfg, mock_strategy)
+
+        # Każdy agent ma unikalną pozycję (po id), żeby móc rozpoznać kto został zalogowany
+        mock_env = MagicMock()
+        mock_env._getDroneStateVector.side_effect = lambda d: _make_state(d, 0, 0)
+        mock_env.get_detailed_collisions.return_value = []
+        mock_inst.return_value = mock_env
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.compute_actions.return_value = np.zeros((r.num_drones, 4))
+        mock_ctrl.params = {"acceptance_radius": 0.2}
+        r.trajectory_controller = mock_ctrl
+
+        mock_obs_ctrl = MagicMock()
+        mock_obs_ctrl.compute_actions.return_value = np.zeros((r.num_dynamic_obstacles, 4))
+        r.dynamic_obstacle_trajectory_controller = mock_obs_ctrl
+
+        mock_logger = MagicMock()
+        r.logger = mock_logger
+
+        r.run()
+
+        # Logger został wywołany, ale z listą długości num_drones, a nie total_agents
+        assert mock_logger.log_step.call_count >= 1
+        states_logged = mock_logger.log_step.call_args_list[0].args[2]
+        assert len(states_logged) == r.num_drones
+        assert len(states_logged) < r.total_agents
+
+        # Pierwsze stany to drony główne (pos X = 0 i 1), nie przeszkody (pos X = 2 i 3)
+        assert states_logged[0][0] == 0.0
+        assert states_logged[1][0] == 1.0
+
+    @patch(f"{MODULE}.instantiate")
+    def test_obstacle_controller_also_drives_step(self, mock_inst, base_cfg, mock_strategy):
+        """Z dynamicznymi przeszkodami obie klasy kontrolerów muszą dostarczyć akcje co krok."""
+        base_cfg.simulation.dynamic_obstacles = True
+        base_cfg.simulation.duration_sec = 0.05
+        r = ExperimentRunner(base_cfg, mock_strategy)
+
+        mock_env = MagicMock()
+        mock_env._getDroneStateVector.return_value = _make_state()
+        mock_env.get_detailed_collisions.return_value = []
+        mock_inst.return_value = mock_env
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.compute_actions.return_value = np.zeros((r.num_drones, 4))
+        mock_ctrl.params = {"acceptance_radius": 0.2}
+        r.trajectory_controller = mock_ctrl
+
+        mock_obs_ctrl = MagicMock()
+        mock_obs_ctrl.compute_actions.return_value = np.zeros((r.num_dynamic_obstacles, 4))
+        r.dynamic_obstacle_trajectory_controller = mock_obs_ctrl
+
+        r.run()
+
+        # Obaj liczą akcje przynajmniej raz
+        assert mock_ctrl.compute_actions.call_count >= 1
+        assert mock_obs_ctrl.compute_actions.call_count >= 1
+        # Do step() trafiła tablica scalona (num_drones + num_dynamic_obstacles wierszy)
+        step_args = mock_env.step.call_args_list[0].args[0]
+        assert step_args.shape[0] == r.total_agents
 
     @patch(f"{MODULE}.instantiate")
     def test_arrivals_use_post_step_state(self, mock_inst, base_cfg, mock_strategy):

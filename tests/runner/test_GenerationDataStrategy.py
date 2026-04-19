@@ -40,7 +40,7 @@ def mock_runner():
     runner.logger = None
     runner.world_data = None
     runner.obstacles_data = None
-    runner.trajectories = None
+    runner.drones_trajectories = None
     runner.safe_radius = 10.0
     return runner
 
@@ -98,7 +98,7 @@ def test_prepare_data_full_flow(
     mock_counting_strategy.assert_called_once()
 
     # 4. Trajektorie przypisane do runnera
-    np.testing.assert_array_equal(mock_runner.trajectories, fake_trajectories)
+    np.testing.assert_array_equal(mock_runner.drones_trajectories, fake_trajectories)
 
 
 @patch(f"{MODULE}.instantiate")
@@ -273,7 +273,7 @@ def test_single_drone(
 
     _, kwargs = mock_counting_strategy.call_args
     assert kwargs["drone_swarm_size"] == 1
-    np.testing.assert_array_equal(mock_runner.trajectories, fake_traj)
+    np.testing.assert_array_equal(mock_runner.drones_trajectories, fake_traj)
 
 
 @patch(f"{MODULE}.instantiate")

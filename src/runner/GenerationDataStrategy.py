@@ -55,10 +55,10 @@ class GenerationDataStrategy(ExperimentDataStrategy):
         )
         
         print(f"\n🚀 Uruchamianie obliczeń algorytmu metaheurystycznego...")
-        runner.trajectories = counting_protocol()
+        runner.drones_trajectories = counting_protocol()
         
         # 4. Archiwizacja stanu początkowego
         if runner.logger is not None:
-            runner.logger.log_chosen_trajectories(runner.trajectories)
+            runner.logger.log_chosen_trajectories(runner.drones_trajectories)
             runner.logger.log_world_dimensions(runner.world_data)
             runner.logger.log_obstacles(runner.obstacles_data)

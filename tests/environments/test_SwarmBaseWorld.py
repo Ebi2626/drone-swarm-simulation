@@ -50,6 +50,7 @@ def dummy_world(mock_world_data, mock_obstacles_data, mocker):
     world = DummySwarmWorld(
         world_data=mock_world_data,
         obstacles_data=mock_obstacles_data,
+        num_drones=2,
         fake_argument=123 # Testujemy od razu odfiltrowanie nieznanych kwargs
     )
     
@@ -160,3 +161,144 @@ def test_observation_space_shape(dummy_world):
     """
     space = dummy_world._observationSpace()
     assert space.shape == (2, 20)
+
+
+# ==========================================
+# TESTY LOGIKI DYNAMICZNYCH PRZESZKÓD
+# ==========================================
+
+@pytest.fixture
+def dummy_world_with_obstacles(mock_world_data, mock_obstacles_data, mocker):
+    """Świat z włączonymi dynamicznymi przeszkodami: 2 drony główne + 2 przeszkody."""
+    mocker.patch("gym_pybullet_drones.envs.BaseAviary.BaseAviary.__init__", return_value=None)
+    world = DummySwarmWorld(
+        world_data=mock_world_data,
+        obstacles_data=mock_obstacles_data,
+        primary_num_drones=2,
+        dynamic_obstacles_enabled=True,
+        num_dynamic_obstacles=2,
+    )
+    world.GUI = False
+    world.NUM_DRONES = 4
+    world.MAX_RPM = 15000
+    # Drony główne: 100, 101; przeszkody dynamiczne: 200, 201
+    world.DRONE_IDS = [100, 101, 200, 201]
+    return world
+
+
+def test_dynamic_obstacles_enabled_fields(mock_world_data, mock_obstacles_data, mocker):
+    """Po włączeniu flagi wszystkie pola są ustawione zgodnie z rolą agentów."""
+    mocker.patch("gym_pybullet_drones.envs.BaseAviary.BaseAviary.__init__", return_value=None)
+    world = DummySwarmWorld(
+        world_data=mock_world_data,
+        obstacles_data=mock_obstacles_data,
+        primary_num_drones=2,
+        dynamic_obstacles_enabled=True,
+        num_dynamic_obstacles=2,
+    )
+    assert world.primary_num_drones == 2
+    assert world.dynamic_obstacles_enabled is True
+    assert world.num_dynamic_obstacles == 2
+    # total = 2 (primary) + 2 (obstacles) = 4
+    assert world.total_agents == 4
+
+
+def test_dynamic_obstacles_disabled_zeroes_count(mock_world_data, mock_obstacles_data, mocker):
+    """Gdy flaga False, liczba przeszkód to 0 nawet jeśli ktoś przekazał inną wartość."""
+    mocker.patch("gym_pybullet_drones.envs.BaseAviary.BaseAviary.__init__", return_value=None)
+    world = DummySwarmWorld(
+        world_data=mock_world_data,
+        obstacles_data=mock_obstacles_data,
+        num_drones=3,
+        dynamic_obstacles_enabled=False,
+        num_dynamic_obstacles=5,  # ignorowane, bo flaga False
+    )
+    assert world.num_dynamic_obstacles == 0
+    assert world.total_agents == 3
+
+
+def test_raises_without_any_drone_count(mock_world_data, mock_obstacles_data, mocker):
+    """Brak informacji o liczbie agentów to twardy błąd — chroni przed cichym pominięciem."""
+    mocker.patch("gym_pybullet_drones.envs.BaseAviary.BaseAviary.__init__", return_value=None)
+    with pytest.raises(ValueError, match="Brak informacji o liczbie agentów"):
+        DummySwarmWorld(
+            world_data=mock_world_data,
+            obstacles_data=mock_obstacles_data,
+        )
+
+
+def test_agent_indices_without_dynamic_obstacles(dummy_world):
+    """Bez przeszkód wszyscy agenci to drony główne, lista przeszkód jest pusta."""
+    assert dummy_world.get_primary_agent_indices() == [0, 1]
+    assert dummy_world.get_dynamic_obstacle_indices() == []
+    assert dummy_world.is_dynamic_obstacle(0) is False
+    assert dummy_world.is_dynamic_obstacle(1) is False
+
+
+def test_agent_indices_with_dynamic_obstacles(dummy_world_with_obstacles):
+    """Indeksy są pogrupowane: najpierw drony główne (0..N-1), potem przeszkody."""
+    world = dummy_world_with_obstacles
+    assert world.get_primary_agent_indices() == [0, 1]
+    assert world.get_dynamic_obstacle_indices() == [2, 3]
+    assert world.is_dynamic_obstacle(0) is False
+    assert world.is_dynamic_obstacle(1) is False
+    assert world.is_dynamic_obstacle(2) is True
+    assert world.is_dynamic_obstacle(3) is True
+
+
+def test_get_body_role_classifies_all_body_types(dummy_world_with_obstacles):
+    """body_id jest poprawnie mapowany na rolę: drone / dynamic_obstacle / ground / ceiling / static_obstacle."""
+    world = dummy_world_with_obstacles
+    world.ground_body_id = 5
+    world.ceiling_body_id = 6
+
+    assert world.get_body_role(100) == "drone"
+    assert world.get_body_role(101) == "drone"
+    assert world.get_body_role(200) == "dynamic_obstacle"
+    assert world.get_body_role(201) == "dynamic_obstacle"
+    assert world.get_body_role(5) == "ground"
+    assert world.get_body_role(6) == "ceiling"
+    # Cokolwiek nieznanego — uznawane za statyczną przeszkodę świata
+    assert world.get_body_role(999) == "static_obstacle"
+
+
+def test_detailed_collisions_filters_obstacles_by_default(dummy_world_with_obstacles, mocker):
+    """Domyślnie get_detailed_collisions zgłasza kolizje WYŁĄCZNIE dla dronów głównych."""
+    world = dummy_world_with_obstacles
+    mock_p = mocker.patch(f"{TARGET_MODULE}.p")
+
+    def mock_cp(bodyA):
+        # Dron 0 (100) oraz przeszkoda 0 (200) uderzają w obiekt 999
+        if bodyA in (100, 200):
+            return [(0, 0, 999, "kontakt")]
+        return []
+
+    mock_p.getContactPoints.side_effect = mock_cp
+
+    collisions = world.get_detailed_collisions()
+    # Tylko dron główny o indeksie 0; przeszkoda (indeks 2) jest pominięta
+    assert collisions == [(0, 999)]
+
+
+def test_detailed_collisions_with_obstacles_when_requested(dummy_world_with_obstacles, mocker):
+    """Z flagą include_dynamic_obstacles=True sprawdzamy wszystkich agentów."""
+    world = dummy_world_with_obstacles
+    mock_p = mocker.patch(f"{TARGET_MODULE}.p")
+
+    def mock_cp(bodyA):
+        if bodyA in (100, 200):
+            return [(0, 0, 999, "kontakt")]
+        return []
+
+    mock_p.getContactPoints.side_effect = mock_cp
+
+    collisions = sorted(world.get_detailed_collisions(include_dynamic_obstacles=True))
+    # Oba: dron 0 (idx 0) oraz przeszkoda 0 (idx 2)
+    assert collisions == [(0, 999), (2, 999)]
+
+
+def test_action_and_observation_space_scale_with_total_agents(dummy_world_with_obstacles):
+    """Kształt przestrzeni akcji i obserwacji odzwierciedla total_agents, nie primary_num_drones."""
+    world = dummy_world_with_obstacles
+    assert world._actionSpace().shape == (4, 4)
+    assert world._observationSpace().shape == (4, 20)

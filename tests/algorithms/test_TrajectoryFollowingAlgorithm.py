@@ -17,7 +17,7 @@ def mock_parent():
     """Atrapa obiektu zarządzającego (np. środowiska/NSGA), z którego algorytm czerpie dane."""
     parent = MagicMock()
     # Przykładowe trasy NSGA dla 2 dronów
-    parent.trajectories = [
+    parent.drones_trajectories = [
         np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]]),
         np.array([[0.0, 1.0, 0.0], [2.0, 1.0, 0.0], [4.0, 1.0, 0.0]])
     ]
@@ -56,8 +56,8 @@ def test_initialization(mock_parent):
         "cruise_speed": 10.0
     }
     
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, params=params)
-    
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False, params=params)
+
     assert algo._ctrl_timestep == 1.0 / 100
     assert algo.hover_duration == 5.0
     assert algo.finish_radius == 0.2
@@ -73,8 +73,8 @@ def test_insert_midpoint_near(mock_parent):
     Intencja: Najważniejszy test matematyczny. Czy algorytm poprawnie wstawia 
     punkt pośrodku właściwego odcinka łamanej?
     """
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1)
-    
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
+
     waypoints = np.array([
         [0.0, 0.0, 0.0],
         [2.0, 0.0, 0.0],
@@ -104,7 +104,7 @@ def test_insert_midpoint_near(mock_parent):
 @patch(f"{TARGET_MODULE}.BSplineTrajectory")
 def test_verify_trajectories_detects_collision(MockSpline, mock_parent):
     """Intencja: Upewnienie się, że sprawdzanie w pętli czasowej wykryje przecięcie stref."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
     algo.collision_radius = 1.0
     
     spline1, spline2 = MagicMock(), MagicMock()
@@ -132,8 +132,8 @@ def test_prepare_trajectories_repair_loop(MockSpline, mock_visualize, mock_verif
     Intencja: Sprawdzenie pętli retry. Jeśli w pierwszej próbie jest kolizja,
     algorytm musi naprawić trasę i spróbować ponownie.
     """
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
-    
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+
     # Symulacja: Za pierwszym wywołaniem (_verify_trajectories) zwraca kolizję, za drugim () pusto (bezpiecznie)
     fake_collision = (0, 1, np.array([1,1,1]), np.array([1,1,1]))
     mock_verify.side_effect = [fake_collision, ()]
@@ -158,7 +158,7 @@ def test_compute_actions_hover_and_flight(mock_prepare, mock_parent):
     Intencja: Weryfikacja fazy lotu. Przed upływem 'hover_duration' drony stoją w miejscu, 
     a dopiero po jego upływie zaczynają pobierać punkty z trajektorii.
     """
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1)
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
     algo.hover_duration = 3.0
     
     # Przygotowujemy atrapę wygenerowanej trajektorii
@@ -181,7 +181,7 @@ def test_compute_actions_hover_and_flight(mock_prepare, mock_parent):
 @patch.object(TrajectoryFollowingAlgorithm, '_prepare_trajectories')
 def test_all_finished(mock_prepare, mock_parent):
     """Intencja: Metoda all_finished sprawdza bliskość do OSTATNIEGO waypointu."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2)
+    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
     algo.finish_radius = 1.0
     
     mock_spline1 = MagicMock()

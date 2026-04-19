@@ -50,6 +50,7 @@ def dummy_world(mock_world_data, mock_obstacles_data, mocker):
     world = DummySwarmWorld(
         world_data=mock_world_data,
         obstacles_data=mock_obstacles_data,
+        num_drones=2,
         fake_argument=123 # Testujemy od razu odfiltrowanie nieznanych kwargs
     )
     

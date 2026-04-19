@@ -140,7 +140,7 @@ class TestExperimentRunnerInit:
         assert runner.environemnt is None
         assert runner.world_data is None
         assert runner.obstacles_data is None
-        assert runner.trajectories is None
+        assert runner.drones_trajectories is None
         assert runner.logger is None
         assert runner.input_handler is None
 

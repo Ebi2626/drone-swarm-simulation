@@ -74,6 +74,9 @@ def test_empty_world_initialization(mock_super_init, mock_sanitize, mock_world_d
     mock_super_init.assert_called_once_with(
         world_data=mock_world_data,
         obstacles_data=mock_obstacles_data,
+        primary_num_drones=None,
+        dynamic_obstacles_enabled=False,
+        num_dynamic_obstacles=0,
         drone_model=DroneModel.RACE,
         physics=Physics.DYN,
         num_drones=2, # <- To udowadnia, że len(initial_xyzs) zadziałało!

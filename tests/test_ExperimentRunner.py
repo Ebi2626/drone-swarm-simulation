@@ -69,13 +69,15 @@ def test_runner_initialization(dummy_cfg):
     assert isinstance(runner.start_positions, np.ndarray)
     assert runner.start_positions.shape == (2, 3)
 
+@patch(f"{MODULE_PATH}.TrajectoryFollowingAlgorithm")
 @patch(f"{MODULE_PATH}.instantiate")
 @patch(f"{MODULE_PATH}.generate_world_boundaries")
 @patch(f"{MODULE_PATH}.generate_obstacles")
 def test_offline_trajectory_counting(
-    mock_gen_obstacles, 
-    mock_gen_world, 
-    mock_instantiate, 
+    mock_gen_obstacles,
+    mock_gen_world,
+    mock_instantiate,
+    mock_tfa,
     dummy_cfg
 ):
     """Testuje pierwszą fazę działania (obliczenia offline), sprawdzając przepływ danych."""

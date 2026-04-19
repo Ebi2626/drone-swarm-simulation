@@ -130,7 +130,7 @@ def mock_runner():
     })
     runner.world_data = None
     runner.obstacles_data = None
-    runner.trajectories = None
+    runner.drones_trajectories = None
     runner.start_positions = None
     runner.end_positions = None
     return runner
@@ -345,7 +345,7 @@ class TestPrepareData:
 
         assert isinstance(mock_runner.world_data, WorldData)
         assert isinstance(mock_runner.obstacles_data, ObstaclesData)
-        assert mock_runner.trajectories.shape == (2, 3, 3)
+        assert mock_runner.drones_trajectories.shape == (2, 3, 3)
 
     def test_full_flow_cylinder(self, tmp_path, mock_runner):
         _make_all_csvs(tmp_path, shape_type="CYLINDER")

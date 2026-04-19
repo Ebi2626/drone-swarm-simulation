@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - environment: urban
+  - environment: forest
   - optimizer: nsga-3
 
 simulation:
@@ -11,6 +11,7 @@ simulation:
   drone_model: "CF2X"
   physics: "PYB"
   sim_speed_multiplier: 5.0
+  dynamic_obstacles: False
 
 seed: 43
 experiment_name: "test_run"

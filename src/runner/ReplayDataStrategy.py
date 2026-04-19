@@ -112,15 +112,15 @@ class ReplayDataStrategy(ExperimentDataStrategy):
         
         # 3. Rekonstrukcja Trajektorii (Z płaskiej tabeli do tensora N x W x 3)
         trajectories_df = pd.read_csv(self.results_path / "counted_trajectories.csv")
-        runner.trajectories = self._map_to_trajectories(trajectories_df)
+        runner.drones_trajectories = self._map_to_trajectories(trajectories_df)
         
         # 4. Iniekcja archiwalnych pozycji początkowych i końcowych do głównego procesu symulacji
         # Odcina to symulację od jakichkolwiek losowych wartości zaszytych w pliku YAML, 
         # zachowując 100% determinizmu eksperymentu.
-        runner.start_positions = runner.trajectories[:, 0, :]
-        runner.end_positions = runner.trajectories[:, -1, :]
+        runner.start_positions = runner.drones_trajectories[:, 0, :]
+        runner.end_positions = runner.drones_trajectories[:, -1, :]
         
         # Raportowanie stanu do logów (dobra praktyka ewaluacyjna)
         print(f"[DEBUG] Pomyślnie zrekonstruowano WorldData (wymiary: {runner.world_data.dimensions})")
         print(f"[DEBUG] Pomyślnie zrekonstruowano ObstaclesData (liczba: {runner.obstacles_data.count})")
-        print(f"[DEBUG] Tensor trajektorii gotowy do śledzenia. Kształt: {runner.trajectories.shape}")
+        print(f"[DEBUG] Tensor trajektorii gotowy do śledzenia. Kształt: {runner.drones_trajectories.shape}")

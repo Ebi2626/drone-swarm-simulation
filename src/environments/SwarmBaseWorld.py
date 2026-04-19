@@ -1,31 +1,54 @@
 import inspect
-
-from src.environments.abstraction.generate_obstacles import ObstaclesData
-from src.environments.abstraction.generate_world_boundaries import WorldData
-from gym_pybullet_drones.envs.BaseAviary import BaseAviary
 from abc import abstractmethod
-from gymnasium import spaces
 import numpy as np
 import pybullet as p
-
+from gymnasium import spaces
+from gym_pybullet_drones.envs.BaseAviary import BaseAviary
+from src.environments.abstraction.generate_obstacles import ObstaclesData
+from src.environments.abstraction.generate_world_boundaries import WorldData
 
 class SwarmBaseWorld(BaseAviary):
     def __init__(
         self,
         world_data: WorldData,
         obstacles_data: ObstaclesData,
+        num_drones: int | None = None,
+        primary_num_drones: int | None = None,
+        dynamic_obstacles_enabled: bool = False,
+        num_dynamic_obstacles: int = 0,
+        initial_xyzs=None,
+        initial_rpys=None,
         **kwargs
     ):
         self.bounds: WorldData = world_data
         self.obstacles: ObstaclesData = obstacles_data
-        self.ground_position = world_data.min_bounds[2]  # ground_height zapisany w min_bounds[2]
+        self.ground_position = world_data.min_bounds[2]
 
+        inferred_total_agents = num_drones
+        if inferred_total_agents is None and primary_num_drones is None:
+            raise ValueError("Brak informacji o liczbie agentów.")
+
+        self.primary_num_drones = int(primary_num_drones if primary_num_drones is not None else inferred_total_agents)
+        self.dynamic_obstacles_enabled = bool(dynamic_obstacles_enabled)
+        self.num_dynamic_obstacles = int(num_dynamic_obstacles if self.dynamic_obstacles_enabled else 0)
+        self.total_agents = int(inferred_total_agents if inferred_total_agents is not None else self.primary_num_drones + self.num_dynamic_obstacles)
+
+        self.ground_body_id = None
+        self.ceiling_body_id = None
+
+        # Tylko bezpieczne klucze z kwargs trafiają do BaseAviary
         valid_keys = inspect.signature(BaseAviary.__init__).parameters.keys()
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_keys}
 
-        super().__init__(**filtered_kwargs)
+        # Kluczowe argumenty tablicowe przekazujemy z ominięciem kwargs!
+        super().__init__(
+            num_drones=self.total_agents,
+            initial_xyzs=initial_xyzs,
+            initial_rpys=initial_rpys,
+            **filtered_kwargs
+        )
     # ------------------------------------------------------------------ #
-    # Reset & render                                                       #
+    # Reset & render                                                     #
     # ------------------------------------------------------------------ #
 
     def reset(self, seed=None, options=None):
@@ -42,49 +65,83 @@ class SwarmBaseWorld(BaseAviary):
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
 
     def _finalize_render(self):
-        print("finalize_render()")
+        print("[DEBUG]: SwarmBaseWorld finalize_render()")
         if self.GUI:
             p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
 
     # ------------------------------------------------------------------ #
-    # Building world geometry from world_data                             #
+    # Helpers: role / indexing                                           #
+    # ------------------------------------------------------------------ #
+
+    def get_primary_agent_indices(self):
+        return list(range(self.primary_num_drones))
+
+    def get_dynamic_obstacle_indices(self):
+        if not self.dynamic_obstacles_enabled:
+            return []
+        return list(range(self.primary_num_drones, self.total_agents))
+
+    def is_dynamic_obstacle(self, agent_idx: int) -> bool:
+        return self.dynamic_obstacles_enabled and self.primary_num_drones <= agent_idx < self.total_agents
+
+    def get_agent_index_from_body_id(self, body_id: int):
+        for idx, drone_body_id in enumerate(self.DRONE_IDS):
+            if drone_body_id == body_id:
+                return idx
+        return None
+
+    def get_body_role(self, body_id: int) -> str:
+        agent_idx = self.get_agent_index_from_body_id(body_id)
+        if agent_idx is not None:
+            return "dynamic_obstacle" if self.is_dynamic_obstacle(agent_idx) else "drone"
+        if body_id == self.ground_body_id:
+            return "ground"
+        if body_id == self.ceiling_body_id:
+            return "ceiling"
+        return "static_obstacle"
+
+    # ------------------------------------------------------------------ #
+    # Building world geometry                                            #
     # ------------------------------------------------------------------ #
 
     def _clear_default_plane(self):
         print("[DEBUG] Deleting default plane...")
-        for i in range(p.getNumBodies()):
-            if "plane" in p.getBodyInfo(i)[1].decode("utf-8"):
-                p.removeBody(i)
+        body_ids = [p.getBodyUniqueId(i) for i in range(p.getNumBodies())]
+        for body_id in reversed(body_ids):
+            body_info = p.getBodyInfo(body_id)
+            body_name = body_info[1].decode("utf-8").lower()
+            if "plane" in body_name:
+                p.removeBody(body_id)
 
     def _create_ground(self, color=[0.8, 0.5, 0.55, 1.0], thickness=0.1):
-        print("_create_ground()")
-        width  = self.bounds.dimensions[0]
+        print("[DEBUG] _create_ground()")
+        width = self.bounds.dimensions[0]
         length = self.bounds.dimensions[1]
 
-        # Zastosuj dodatkowy margines (np. 100) do całych wymiarów, a potem podziel na pół:
-        half_len = (length + 100.0) / 2
-        half_wid = (width + 100.0) / 2
+        half_len = (length + 100.0) / 2.0
+        half_wid = (width + 100.0) / 2.0
         z_pos = self.ground_position - (thickness / 2.0)
 
         col_id = p.createCollisionShape(
             p.GEOM_BOX, halfExtents=[half_wid, half_len, thickness / 2.0]
         )
         vis_id = p.createVisualShape(
-            p.GEOM_BOX, halfExtents=[half_wid, half_len, thickness / 2.0],
+            p.GEOM_BOX,
+            halfExtents=[half_wid, half_len, thickness / 2.0],
             rgbaColor=color
         )
-        
-        # Ważne: Środek prostokąta musi uwzględniać połowę obu osi, a rozmiary do halfExtents muszą być zmapowane X: width, Y: length
-        p.createMultiBody(0, col_id, vis_id, [width / 2.0, length / 2.0, z_pos])
+
+        self.ground_body_id = p.createMultiBody(
+            0, col_id, vis_id, [width / 2.0, length / 2.0, z_pos]
+        )
         print(f"[DEBUG] Ground created ({length}x{width})")
 
     def _create_ceiling(self):
-        print("_create_ceiling()")
-        width  = self.bounds.dimensions[0]  # Oś X
-        length = self.bounds.dimensions[1]  # Oś Y
-        height = self.bounds.dimensions[2]  # Oś Z
+        print("[DEBUG] _create_ceiling()")
+        width = self.bounds.dimensions[0]
+        length = self.bounds.dimensions[1]
+        height = self.bounds.dimensions[2]
 
-        # Najpierw dodajemy margines przestrzenny (np. 100), a na koniec dzielimy na pół do halfExtents
         half_wid = (width + 100.0) / 2.0
         half_len = (length + 100.0) / 2.0
 
@@ -92,16 +149,17 @@ class SwarmBaseWorld(BaseAviary):
             p.GEOM_BOX, halfExtents=[half_wid, half_len, 0.5]
         )
         vis_id = p.createVisualShape(
-            p.GEOM_BOX, halfExtents=[half_wid, half_len, 0.5],
+            p.GEOM_BOX,
+            halfExtents=[half_wid, half_len, 0.5],
             rgbaColor=[0, 0, 1, 0.1]
         )
-        
-        # Środek sufitu musi być w połowie realnej szerokości i długości (bez nałożonego marginesu wizualnego)
-        p.createMultiBody(0, col_id, vis_id, [width / 2.0, length / 2.0, height])
+
+        self.ceiling_body_id = p.createMultiBody(
+            0, col_id, vis_id, [width / 2.0, length / 2.0, height]
+        )
         print(f"[DEBUG] Ceiling created at height {height}m")
 
     def _setup_environment(self, ground_color=[0.5, 0.5, 0.55, 1.0]):
-        """Używa self.bounds — nie wymaga już ręcznego przekazywania wymiarów."""
         print("[DEBUG] Setting up environment...")
         self._create_ground(color=ground_color)
         if self.bounds.dimensions[2] > 0:
@@ -109,67 +167,109 @@ class SwarmBaseWorld(BaseAviary):
         print("[DEBUG] Environment setup complete.")
 
     # ------------------------------------------------------------------ #
-    # Needed by BaseAviary / Gymnasium                                     #
+    # Needed by BaseAviary / Gymnasium                                   #
     # ------------------------------------------------------------------ #
 
     def _addObstacles(self):
-        self._clear_default_plane()        # usuń plane.urdf BaseAviary
-        self._setup_environment()          # podłoże + sufit (wspólne)
+        self._clear_default_plane()
+        self._setup_environment()
         self._init_render_silently()
-        self.draw_obstacles()              # rysowanie przeszkód 
+        self.draw_obstacles()
         self._finalize_render()
-        
+
     def _actionSpace(self):
-        print("_actionSpace()")
-        act_lower = np.array([[0., 0., 0., 0.]] * self.NUM_DRONES)
-        act_upper = np.array([[self.MAX_RPM] * 4]  * self.NUM_DRONES)
+        print("[DEBUG] _actionSpace()")
+        # self.NUM_DRONES nie jest jeszcze zainicjalizowane przez BaseAviary!
+        # Używamy naszego self.total_agents zadeklarowanego przed super()
+        act_lower = np.array([[0., 0., 0., 0.]] * self.total_agents)
+        
+        # self.MAX_RPM też nie istnieje w momencie wołania tego przez __init__ BaseAviary
+        # Dlatego dla zdefiniowania samej struktury spacji można podać twardy limit
+        # lub wyciągnąć go awaryjnie np. 21702.644 (wartość dla CF2X)
+        fallback_rpm = getattr(self, "MAX_RPM", 21703)
+        act_upper = np.array([[fallback_rpm] * 4] * self.total_agents)
+        
         return spaces.Box(low=act_lower, high=act_upper, dtype=np.float32)
 
     def _observationSpace(self):
-        print("_observationSpace()")
+        print("[DEBUG] _observationSpace()")
         return spaces.Box(
-            low=-np.inf, high=np.inf,
-            shape=(self.NUM_DRONES, 20), dtype=np.float32
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.total_agents, 20),
+            dtype=np.float32
         )
 
-    def _computeObs(self):                  return self._getDroneStateVector(0)
-    def _preprocessAction(self, action):    return action
-    def _computeReward(self):               return -1.0
-    def _computeTerminated(self):           return False
-    def _computeTruncated(self):            return False
-    def _computeInfo(self):                 return {"answer": 42}
+    def _computeObs(self):
+        return np.vstack(
+            [self._getDroneStateVector(i) for i in range(self.total_agents)]
+        ).astype(np.float32)
+
+    def _preprocessAction(self, action):
+        return action
+
+    def _computeReward(self):
+        return -1.0
+
+    def _computeTerminated(self):
+        return False
+
+    def _computeTruncated(self):
+        return False
+
+    def _computeInfo(self):
+        return {"answer": 42}
 
     # ------------------------------------------------------------------ #
-    # ABSTRAKCJA — każda klasa potomna MUSI to zaimplementować           #
+    # ABSTRAKCJA                                                         #
     # ------------------------------------------------------------------ #
 
     @abstractmethod
     def draw_obstacles(self) -> None:
-        """Rysuje przeszkody specyficzne dla danego środowiska."""
         raise NotImplementedError
-    
-    def get_detailed_collisions(self):
+
+    # ------------------------------------------------------------------ #
+    # COLLISIONS                                                         #
+    # ------------------------------------------------------------------ #
+
+    def get_detailed_collisions(self, include_dynamic_obstacles: bool = False):
         """
-        Sprawdza kolizje dla każdego drona.
-        Zwraca listę krotek: (drone_id, other_body_id)
+        Zwraca listę kolizji jako:
+            (agent_idx, other_body_id)
+
+        Domyślnie raportuje kolizje tylko dla głównych dronów.
+        Jeśli include_dynamic_obstacles=True, sprawdza wszystkich agentów.
         """
         collisions = []
-        for drone_id in range(self.NUM_DRONES):
-            # Pobieramy ID ciała fizycznego drona w PyBullet
-            # W BaseAviary drony są trzymane w self.DRONE_IDS (lista)
-            drone_body_id = self.DRONE_IDS[drone_id]
-            
-            # Zapytanie do silnika fizycznego o punkty kontaktu
-            contact_points = p.getContactPoints(bodyA=drone_body_id)
-            
-            if contact_points:
-                for contact in contact_points:
-                    # contact[2] to bodyB (obiekt, w który uderzyliśmy)
-                    other_body_id = contact[2]
-                    # Unikamy logowania "kolizji" z samym sobą (rzadkie, ale możliwe w błędnych modelach)
-                    if other_body_id != drone_body_id:
-                        collisions.append((drone_id, other_body_id))
-                        
-        # Usuwamy duplikaty (np. wielokrotne punkty styku w jednej klatce)
+        max_agent_idx = self.NUM_DRONES if include_dynamic_obstacles else self.primary_num_drones
+
+        for agent_idx in range(max_agent_idx):
+            agent_body_id = self.DRONE_IDS[agent_idx]
+            contact_points = p.getContactPoints(bodyA=agent_body_id)
+
+            if not contact_points:
+                continue
+
+            for contact in contact_points:
+                other_body_id = contact[2]
+                if other_body_id != agent_body_id:
+                    collisions.append((agent_idx, other_body_id))
+
         return list(set(collisions))
 
+    def get_agent_collisions(self, include_dynamic_obstacles: bool = False):
+        """
+        Zwraca kolizje agent-agent jako:
+            (agent_idx, other_agent_idx)
+
+        Przydatne, jeśli później będziesz chciał odróżniać:
+        dron-vs-dron, dron-vs-dynamic_obstacle, dynamic_obstacle-vs-dynamic_obstacle.
+        """
+        collisions = []
+        for agent_idx, other_body_id in self.get_detailed_collisions(
+            include_dynamic_obstacles=include_dynamic_obstacles
+        ):
+            other_agent_idx = self.get_agent_index_from_body_id(other_body_id)
+            if other_agent_idx is not None and other_agent_idx != agent_idx:
+                collisions.append((agent_idx, other_agent_idx))
+        return list(set(collisions))

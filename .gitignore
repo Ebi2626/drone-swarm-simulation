@@ -11,6 +11,10 @@ CLAUDE.local.md
 plan.md
 .claude/
 
+# images
+*.png
+*.jpg
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

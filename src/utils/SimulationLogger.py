@@ -26,7 +26,6 @@ _TIMING_HEADERS = [
     "created_at_utc",
 ]
 
-
 class SimulationLogger:
     def __init__(self, output_dir, log_freq, ctrl_freq, num_drones):
         self.output_dir = output_dir
@@ -36,6 +35,10 @@ class SimulationLogger:
         self.collision_buffer = []
         self.optimization_timing_buffer: List[Dict[str, Any]] = []
         self.crashed_drones = set()
+        
+        # Nowy bufor na logi z sensorów LiDAR
+        self.lidar_buffer = []
+        
         print("[LOGGER] Buffering in RAM. Writing to disk after completion.")
 
     def log_step(self, step_idx, current_time, all_states):
@@ -73,26 +76,28 @@ class SimulationLogger:
             ))
             
             print(f"[LOGGER] Collision! Drone {drone_id} hit object {other_body_id} (t={current_time:.2f}s)")
-    
-    def _trajectory_to_dataframe(self, trajectory: NDArray) -> pd.DataFrame:
-        """
-        Konwertuje tablicę trajektorii do DataFrame gotowego do zapisu CSV.
-        
-        Args:
-            trajectory: NDArray kształtu (n_drones, n_waypoints, 3)
             
-        Returns:
-            pd.DataFrame z kolumnami: drone_id, waypoint_id, x, y, z
-        """
+    # --- NOWA METODA LOGOWANIA LIDARU ---
+    def log_lidar_hit(self, current_time: float, drone_id: int, hit):
+        """Zapisuje w buforze konkretne uderzenie promienia LiDARu."""
+        # Ze względu na ogromną liczbę promieni, zaokrąglamy dla oszczędności pamięci
+        self.lidar_buffer.append((
+            round(current_time, 3),
+            drone_id,
+            hit.object_id,
+            round(hit.distance, 3),
+            round(hit.hit_position[0], 3),
+            round(hit.hit_position[1], 3),
+            round(hit.hit_position[2], 3)
+        ))
+
+    def _trajectory_to_dataframe(self, trajectory: NDArray) -> pd.DataFrame:
         n_drones, n_waypoints, _ = trajectory.shape
-        
-        # Tworzymy indeksy za pomocą meshgrid (w pełni wektoryzowane)
         drone_ids, waypoint_ids = np.meshgrid(
             np.arange(n_drones),
             np.arange(n_waypoints),
             indexing='ij'
         )
-        
         return pd.DataFrame({
             "drone_id":    drone_ids.ravel(),
             "waypoint_id": waypoint_ids.ravel(),
@@ -112,10 +117,8 @@ class SimulationLogger:
             raise ValueError("Wrong obstacles shape type: ", shape_type)
         
         df = pd.DataFrame(obstacles.data, columns=columns)
-
         if shape_type is ObstacleShape.CYLINDER:
             df = df.drop(columns=['unused_dim'])
-
         return df
     
     def _world_to_dataframe(self, world: WorldData) -> pd.DataFrame:
@@ -125,12 +128,8 @@ class SimulationLogger:
             'Max_Bound': world.max_bounds,
             'Center': world.center
         }
-        
-        # Przekazanie etykiet osi X, Y, Z jako indeksów wierszy
         df = pd.DataFrame(data, index=['X', 'Y', 'Z'])
-        
         return df
-        
 
     def log_chosen_trajectories(self, trajectories: NDArray):
         trajectories_data_frame = self._trajectory_to_dataframe(trajectories)
@@ -154,37 +153,18 @@ class SimulationLogger:
         print(f"Zapisano {len(obstacles_data_frame)} pozycji przeszkód do: {path}")
 
     def log_optimization_timing(
-        self,
-        *,
-        run_id: str = "",
-        algorithm_name: str = "",
-        stage_name: str = "",
-        wall_time_s: Optional[float] = None,
-        cpu_time_s: Optional[float] = None,
-        success: Optional[bool] = None,
-        n_drones: Optional[int] = None,
-        number_of_waypoints: Optional[int] = None,
-        population_size: Optional[int] = None,
-        max_generations: Optional[int] = None,
-        extra_params: Optional[Dict[str, Any]] = None,
+        self, *, run_id: str = "", algorithm_name: str = "", stage_name: str = "",
+        wall_time_s: Optional[float] = None, cpu_time_s: Optional[float] = None,
+        success: Optional[bool] = None, n_drones: Optional[int] = None,
+        number_of_waypoints: Optional[int] = None, population_size: Optional[int] = None,
+        max_generations: Optional[int] = None, extra_params: Optional[Dict[str, Any]] = None,
         created_at_utc: str = "",
     ) -> None:
-        """Buffer a single optimization timing record.
-
-        All parameters are keyword-only with safe defaults so the logger
-        keeps working even when the caller provides only a subset.
-        """
         self.optimization_timing_buffer.append({
-            "run_id": run_id,
-            "algorithm_name": algorithm_name,
-            "stage_name": stage_name,
-            "wall_time_s": wall_time_s,
-            "cpu_time_s": cpu_time_s,
-            "success": success,
-            "n_drones": n_drones,
-            "number_of_waypoints": number_of_waypoints,
-            "population_size": population_size,
-            "max_generations": max_generations,
+            "run_id": run_id, "algorithm_name": algorithm_name, "stage_name": stage_name,
+            "wall_time_s": wall_time_s, "cpu_time_s": cpu_time_s, "success": success,
+            "n_drones": n_drones, "number_of_waypoints": number_of_waypoints,
+            "population_size": population_size, "max_generations": max_generations,
             "extra_params_json": json.dumps(extra_params) if extra_params else "",
             "created_at_utc": created_at_utc,
         })
@@ -195,7 +175,6 @@ class SimulationLogger:
         if self.trajectory_buffer:
             path = os.path.join(self.output_dir, "trajectories.csv")
             headers = ["time", "drone_id", "x", "y", "z", "roll", "pitch", "yaw", "vx", "vy", "vz"]
-
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
@@ -206,16 +185,23 @@ class SimulationLogger:
         if self.collision_buffer:
             path = os.path.join(self.output_dir, "collisions.csv")
             headers = ["time", "drone_id", "other_body_id"]
-
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
                 writer.writerows(self.collision_buffer)
-
             print(f"[LOGGER] Collisions saved: collisions.csv ({len(self.collision_buffer)} events)")
             self.collision_buffer.clear()
-        else:
-            print("[LOGGER] No collisions - file collisions.csv not created.")
+            
+        # --- ZAPIS DANYCH Z LIDARU ---
+        if self.lidar_buffer:
+            path = os.path.join(self.output_dir, "lidar_hits.csv")
+            headers = ["time", "drone_id", "object_id", "distance", "hit_x", "hit_y", "hit_z"]
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(self.lidar_buffer)
+            print(f"[LOGGER] Lidar hits saved: lidar_hits.csv ({len(self.lidar_buffer)} events)")
+            self.lidar_buffer.clear()
 
         if self.optimization_timing_buffer:
             path = os.path.join(self.output_dir, "optimization_timings.csv")
@@ -223,8 +209,5 @@ class SimulationLogger:
                 writer = csv.DictWriter(f, fieldnames=_TIMING_HEADERS)
                 writer.writeheader()
                 writer.writerows(self.optimization_timing_buffer)
-            print(
-                f"[LOGGER] Optimization timings saved: optimization_timings.csv "
-                f"({len(self.optimization_timing_buffer)} records)"
-            )
+            print(f"[LOGGER] Optimization timings saved: optimization_timings.csv")
             self.optimization_timing_buffer.clear()

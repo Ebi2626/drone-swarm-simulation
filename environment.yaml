@@ -22,4 +22,5 @@ dependencies:
       - mealpy>=3.0.0
       - pytest 
       - pytest-mock
+      - astar
 

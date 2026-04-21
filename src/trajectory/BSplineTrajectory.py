@@ -1,39 +1,55 @@
 import numpy as np
 from scipy.interpolate import splprep, splev
 
-# Zakładam, że klasa TrapezoidalProfile znajduje się w tym samym folderze
 from src.trajectory.TrapezoidalProfile import TrapezoidalProfile
+from src.trajectory.ConstantSpeedProfile import ConstantSpeedProfile
 
 class BSplineTrajectory:
-    def __init__(self, waypoints: np.ndarray, cruise_speed: float, max_accel: float):
+    def __init__(
+        self,
+        waypoints: np.ndarray,
+        cruise_speed: float,
+        max_accel: float,
+        constant_speed: bool = False,
+    ):
         """
-        Inicjalizuje trajektorię B-Spline na podstawie punktów zoptymalizowanych przez NSGA-III.
-        
+        Inicjalizuje trajektorię B-Spline na podstawie punktów zoptymalizowanych przez NSGA-III
+        lub punktów z lokalnego planera A*.
+
         :param waypoints: Tablica numpy o wymiarach (N, 3) zawierająca punkty trasy.
         :param cruise_speed: Maksymalna (przelotowa) prędkość drona [m/s].
         :param max_accel: Maksymalne dopuszczalne przyspieszenie drona [m/s^2].
+        :param constant_speed: Jeśli True, używa profilu o stałej prędkości (bez fazy
+            przyspieszania/hamowania). Używane dla lokalnych manewrów uniku, gdzie dron
+            musi kontynuować lot z prędkością zbliżoną do aktualnej — trapezoidalny
+            profil z v(0)=0 powodowałby gwałtowne hamowanie.
         """
         self.waypoints = waypoints
-        
+
         # splprep generuje parametry krzywej dla punktów w 3D.
         # s=0 oznacza, że wymuszamy dokładne przejście krzywej przez waypointy (interpolacja).
         # k=3 to stopień krzywej (cubic - zapewnia ciągłość przyspieszeń).
         self.tck, self.u_params = splprep(
-            [waypoints[:, 0], waypoints[:, 1], waypoints[:, 2]], 
-            s=0, 
+            [waypoints[:, 0], waypoints[:, 1], waypoints[:, 2]],
+            s=0,
             k=3
         )
-        
+
         # Obliczanie przybliżonej całkowitej długości krzywej [m]
         self.arc_length = self._calculate_arc_length()
-        
-        # Inicjalizacja profilu prędkości z wczorajszej klasy
-        self.profile = TrapezoidalProfile(
-            total_distance=self.arc_length, 
-            cruise_speed=cruise_speed, 
-            max_accel=max_accel
-        )
-        
+
+        if constant_speed:
+            self.profile = ConstantSpeedProfile(
+                total_distance=self.arc_length,
+                speed=cruise_speed,
+            )
+        else:
+            self.profile = TrapezoidalProfile(
+                total_distance=self.arc_length,
+                cruise_speed=cruise_speed,
+                max_accel=max_accel,
+            )
+
         # Całkowity czas lotu po tej trajektorii [s]
         self.total_duration = self.profile.total_duration
 
@@ -89,5 +105,34 @@ class BSplineTrajectory:
         else:
             unit_dir = derivative / norm
             target_vel = unit_dir * current_speed 
+            
+        return pos, target_vel
+    
+    def get_state_at_distance(self, distance: float, target_speed: float) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Pobiera docelową pozycję i wektor prędkości na podstawie przebytej drogi (s).
+        Umożliwia śledzenie ścieżki (Path Following) z pominięciem profilu czasu.
+        """
+        if self.arc_length <= 1e-6:
+            u = 1.0
+        else:
+            u = np.clip(distance / self.arc_length, 0.0, 1.0)
+        
+        pos = np.array(splev(u, self.tck))
+        
+        # Jeśli jesteśmy na końcu krzywej, zatrzymajmy drona
+        if u >= 1.0:
+            return pos, np.zeros(3)
+        
+        # Pierwsza pochodna by pozyskać wektor styczny do ścieżki
+        derivative = np.array(splev(u, self.tck, der=1))
+        norm = np.linalg.norm(derivative)
+        
+        if norm < 1e-6:
+            target_vel = np.zeros(3)
+        else:
+            unit_dir = derivative / norm
+            # Wektor styczny pomnożony przez stałą zadaną prędkość!
+            target_vel = unit_dir * target_speed 
             
         return pos, target_vel

@@ -1,0 +1,14 @@
+_target_: src.algorithms.avoidance.MSFFOAAvoidance.MSFFOAAvoidance
+name: "MSFFOA Local Planner"
+enable: true
+
+# Parametry rojowe zoptymalizowane pod online replanning
+num_swarms: 2              # Zredukowana liczba sub-rojów (zazwyczaj 5-10 w offline)
+swarm_size: 10             # Liczba "muszek" w sub-roju
+n_iterations: 10           # Maksymalna liczba iteracji zapachu
+smell_radius: 1.5          # Zasięg eksploracji wokół punktu heurystycznego APF
+
+# Wagi oceny stężenia zapachu (Smell Concentration Judgement)
+weight_smoothness: 1.0     
+weight_energy: 0.5         
+weight_safety: 2.5         

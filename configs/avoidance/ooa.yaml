@@ -1,0 +1,16 @@
+_target_: src.algorithms.avoidance.OOAAvoidance.OOAAvoidance
+name: "OOA Local Planner"
+enable: true
+
+# Parametry populacyjne
+pop_size: 15               # Populacja
+n_iterations: 8            # Iteracje dopasowane do time-constraint
+
+# Balans fazy eksploracji do eksploatacji (w online chcemy więcej eksploatacji lokalnej z APF)
+exploration_ratio: 0.2     # Ułamek iteracji poświęcony na 1 fazę (Position Identification)
+exploitation_ratio: 0.8    # Ułamek iteracji poświęcony na 2 fazę (Carrying the Fish - wygładzanie)
+
+# Wagi kary ewolucyjnej (Fitness)
+weight_smoothness: 1.0     
+weight_energy: 0.5         
+weight_safety: 2.5         

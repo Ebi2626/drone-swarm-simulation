@@ -18,3 +18,4 @@ algorithm_params:
   ignore_ratio: 0.1
   uniformity_std: 100.0
   max_jerk: 100.0
+  cruise_speed: 6.0

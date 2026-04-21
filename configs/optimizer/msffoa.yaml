@@ -2,7 +2,9 @@ _target_: src.algorithms.abstraction.trajectory.strategies.msffoa_strategy.msffo
 _partial_: true
 _convert_: "all"
 
+
 algorithm_params:
+  cruise_speed: 6.0
   pop_size: 400
   epochs: 2000
   n_inner_waypoints: 5

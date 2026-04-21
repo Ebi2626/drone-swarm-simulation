@@ -2,8 +2,10 @@ _target_: src.algorithms.abstraction.trajectory.strategies.ssa_strategy.ssa_swar
 _partial_: true
 _convert_: "all" 
 
+
 # Parametry optymalizacji dla Sparrow Search Algorithm (SSA)
 algorithm_params:
+  cruise_speed: 6.0
   pop_size: 200
   n_gen: 4000
   

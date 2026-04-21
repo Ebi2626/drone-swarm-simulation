@@ -2,16 +2,18 @@ defaults:
   - _self_
   - environment: forest
   - optimizer: nsga-3
+  - avoidance: astar
 
 simulation:
   duration_sec: 180
-  gui: true
+  gui: True
   pyb_freq: 240
   ctrl_freq: 48
   drone_model: "CF2X"
   physics: "PYB"
   sim_speed_multiplier: 5.0
-  dynamic_obstacles: False
+  dynamic_obstacles: True
+  collision_radius: 2.0
 
 seed: 43
 experiment_name: "test_run"

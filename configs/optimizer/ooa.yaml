@@ -2,8 +2,10 @@ _target_: src.algorithms.abstraction.trajectory.strategies.ooa_strategy.osprey_s
 _partial_: true
 _convert_: "all"
 
+
 # Parametry specyficzne dla Osprey Optimization Algorithm (OOA)
 algorithm_params:
+  cruise_speed: 6.0
   pop_size: 500
   n_gen: 300
   n_inner_waypoints: 7

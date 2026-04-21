@@ -1,0 +1,14 @@
+_target_: src.algorithms.avoidance.NSGA3Avoidance.NSGA3Avoidance
+name: "NSGA-III Local Planner"
+enable: true
+
+# Parametry ewolucyjne (zminimalizowane dla działania Online)
+pop_size: 15               # Znacznie mniejsza populacja w fazie online (standardowo min. 10-15)
+n_gen: 8                   # Mała liczba generacji dla osiągnięcia zbieżności w ułamku sekundy
+crossover_prob: 0.8        # Prawdopodobieństwo krzyżowania
+mutation_prob: 0.15        # Prawdopodobieństwo mutacji
+
+# Wagi dla funkcji fitness omijania (wygładzanie APF)
+weight_smoothness: 1.0     # Zgodność z kinetyką drona (profil trapezoidalny)
+weight_energy: 0.5         # Minimalizacja ostrego zawracania
+weight_safety: 2.5         # Najwyższy priorytet - ominięcie przeszkody

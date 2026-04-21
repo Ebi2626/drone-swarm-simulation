@@ -6,6 +6,11 @@ docs/
 trajectory_preview_bspline.png
 trajectory_preview.png
 
+# Claude Code specific
+CLAUDE.local.md
+plan.md
+.claude/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

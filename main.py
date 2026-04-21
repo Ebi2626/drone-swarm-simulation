@@ -106,12 +106,18 @@ class ExperimentRunner:
             "max_accel": self.cfg.optimizer.algorithm_params.get("max_accel", 2.0),
         }
 
+        avoidance_algo = None
+        if "avoidance" in self.cfg and self.cfg.avoidance.get("enable", False):
+            avoidance_algo = instantiate(self.cfg.avoidance)
+            print(f"[INFO] Aktywowano algorytm omijania: {avoidance_algo.name}")
+
         # Kontroler dla głównego roju
         self.trajectory_controller = TrajectoryFollowingAlgorithm(
             parent=self,
             num_drones=self.num_drones,
             is_obstacle=False,
-            params={**shared_params, "acceptance_radius": 0.2, "enable_avoidance": True}
+            avoidance_algorithm=avoidance_algo,
+            params={**shared_params, "acceptance_radius": 0.2, "enable_avoidance": avoidance_algo is not None}
         )
 
         # Kontroler dla dynamicznych przeszkód (jeśli włączone w konfiguracji)
@@ -120,6 +126,7 @@ class ExperimentRunner:
                 parent=self,
                 num_drones=self.num_dynamic_obstacles,
                 is_obstacle=True,
+                avoidance_algorithm=None,
                 params={**shared_params, "acceptance_radius": 0.5, "enable_avoidance": False}
             )
 

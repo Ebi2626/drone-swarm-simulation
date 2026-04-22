@@ -1,9 +1,10 @@
 name: "complex_test"
-runs_per_configuration: 4
+runs_per_configuration: 2
 
 parameters_grid:
   simulation:
     dynamic_obstacles: False
+    gui: False
   optimizers:
     - name: msffoa                     # Domyslne parametry (string)
       overrides:

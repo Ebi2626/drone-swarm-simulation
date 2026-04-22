@@ -7,13 +7,16 @@ parameters_grid:
     - name: msffoa
     - name: nsga-3
       overrides:
-        population_size: 800
-        crossover_probability: 0.95
+        algorithm_params:
+          n_gen: 800
+          crossover_probability: 0.95
     - name: ssa
       overrides:
-        population_size: 100
+        algorithm_params:
+          n_gen: 100
   environments:
     - forest
     - urban
   avoidances:
     - astar
+    - none

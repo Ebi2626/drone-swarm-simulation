@@ -26,4 +26,5 @@ dependencies:
       - hydra-joblib-launcher # Do uruchamiania eksperymentów
       - numba # Jit dla obliczeń czasu rzeczywistego
       - sqlite # Dla monitorowania postępów w długotrwałym eksperymencie
+      - seaborn # Do analizy danych po eksperymencie
 

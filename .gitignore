@@ -1,10 +1,13 @@
 # experiment results
 results/
 docs/
+configs/experiment_generated/
+configs/optimizer/tmp/
 
 # visualizations
 trajectory_preview_bspline.png
 trajectory_preview.png
+trajectory_preview_obstacles.png
 
 # Claude Code specific
 CLAUDE.local.md

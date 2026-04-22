@@ -5,8 +5,13 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from itertools import product
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.utils.RunRegistry import RunRegistry
 
 def process_optimizers(optimizers_list: list, exp_id: str, configs_dir: Path) -> list:
     """Generuje pliki proxy, które poprawnie dziedziczą i instancjują obiekty Hydry."""
@@ -190,14 +195,28 @@ def main():
                  len(definition.get("parameters_grid", {}).get("environments", [])) * \
                  len(definition.get("parameters_grid", {}).get("avoidances", []))
 
+    optimizers   = ["msffoa", "ssa", "ooa", "nsga-3"]
+    environments = ["forest", "urban"]
+    avoidances   = ["astar", "none"]
+    seeds        = list(range(1, 101))
+
+    sweep_params = [
+        {"optimizer": o, "environment": e, "avoidance": a, "seed": s}
+        for o, e, a, s in product(optimizers, environments, avoidances, seeds)
+    ]  # = dokładnie 1600 wpisów
+
+    registry = RunRegistry(f"results/{exp_id}/registry.db")
+    registry.populate(sweep_params)
+    print(f"Registry initialized: {registry.get_summary()}")
+
     print("✅ Pomyślnie wygenerowano plik konfiguracji!")
     print(f"ID eksperymentu: {exp_id}")
     print(f"Wygenerowane pliki proxy w: {configs_dir}/optimizer/tmp/")
     print(f"Zaplanowane symulacje: {total_runs}")
+    print("\nAby usunąć pliki po wykonaniu eksperymentu:")
+    print(f"rm -rf {configs_dir}/optimizer/tmp/* && rm -rf {configs_dir}/experiment_generated/*")
     print("\nAby uruchomić eksperyment z optymalizacją wieloprocesorową, wywołaj:\n")
     print(f"./run.sh {exp_id}")
-    print("\nAby usunąć pliki po wykonaniu eksperymentu:")
-    print(f"rm -rf {configs_dir}/optimizer/tmp/*")
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 name: "complex_test"
-runs_per_configuration: 2
+runs_per_configuration: 4
 
 parameters_grid:
   simulation:

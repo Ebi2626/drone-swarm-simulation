@@ -6,7 +6,7 @@ defaults:
 
 simulation:
   duration_sec: 180
-  gui: True
+  gui: False
   pyb_freq: 240
   ctrl_freq: 48
   drone_model: "CF2X"
@@ -34,7 +34,6 @@ visualization:
 hydra:
   run:
     dir: results/${now:%Y-%m-%d}/${now:%H-%M-%S}_${environment.name}_${hydra:runtime.choices.optimizer}
-  
   job_logging:
     version: 1
     root:

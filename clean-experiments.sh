@@ -1,0 +1,1 @@
+rm -rf ./configs/experiment_generated/* && ./clean-optimizers.sh

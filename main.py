@@ -1,8 +1,11 @@
+# flake8: noqa: E402
+import warnings
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+
 import sys
 import time
 import hydra
 import numpy as np
-import pybullet as p
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
@@ -18,6 +21,8 @@ from src.utils.RunRegistry import RunRegistry
 from src.utils.pybullet_utils import update_camera_position
 from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgorithm
 from src.environments.obstacles.ObstacleShape import ObstacleShape
+
+import pybullet as p
 
 
 class ExperimentRunner:

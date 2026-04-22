@@ -23,4 +23,6 @@ dependencies:
       - pytest 
       - pytest-mock
       - astar
+      - hydra-joblib-launcher # Do uruchamiania eksperymentów
+      - numba # jit dla obliczeń czasu rzeczywistego
 

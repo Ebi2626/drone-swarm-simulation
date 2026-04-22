@@ -1,0 +1,19 @@
+# experiments/definitions/benchmark_full.yaml
+name: "benchmark_complex"
+runs_per_configuration: 100
+
+parameters_grid:
+  optimizers:
+    - name: msffoa
+    - name: nsga-3
+      overrides:
+        population_size: 800
+        crossover_probability: 0.95
+    - name: ssa
+      overrides:
+        population_size: 100
+  environments:
+    - forest
+    - urban
+  avoidances:
+    - astar

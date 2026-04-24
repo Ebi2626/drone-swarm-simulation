@@ -1,21 +1,8 @@
-"""
-Osprey Optimization Algorithm (OOA) Swarm Strategy.
-Jednokryterialna optymalizacja trajektorii roju dronow z uzyciem algorytmu OOA z biblioteki mealpy.
-
-Adaptuje wielokryterialne cele (F) i ograniczenia (G) z VectorizedEvaluator
-do postaci jednokryterialnej poprzez sume wazona z karami za naruszenia ograniczen.
-
-Przed wazeniem cele sa normalizowane wzgledem trajektorii referencyjnej (linia prosta),
-co eliminuje problem roznych rzedow wielkosci pomiedzy F1, F2 i F3.
-
-Fitness = w1*(F1/F1_ref) + w2*(F2/F2_ref) + w3*(F3/F3_ref) + penalty_weight * sum(G)
-"""
-
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 from contextlib import nullcontext
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,268 +15,142 @@ from mealpy.swarm_based.OOA import OriginalOOA
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
-from src.environments.abstraction.generate_obstacles import ObstaclesData
+
+# Wspólne komponenty z MSFFOA / NSGA-III
+from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
+    SwarmOptimizationProblem,
+)
+from src.algorithms.abstraction.trajectory.strategies.soo_adapter import (
+    TrajectorySOOAdapter,
+)
+from src.algorithms.abstraction.trajectory.strategies.shared.bspline_utils import (
+    generate_bspline_batch,
+)
+from src.algorithms.abstraction.trajectory.strategies.shared.StraightLineNoiseSampling import (
+    StraightLineNoiseSampling,
+)
+from src.algorithms.abstraction.trajectory.strategies.timing_utils import (
+    TimingCollector,
+)
 from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 if TYPE_CHECKING:
-    from src.utils.optimization_history_writer import OptimizationHistoryWriter
-    from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
+    pass
 
 
 # ---------------------------------------------------------------------------
-# Polyline resampling (lokalna kopia – nie modyfikujemy istniejacych plikow)
+# Adapter problemu OOA - Rygorystyczny Strażnik Granic (Hard Bounding)
 # ---------------------------------------------------------------------------
 
-def _resample_polyline(
-    waypoints: NDArray[np.float64],
-    num_samples: int = 100,
-) -> NDArray[np.float64]:
-    """Interpoluje liniowo punkty trasy do zadanej liczby gestych punktow.
-
-    Args:
-        waypoints: (Pop, Drones, N_In, 3) rzadkie punkty kontrolne.
-        num_samples: N_Out – liczba punktow wyjsciowych.
-
-    Returns:
-        (Pop, Drones, N_Out, 3) gesta trajektoria.
+class OOAProblemAdapter(MealpyProblem):
     """
-    pop_size, n_drones, n_in, dims = waypoints.shape
-    flat = waypoints.reshape(pop_size * n_drones, n_in, dims)
-
-    u = np.linspace(0, n_in - 1, num_samples)
-    idx = np.clip(np.floor(u).astype(int), 0, n_in - 2)
-    alpha = (u - idx).reshape(1, num_samples, 1)
-
-    p0 = flat[:, idx, :]
-    p1 = flat[:, idx + 1, :]
-    result = p0 + alpha * (p1 - p0)
-
-    return result.reshape(pop_size, n_drones, num_samples, dims)
-
-
-# ---------------------------------------------------------------------------
-# Adapter problemu: mealpy.Problem z normalizacja celow
-# ---------------------------------------------------------------------------
-
-class OspreyProblemAdapter(MealpyProblem):
-    """Problem mealpy agregujacy wielokryterialna ocene do jednej wartosci fitness.
-
-    Dziedziczy z ``mealpy.Problem`` – mealpy wywoluje ``obj_func(x)`` per-osobnik.
-    Biblioteka nie oferuje natywnej ewaluacji batchowej calej populacji;
-    w zamian ``osprey_swarm_strategy`` uruchamia solver w trybie ``mode="thread"``
-    z konfigurowalna liczba workrow (``n_workers``), co pozwala VectorizedEvaluator
-    dzialac rownolegle na wielu watkach (numpy zwalnia GIL).
-
-    Normalizacja celow:
-        Przy inicjalizacji obliczana jest trajektoria referencyjna (linia prosta
-        Start -> Target). Wartosci F_ref sluza jako mianowniki normalizacji,
-        dzieki czemu wagi ``w1, w2, w3`` operuja na bezwymiarowej skali ~1.0
-        i sa porownywalne niezaleznie od rozmiaru swiata.
+    Problem mealpy dla OOA z bezwzględnym wymuszaniem granic (Hard Clipping).
     """
 
     def __init__(
         self,
+        *,
         bounds: FloatVar,
         evaluator: VectorizedEvaluator,
+        scalar_adapter: TrajectorySOOAdapter,
         start_pos: NDArray[np.float64],
         target_pos: NDArray[np.float64],
         n_drones: int,
         n_inner: int,
         n_output_samples: int,
-        weights: Dict[str, float],
-        penalty_weight: float,
-        history_writer: OptimizationHistoryWriter | None = None,
-        expected_pop_size: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(bounds=bounds, minmax="min", **kwargs)
 
         self.evaluator = evaluator
+        self.scalar_adapter = scalar_adapter
         self.n_drones = n_drones
         self.n_inner = n_inner
         self.n_output_samples = n_output_samples
 
-        self.w1 = weights.get("w_path_length", 1.0)
-        self.w2 = weights.get("w_collision_risk", 5.0)
-        self.w3 = weights.get("w_elevation", 0.5)
-        self.penalty_weight = penalty_weight
-
-        # Logowanie historii optymalizacji
-        self._history_writer = history_writer
-        self._expected_pop_size = expected_pop_size
-        self._gen_buffer_x: list[np.ndarray] = []
-        self._gen_buffer_f: list[np.ndarray] = []
-
-        # Pre-compute broadcast shapes (1, Drones, 1, 3)
         self._starts_bc = start_pos[np.newaxis, :, np.newaxis, :]
         self._targets_bc = target_pos[np.newaxis, :, np.newaxis, :]
+        
+        # Wypakowane granice do łatwego clipowania w obj_func
+        self._lb = np.asarray(bounds.lb, dtype=np.float64)
+        self._ub = np.asarray(bounds.ub, dtype=np.float64)
 
-        # --- Normalizacja: F_ref z trajektorii prostoliniowej ---
-        self._f_scale = self._compute_reference_scales()
-
-    # ------------------------------------------------------------------
-
-    def _compute_reference_scales(self) -> NDArray[np.float64]:
-        """Oblicza wartosci F dla trajektorii prostoliniowej (Start->Target).
-
-        Uzywane jako mianowniki normalizacji.  Dla F2 (collision risk) wartosc
-        referencyjna bywa zerowa (brak kolizji na prostej), wiec stosujemy
-        dolny klamp ``epsilon`` rowny 1.0 – zapobiega dzieleniu przez zero
-        i jednoczesnie utrzymuje F2 w 'surowej' skali, gdy nie ma referencji.
+    def amend_position(self, position: np.ndarray, *args: Any, **kwargs: Any) -> np.ndarray:
         """
-        t_vals = np.linspace(0, 1, self.n_inner + 2)[1:-1]
-        t = t_vals.reshape(1, 1, self.n_inner, 1)
-        inner_ref = self._starts_bc + t * (self._targets_bc - self._starts_bc)
-        sparse_ref = np.concatenate(
-            [self._starts_bc, inner_ref, self._targets_bc], axis=2
-        )
-        traj_ref = _resample_polyline(sparse_ref, self.n_output_samples)
+        NADRYWANIE MEALPY: Gwarantuje, że przy każdej aktualizacji wektora decyzyjnego,
+        agent nie wyleci w nieskończoność. Bez tego OOA bywa numerycznie niestabilne.
+        """
+        return np.clip(np.nan_to_num(position, nan=self._ub), self._lb, self._ub)
 
-        out_ref: Dict[str, Any] = {}
-        self.evaluator.evaluate(traj_ref, out_ref)
-        f_ref = out_ref["F"][0]  # (3,)
+    def _decode_inner(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
+        pop_size = population.shape[0]
+        return population.reshape(pop_size, self.n_drones, self.n_inner, 3)
 
-        # Klamp: F1 i F3 powinny byc > 0 dla nietrywialnej trasy,
-        # F2 moze byc 0 (brak kolizji) – uzywamy 1.0 jako skali bazowej.
-        return np.maximum(f_ref, 1.0)
+    def evaluate_population(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
+        inner = self._decode_inner(population)
+        fitness = np.asarray(self.scalar_adapter(inner), dtype=np.float64).reshape(-1)
+        return fitness
 
-    # ------------------------------------------------------------------
+    def evaluate_objectives(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
+        """
+        Surowe F do logowania historii.
+        Uwaga: VectorizedEvaluator przyjmuje 'inner' points, a nie 'dense'!
+        Przekazanie gęstych punktów powoduje niezgodność rozmiarów macierzy.
+        """
+        inner = self._decode_inner(population)
+        out: Dict[str, Any] = {}
+        # Przekazujemy inner, bo evaluator zainicjalizowano z n_inner_points=n_inner
+        self.evaluator.evaluate(inner, out)
+        return np.asarray(out["F"], dtype=np.float64)
 
     def obj_func(self, x: np.ndarray) -> float:
-        """Oblicza znormalizowany fitness dla pojedynczego wektora decyzyjnego.
-
-        Kroki:
-            1. Dekodowanie x -> (1, Drones, Inner, 3)
-            2. Budowa sparse polyline: Start -> Inner -> Target
-            3. Resampling do gestej trajektorii
-            4. Ewaluacja przez VectorizedEvaluator -> F(1,3), G(1,5)
-            5. Normalizacja F wzgledem F_ref
-            6. Agregacja: weighted sum + constraint penalty
-        """
-        inner = x.reshape(1, self.n_drones, self.n_inner, 3)
-        sparse = np.concatenate([self._starts_bc, inner, self._targets_bc], axis=2)
-        trajectories = _resample_polyline(sparse, self.n_output_samples)
-
-        out: Dict[str, Any] = {}
-        self.evaluator.evaluate(trajectories, out)
-
-        F = out["F"][0]  # (3,)
-        G = out["G"][0]  # (5,)
-
-        # Normalizacja celow wzgledem skali referencyjnej
-        F_norm = F / self._f_scale
-
-        obj_value = self.w1 * F_norm[0] + self.w2 * F_norm[1] + self.w3 * F_norm[2]
-        constraint_penalty = self.penalty_weight * float(np.sum(np.maximum(0.0, G)))
-
-        if self._history_writer is not None and self._expected_pop_size > 0:
-            self._gen_buffer_x.append(x.copy())
-            self._gen_buffer_f.append(F.copy())
-            if len(self._gen_buffer_x) >= self._expected_pop_size:
-                self._history_writer.put_generation_data({
-                    "objectives_matrix": np.stack(self._gen_buffer_f),
-                    "decisions_matrix": np.stack(self._gen_buffer_x),
-                })
-                self._gen_buffer_x.clear()
-                self._gen_buffer_f.clear()
-
-        return float(obj_value + constraint_penalty)
-
-    # ------------------------------------------------------------------
-
-    def evaluate_batch(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Ewaluacja batchowa calej populacji przez VectorizedEvaluator.
-
-        Metoda wykorzystuje wektoryzowany charakter evaluatora, przetwarzajac
-        cala macierz populacji (pop_size, n_var) w jednym ujeciu – bez petli.
-
-        Uwaga: mealpy nie wywoluje tej metody automatycznie; jest ona dostepna
-        do uzycia w niestandardowych petlach optymalizacyjnych lub benchmarkach.
-
-        Args:
-            population: (pop_size, n_var) macierz zmiennych decyzyjnych.
-
-        Returns:
-            (pop_size,) wektor wartosci fitness.
-        """
-        pop_size = population.shape[0]
-        inner = population.reshape(pop_size, self.n_drones, self.n_inner, 3)
-
-        starts = np.broadcast_to(self._starts_bc, (pop_size, self.n_drones, 1, 3)).copy()
-        targets = np.broadcast_to(self._targets_bc, (pop_size, self.n_drones, 1, 3)).copy()
-
-        sparse = np.concatenate([starts, inner, targets], axis=2)
-        trajectories = _resample_polyline(sparse, self.n_output_samples)
-
-        out: Dict[str, Any] = {}
-        self.evaluator.evaluate(trajectories, out)
-
-        F = out["F"]  # (pop_size, 3)
-        G = out["G"]  # (pop_size, 5)
-
-        F_norm = F / self._f_scale[np.newaxis, :]
-        obj_values = self.w1 * F_norm[:, 0] + self.w2 * F_norm[:, 1] + self.w3 * F_norm[:, 2]
-        penalties = self.penalty_weight * np.max(np.maximum(0.0, G), axis=1) * 10.0
-
-        return obj_values + penalties
+        # Bezwzględne sprawdzenie na wejściu (fail-safe)
+        x_safe = np.clip(np.nan_to_num(x, nan=self._ub), self._lb, self._ub)
+        return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
 
 
 # ---------------------------------------------------------------------------
-# Heurystyczna inicjalizacja populacji
+# Subklasa OOA z generacyjnym logowaniem historii
 # ---------------------------------------------------------------------------
 
-def _generate_starting_solutions(
-    start_pos: NDArray[np.float64],
-    target_pos: NDArray[np.float64],
-    n_drones: int,
-    n_inner: int,
-    pop_size: int,
-    world_data: WorldData,
-    obstacles_data: Optional[ObstaclesData],
-    xl: np.ndarray,
-    xu: np.ndarray,
-) -> np.ndarray:
-    """Generuje populacje poczatkowa wokol linii prostej Start->Target."""
+class LoggedOriginalOOA(OriginalOOA):
+    def __init__(
+        self,
+        *args: Any,
+        history_writer: Optional[OptimizationHistoryWriter] = None,
+        history_problem: Optional[OOAProblemAdapter] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._history_writer = history_writer
+        self._history_problem = history_problem
 
-    t_vals = np.linspace(0, 1, n_inner + 2)[1:-1]
-    t = t_vals.reshape(1, 1, n_inner, 1)
-    s = start_pos[np.newaxis, :, np.newaxis, :]
-    e = target_pos[np.newaxis, :, np.newaxis, :]
+    def evolve(self, epoch: int) -> None:
+        super().evolve(epoch)
 
-    base_points = s + t * (e - s)  # (1, Drones, Inner, 3)
-    X = np.tile(base_points, (pop_size, 1, 1, 1))
+        if self._history_writer is None or self._history_problem is None:
+            return
 
-    # Szum XY zalezny od rozmiarow przeszkod
-    if (
-        obstacles_data is not None
-        and obstacles_data.data is not None
-        and len(obstacles_data.data) > 0
-    ):
+        try:
+            # Wyciągamy wyclipowane decyzje
+            decisions = np.vstack(
+                [self._history_problem.amend_position(np.asarray(agent.solution, dtype=np.float64)) for agent in self.pop]
+            )
+            objectives = self._history_problem.evaluate_objectives(decisions)
 
-        world_size_x = float(world_data.max_bounds[0] - world_data.min_bounds[0])
-        world_size_y = float(world_data.max_bounds[1] - world_data.min_bounds[1])
-        
-        # Pozwalamy im losowo odchylić się nawet o 15% wymiarów świata na starcie
-        noise_scale_x = world_size_x * 0.15
-        noise_scale_y = world_size_y * 0.05 # Na osi Y odchylamy mniej, bo to oś postępu
-        
-        noise_xy = np.random.normal(0, 1.0, (pop_size, n_drones, n_inner, 2))
-        noise_xy[..., 0] *= noise_scale_x
-        noise_xy[..., 1] *= noise_scale_y
-        
-        X[..., :2] += noise_xy
-
-    # Losowa wysokosc w bezpiecznym korytarzu
-    min_safe_z = 0.5
-    max_flight_z = float(world_data.max_bounds[2])
-    X[..., 2] = np.random.uniform(min_safe_z, max_flight_z, (pop_size, n_drones, n_inner))
-
-    X_flat = X.reshape(pop_size, -1)
-    return np.clip(X_flat, xl, xu)
+            self._history_writer.put_generation_data(
+                {
+                    "objectives_matrix": objectives,
+                    "decisions_matrix": decisions,
+                }
+            )
+        except Exception as e:
+            print(f"[OOA] Warning: history logging failed at epoch {epoch}: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Glowna funkcja strategii (implementuje TrajectoryStrategyProtocol)
+# Główna strategia OOA
 # ---------------------------------------------------------------------------
 
 def osprey_swarm_strategy(
@@ -303,181 +164,161 @@ def osprey_swarm_strategy(
     algorithm_params: Optional[Dict[str, Any]] = None,
     timing: Optional["TimingCollector"] = None,
 ) -> NDArray[np.float64]:
-    """Strategia generowania trajektorii roju dronow za pomoca Osprey Optimization Algorithm.
+    
+    params = algorithm_params or {}
 
-    Uzywana jako zamiennik (drop-in replacement) dla nsga3_swarm_strategy.
-    Roznice architektoniczne:
-        - OOA jest algorytmem jednokryterialnym (SOO), wiec cele i ograniczenia
-          sa agregowane do pojedynczej wartosci fitness z normalizacja wzgledem
-          trajektorii referencyjnej.
-        - Implementacja bazuje na bibliotece mealpy (OriginalOOA).
-        - mealpy wymusza ewaluacje per-osobnik (obj_func). Parametry ``mode``
-          i ``n_workers`` sa przekazywane do solvera; OriginalOOA w mealpy 3.x
-          wymusza tryb "single", ale inne algorytmy mealpy (np. PSO)
-          moga korzystac z wielowatkowosci przez ten sam interfejs.
-
-    Args:
-        start_positions: (N, 3) pozycje startowe dronow.
-        target_positions: (N, 3) pozycje docelowe dronow.
-        obstacles_data: przeszkody w srodowisku (pojedynczy obiekt lub lista).
-        world_data: granice swiata.
-        number_of_waypoints: liczba punktow gestej trajektorii wyjsciowej.
-        drone_swarm_size: liczba dronow w roju.
-        algorithm_params: parametry konfiguracyjne algorytmu OOA.
-        timing: opcjonalny kolektor czasowy logujacy dzialanie algorytmu.
-
-    Returns:
-        NDArray o ksztalcie (N_drones, N_waypoints, 3).
-    """
     local_timing = False
     if timing is None:
         try:
-            from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
             timing = TimingCollector("OOA_Swarm")
             local_timing = True
-        except ImportError:
+        except Exception:
             timing = None
 
     _measure = timing.measure if timing is not None else lambda *a, **kw: nullcontext()
-    writer = None
+
+    writer: Optional[OptimizationHistoryWriter] = None
 
     try:
         with _measure("total_optimization"):
+            pop_size: int = int(params.get("pop_size", 200))
+            max_generations: int = int(params.get("epochs", params.get("n_gen", 500)))
+            n_inner: int = int(params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1))))
+            seed: int = int(params.get("seed", 42))
+
+            if "objective_weights" in params:
+                weights = np.asarray(params["objective_weights"], dtype=np.float64)
+            else:
+                weights = np.asarray(
+                    [
+                        params.get("w_path_length", 0.05),
+                        params.get("w_collision_risk", 100.0),
+                        params.get("w_elevation", 0.1),
+                    ],
+                    dtype=np.float64,
+                )
+
+            penalty_weight: float = float(params.get("penalty_weight", 1.0))
+            noise_std_xy = float(params.get("noise_std_xy", 2.0))
+            noise_std_z = float(params.get("noise_std_z", 0.3))
+
+            n_workers: int = int(params.get("n_workers", 1))
+            mode: str = "thread" if n_workers > 1 else "swarm"
+
+            try:
+                output_dir = HydraConfig.get().runtime.output_dir
+            except ValueError:
+                output_dir = os.getcwd()
+
+            writer = OptimizationHistoryWriter(output_dir=os.path.join(output_dir, "optimization_history"))
+
             with _measure("initialization"):
-                params = algorithm_params or {}
-
-                # --- Parametry OOA ---
-                pop_size: int = params.get("pop_size", 100)
-                n_epochs: int = params.get("n_gen", 500)
-                n_inner: int = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
-
-                weights = {
-                    "w_path_length": params.get("w_path_length", 1.0),
-                    "w_collision_risk": params.get("w_collision_risk", 5.0),
-                    "w_elevation": params.get("w_elevation", 0.5),
-                }
-                penalty_weight: float = params.get("penalty_weight", 100.0)
-
-                # --- Multithreading ---
-                n_workers: int = params.get("n_workers", 4)
-                mode: str = "thread" if n_workers > 1 else "swarm"
-
-                # --- Normalizacja listy przeszkod ---
-                obs_list: List[Any] = obstacles_data if isinstance(obstacles_data, list) else [obstacles_data]
-
-                # --- Granice zmiennych decyzyjnych ---
-                margin = 50.0
-                MIN_Z_ALTITUDE = 0.5
-
-                xl_point = np.array(world_data.min_bounds, dtype=float) - margin
-                xu_point = np.array(world_data.max_bounds, dtype=float) + margin
-                xl_point[2] = max(MIN_Z_ALTITUDE, float(world_data.min_bounds[2]))
-
-                n_var = drone_swarm_size * n_inner * 3
-                xl = np.tile(xl_point, drone_swarm_size * n_inner)
-                xu = np.tile(xu_point, drone_swarm_size * n_inner)
-
-                from src.utils.optimization_history_writer import OptimizationHistoryWriter
-
-                hydra_output_dir = HydraConfig.get().runtime.output_dir
-                writer = OptimizationHistoryWriter(
-                    output_dir=os.path.join(hydra_output_dir, "optimization_history")
-                )
-
-                print(
-                    f"[OOA] Start. Pop: {pop_size}, Epochs: {n_epochs}, "
-                    f"Inner Pts: {n_inner}, Vars: {n_var}, Mode: {mode}, Workers: {n_workers}"
-                )
-
-                # --- Evaluator ---
                 evaluator = VectorizedEvaluator(
-                    obstacles=obs_list,
+                    obstacles=obstacles_data,
                     start_pos=start_positions,
                     target_pos=target_positions,
+                    n_inner_points=n_inner,
                     params=params,
                 )
 
-                # --- Problem (mealpy.Problem subclass) ---
-                problem = OspreyProblemAdapter(
+                scalar_adapter = TrajectorySOOAdapter(
+                    evaluator=evaluator,
+                    start_positions=start_positions,
+                    target_positions=target_positions,
+                    n_drones=drone_swarm_size,
+                    n_inner=n_inner,
+                    weights=weights,
+                    penalty_weight=penalty_weight,
+                )
+
+                scalar_adapter._f_ref = np.maximum(scalar_adapter._f_ref, 1.0)
+
+                # Wydruk kontrolny F_ref - powinny być sensowne wartości wokół 1.0 dla linii prostej
+                print(f"[OOA] F_ref (normalization scales): {scalar_adapter._f_ref}")
+
+                problem_ref = SwarmOptimizationProblem(
+                    n_drones=drone_swarm_size,
+                    n_inner_points=n_inner,
+                    world_data=world_data,
+                    evaluator=evaluator,
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    min_altitude=params.get("min_altitude"),
+                    max_altitude=params.get("max_altitude"),
+                )
+
+                xl = np.asarray(problem_ref.xl, dtype=np.float64)
+                xu = np.asarray(problem_ref.xu, dtype=np.float64)
+
+                sampling = StraightLineNoiseSampling(
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    n_inner_points=n_inner,
+                    n_drones=drone_swarm_size,
+                    noise_std=noise_std_xy,
+                    noise_std_z=noise_std_z,
+                )
+
+                # Konwersja do List[1D array], aby Mealpy poprawnie potraktowało każdy wektor bazowy
+                starting_solutions_raw = np.asarray(sampling._do(problem_ref, pop_size), dtype=np.float64)
+                starting_solutions = [sol for sol in starting_solutions_raw]
+
+                mealpy_problem = OOAProblemAdapter(
                     bounds=FloatVar(lb=xl, ub=xu),
                     evaluator=evaluator,
+                    scalar_adapter=scalar_adapter,
                     start_pos=start_positions,
                     target_pos=target_positions,
                     n_drones=drone_swarm_size,
                     n_inner=n_inner,
                     n_output_samples=number_of_waypoints,
-                    weights=weights,
-                    penalty_weight=penalty_weight,
-                    history_writer=writer,
-                    expected_pop_size=pop_size,
                     log_to="console",
                 )
 
-                # --- Populacja poczatkowa (heurystyczna) ---
-                first_obs = None
-                if isinstance(obstacles_data, list) and len(obstacles_data) > 0:
-                    first_obs = obstacles_data[0]
-                elif not isinstance(obstacles_data, list):
-                    first_obs = obstacles_data
-
-                starting_solutions = _generate_starting_solutions(
-                    start_pos=start_positions,
-                    target_pos=target_positions,
-                    n_drones=drone_swarm_size,
-                    n_inner=n_inner,
-                    pop_size=pop_size,
-                    world_data=world_data,
-                    obstacles_data=first_obs,
-                    xl=xl,
-                    xu=xu,
+                print(
+                    f"[OOA B-Spline] Start. Pop: {pop_size}, Epochs: {max_generations}, "
+                    f"Control Pts: {n_inner}, Weights: {weights}, Penalty: {penalty_weight}, "
+                    f"Mode: {mode}, Workers: {n_workers}"
                 )
 
-                # --- Uruchomienie OOA ---
-                model = OriginalOOA(epoch=n_epochs, pop_size=pop_size)
+                model = LoggedOriginalOOA(
+                    epoch=max_generations,
+                    pop_size=pop_size,
+                    history_writer=writer,
+                    history_problem=mealpy_problem,
+                )
 
-            try:
-                with _measure("optimization"):
-                    best_agent = model.solve(
-                        problem=problem,
-                        mode=mode,
-                        n_workers=n_workers,
-                        starting_solutions=starting_solutions,
-                        seed=params.get("seed", 1),
-                    )
+            with _measure("optimization"):
+                best_agent = model.solve(
+                    problem=mealpy_problem,
+                    mode=mode,
+                    n_workers=n_workers,
+                    starting_solutions=starting_solutions,
+                    seed=seed,
+                )
 
-                    best_x = best_agent.solution
-                    best_fitness = best_agent.target.fitness
-                    print(f"[OOA] Zakonczono. Najlepszy fitness: {best_fitness:.4f}")
-                    print(f"[OOA] Skale normalizacji F_ref: {problem._f_scale}")
+                # Bezpieczne pobranie z klipowaniem
+                best_x = mealpy_problem.amend_position(np.asarray(best_agent.solution, dtype=np.float64))
+                best_fitness = float(best_agent.target.fitness)
 
-                with _measure("decision_and_reconstruction"):
-                    # --- Rekonstrukcja trajektorii ---
-                    inner = best_x.reshape(1, drone_swarm_size, n_inner, 3)
-                    s = start_positions[np.newaxis, :, np.newaxis, :]
-                    t = target_positions[np.newaxis, :, np.newaxis, :]
-                    sparse = np.concatenate([s, inner, t], axis=2)
-                    final_traj = _resample_polyline(sparse, num_samples=number_of_waypoints)
+                print(f"[OOA] Optimization Finished. Best Fitness: {best_fitness:.4f}")
 
-                    return final_traj[0]  # (N_drones, N_waypoints, 3)
+            with _measure("decision_and_reconstruction"):
+                inner = best_x.reshape(1, drone_swarm_size, n_inner, 3)
+                starts = start_positions[np.newaxis, :, np.newaxis, :]
+                targets = target_positions[np.newaxis, :, np.newaxis, :]
+                sparse_trajectory = np.concatenate([starts, inner, targets], axis=2)
 
-            except Exception as e:
-                with _measure("fallback"):
-                    print(f"[OOA] Blad optymalizacji: {e}. Zwracam linie prosta.")
-                    print("[OOA] Fallback: generowanie linii prostej.")
-                    t_line = np.linspace(0, 1, number_of_waypoints)
-                    out = np.empty((drone_swarm_size, number_of_waypoints, 3))
-                    min_safe_alt = params.get("min_safe_altitude", 1.0)
+                print("[OOA] Applying B-Spline Post-Processing...")
+                final_dense_traj = generate_bspline_batch(
+                    sparse_trajectory,
+                    num_samples=number_of_waypoints,
+                )
 
-                    for d in range(drone_swarm_size):
-                        for axis in range(2):
-                            out[d, :, axis] = np.interp(
-                                t_line, [0, 1], [start_positions[d, axis], target_positions[d, axis]]
-                            )
-                        z_start = max(float(start_positions[d, 2]), min_safe_alt)
-                        z_target = max(float(target_positions[d, 2]), min_safe_alt)
-                        out[d, :, 2] = np.interp(t_line, [0, 1], [z_start, z_target])
+                return np.asarray(final_dense_traj[0], dtype=np.float64)
 
-                    return out
+    except Exception as e:
+        print(f"[OOA] Optimization error: {e}. Returning straight-line fallback.")
 
     finally:
         if writer is not None:
@@ -490,4 +331,23 @@ def osprey_swarm_strategy(
                 out_dir = HydraConfig.get().runtime.output_dir
                 timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
             except Exception as e:
-                print(f"[OOA] Nie udało się zapisać logów czasowych: {e}")
+                pass
+
+    with _measure("fallback"):
+        print("[OOA] Fallback: generating straight-line trajectory.")
+        t_line = np.linspace(0, 1, number_of_waypoints)
+        out = np.empty((drone_swarm_size, number_of_waypoints, 3), dtype=np.float64)
+        min_safe_alt = params.get("min_safe_altitude", 1.0)
+
+        for d in range(drone_swarm_size):
+            for axis in range(2):
+                out[d, :, axis] = np.interp(
+                    t_line,
+                    [0, 1],
+                    [start_positions[d, axis], target_positions[d, axis]],
+                )
+            z_start = max(float(start_positions[d, 2]), min_safe_alt)
+            z_target = max(float(target_positions[d, 2]), min_safe_alt)
+            out[d, :, 2] = np.interp(t_line, [0, 1], [z_start, z_target])
+
+        return out

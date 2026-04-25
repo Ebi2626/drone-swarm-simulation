@@ -1,178 +1,147 @@
-import pytest
 import numpy as np
-import importlib
+import pytest
+from unittest.mock import patch, MagicMock
+
+from src.environments.obstacles.ObstacleShape import ObstacleShape
+from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
+
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.objective_constrains"
-EvaluatorModule = importlib.import_module(TARGET_MODULE)
 
 # ==========================================
 # FIXTURES
 # ==========================================
 
 @pytest.fixture
-def sample_trajectories():
-    """
-    Kształt wektora: (pop_size, n_drones, n_waypoints, 3)
-    Pop 0: Prosta linia w osi X (0->1->2), Z rośnie i opada.
-    Pop 1: Trójkąt (0,0,0) -> (0,3,0) -> (4,3,0) (Długość: 3 + 4 = 7).
-    """
-    pop0 = np.array([
-        [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 2.0],
-            [2.0, 0.0, 1.0]
-        ]
-    ])
-    
-    pop1 = np.array([
-        [
-            [0.0, 0.0, 0.0],
-            [0.0, 3.0, 0.0],
-            [4.0, 3.0, 0.0]
-        ]
-    ])
-    
-    return np.vstack([pop0[None, ...], pop1[None, ...]])
+def basic_params():
+    return {
+        "k_factor": 2.0,
+        "absolute_min_node_dist": 5.0,
+        "obstacle_safety_margin": 0.5,
+        "min_drone_distance": 2.0,
+        "max_accel_limit": 5.0
+    }
+
+@pytest.fixture
+def mock_obstacles_cylinder():
+    """Przeszkoda walcowa do testowania ekstrakcji promienia."""
+    obs = MagicMock()
+    obs.shape_type = ObstacleShape.CYLINDER
+    # data: [x, y, z, promień, wysokość, ...]
+    obs.data = np.array([[10.0, 10.0, 0.0, 2.0, 10.0, 0.0]])
+    return obs
+
+@pytest.fixture
+def mock_obstacles_box():
+    """Przeszkoda prostopadłościenna do testowania okręgu opisanego."""
+    obs = MagicMock()
+    obs.shape_type = ObstacleShape.BOX
+    # data: [x, y, z, długość_x, szerokość_y, wysokość]
+    obs.data = np.array([[20.0, 20.0, 0.0, 4.0, 3.0, 10.0]])
+    return obs
 
 # ==========================================
-# TESTY FUNKCJI CELU (F)
+# TESTY INICJALIZACJI PRZESZKÓD
 # ==========================================
 
-def test_calc_path_length(sample_trajectories):
-    """Intencja: Obliczenie sumy długości euklidesowych segmentów."""
-    lengths = EvaluatorModule.calc_path_length(sample_trajectories)
+@patch(f"{TARGET_MODULE}.calculate_dynamic_max_node_distance", return_value=10.0)
+def test_evaluator_init_no_obstacles(mock_calc, basic_params):
+    """Brak przeszkód nie powinien rzucać wyjątków, a tablice powinny być puste."""
+    starts = np.array([[0.0, 0.0, 0.0]])
+    targets = np.array([[100.0, 100.0, 0.0]])
     
-    # Pop 0: 
-    # Seg 1: (0,0,0)->(1,0,2) = sqrt(1^2 + 2^2) = sqrt(5) ~ 2.236
-    # Seg 2: (1,0,2)->(2,0,1) = sqrt(1^2 + 1^2) = sqrt(2) ~ 1.414
-    # Suma ~ 3.650
-    expected_pop0 = np.sqrt(5) + np.sqrt(2)
+    evaluator = VectorizedEvaluator(None, starts, targets, 3, basic_params)
     
-    # Pop 1:
-    # Seg 1: 3.0, Seg 2: 4.0. Suma = 7.0
-    expected_pop1 = 7.0
-    
-    np.testing.assert_array_almost_equal(lengths, [expected_pop0, expected_pop1])
+    assert len(evaluator.obstacles_xy) == 0
+    assert len(evaluator.obstacle_radii) == 0
 
-def test_calc_elevation_changes(sample_trajectories):
-    """Intencja: Obliczenie sumy bezwzględnych zmian wysokości (osi Z)."""
-    elevations = EvaluatorModule.calc_elevation_changes(sample_trajectories)
+@patch(f"{TARGET_MODULE}.calculate_dynamic_max_node_distance", return_value=10.0)
+def test_evaluator_init_cylinder_obstacles(mock_calc, mock_obstacles_cylinder, basic_params):
+    """Dla cylindra bierzemy jego promień i dodajemy margines bezpieczeństwa."""
+    starts = np.array([[0.0, 0.0, 0.0]])
+    targets = np.array([[100.0, 100.0, 0.0]])
     
-    # Pop 0: 0 -> 2 (zmiana 2), 2 -> 1 (zmiana 1). Suma = 3
-    # Pop 1: 0 -> 0 -> 0. Suma = 0
-    np.testing.assert_array_almost_equal(elevations, [3.0, 0.0])
+    evaluator = VectorizedEvaluator(mock_obstacles_cylinder, starts, targets, 3, basic_params)
+    
+    assert evaluator.obstacles_xy.shape == (1, 2)
+    np.testing.assert_array_almost_equal(evaluator.obstacles_xy[0], [10.0, 10.0])
+    
+    # Oczekiwany promień: 2.0 (z danych) + 0.5 (margines z parametrów) = 2.5
+    np.testing.assert_array_almost_equal(evaluator.obstacle_radii, [2.5])
 
-# ==========================================
-# TESTY NOWYCH OGRANICZEŃ GEOMETRYCZNYCH (G)
-# ==========================================
-
-def test_constr_segment_uniformity():
+@patch(f"{TARGET_MODULE}.calculate_dynamic_max_node_distance", return_value=10.0)
+def test_evaluator_init_box_obstacles(mock_calc, mock_obstacles_box, basic_params):
     """
-    Intencja: Wykrycie "źle rozłożonych" waypointów za pomocą odchylenia standardowego.
+    Dla pudełka liczymy promień okręgu opisanego na prostokącie XY, 
+    a następnie dodajemy margines bezpieczeństwa.
     """
-    # Pop 0: Punkty równomierne (długości segmentów: 1.0 i 1.0) -> std = 0.0
-    pop_uniform = np.array([[[[0,0,0], [1,0,0], [2,0,0]]]])
+    starts = np.array([[0.0, 0.0, 0.0]])
+    targets = np.array([[100.0, 100.0, 0.0]])
     
-    # Pop 1: Punkty "zlepione" (długości segmentów: 0.2 i 1.8) -> średnia = 1.0, std = 0.8
-    pop_clustered = np.array([[[[0,0,0], [0.2,0,0], [2.0,0,0]]]])
+    evaluator = VectorizedEvaluator(mock_obstacles_box, starts, targets, 3, basic_params)
     
-    traj = np.vstack([pop_uniform, pop_clustered])
-    
-    # Ustawiamy tolerancję na 0.5. Pop_uniform powinno mieć CV=0, Pop_clustered CV=(0.8 - 0.5) = 0.3
-    cv = EvaluatorModule.constr_segment_uniformity(traj, tolerance_std=0.5)
-    
-    np.testing.assert_array_almost_equal(cv, [0.0, 0.3])
-
-def test_constr_path_smoothness():
-    """
-    Intencja: Wykrycie ostrych "zygzaków" za pomocą drugiej różnicy (krzywizny).
-    """
-    # Pop 0: Prosta linia. P(i+1) - 2P(i) + P(i-1) = [2,0,0] - [2,0,0] + [0,0,0] = [0,0,0]
-    pop_straight = np.array([[[[0,0,0], [1,0,0], [2,0,0]]]])
-    
-    # Pop 1: Zygzak (kąt prosty). (0,0) -> (1,1) -> (2,0)
-    # Druga różnica: [2,0,0] - 2*[1,1,0] + [0,0,0] = [0,-2,0]
-    # Kwadrat (Jerk_sq): 4.0
-    pop_zig_zag = np.array([[[[0,0,0], [1,1,0], [2,0,0]]]])
-    
-    traj = np.vstack([pop_straight, pop_zig_zag])
-    
-    # Tolerancja na 1.0. Prosta ma CV=0, Zygzak ma (4.0 - 1.0) = 3.0
-    cv = EvaluatorModule.constr_path_smoothness(traj, max_turn_factor=1.0)
-    
-    np.testing.assert_array_almost_equal(cv, [0.0, 3.0])
+    # lx=4, wy=3 -> half_lx=2.0, half_wy=1.5
+    # circumscribed_radius = sqrt(2^2 + 1.5^2) = sqrt(4 + 2.25) = sqrt(6.25) = 2.5
+    # promień ostateczny: 2.5 + 0.5 (margines) = 3.0
+    np.testing.assert_array_almost_equal(evaluator.obstacle_radii, [3.0])
 
 # ==========================================
-# TESTY DETEKCJI KOLIZJI (Odcinek vs Cylinder)
+# TESTY FUNKCJI CELU I OGRANICZEŃ (EWALUACJA)
 # ==========================================
 
-def test_dist_segment_to_cylinder():
+@patch(f"{TARGET_MODULE}.calculate_dynamic_max_node_distance", return_value=20.0)
+@patch(f"{TARGET_MODULE}.evaluate_bspline_trajectory_sync")
+def test_evaluate_shapes_and_values(mock_sync, mock_calc, basic_params):
     """
-    Intencja: Sprawdzenie matematyki wektorowej dla detekcji odcinka tnącego cylinder.
+    Sprawdza, czy funkcja poprawnie zespala wyniki własnej analizy kinematycznej
+    (np.diff) z wynikami C-podobnej funkcji B-Spline.
     """
-    # Odcinek tnie środek układu współrzędnych w osi Y
-    seg_start = np.array([[0.0, -2.0, 1.0]])
-    seg_end = np.array([[0.0, 2.0, 1.0]])
+    starts = np.array([[0.0, 0.0, 0.0]])
+    targets = np.array([[100.0, 100.0, 0.0]])
     
-    # Cylinder w środku (0,0), dół Z=0, promień=1, wysokość=2
-    obs_center = np.array([[0.0, 0.0, 0.0]])
-    obs_radius = np.array([1.0])
-    obs_height = np.array([2.0])
+    pop_size = 2
+    n_drones = 1
+    n_inner = 3
     
-    # Odcinek przechodzi centralnie przez środek (odległość XY od środka = 0).
-    # R_sq = 1^2 = 1. Penetracja = max(0, 1 - 0) = 1.0
-    violation = EvaluatorModule._dist_segment_to_cylinder(
-        seg_start, seg_end, obs_center, obs_radius, obs_height
+    # Mockujemy wyniki z zewnętrznej, zsynchronizowanej funkcji Numbą:
+    # 1. obs_collisions: shape (PopSize, NDrones)
+    # 2. lengths: shape (PopSize, NDrones)
+    # 3. swarm_collisions: shape (PopSize,)
+    mock_sync.return_value = (
+        np.array([[1.0], [0.0]]),       # Agent 0 zderzył się raz. Agent 1 czysty.
+        np.array([[50.0], [45.0]]),     # Długości tras
+        np.array([0.0, 2.0])            # Kolizje wewnątrz roju
     )
     
-    np.testing.assert_array_almost_equal(violation, [[1.0]])
-
-def test_dist_segment_to_cylinder_above():
-    """
-    Edge case: Odcinek przelatuje DOKŁADNIE nad cylindrem (w osi XY tnie go, ale Z jest bezpieczne).
-    """
-    seg_start = np.array([[0.0, -2.0, 5.0]]) # Z = 5.0
-    seg_end = np.array([[0.0, 2.0, 5.0]])
+    evaluator = VectorizedEvaluator(None, starts, targets, n_inner, basic_params)
     
-    obs_center = np.array([[0.0, 0.0, 0.0]])
-    obs_radius = np.array([1.0])
-    obs_height = np.array([2.0]) # Cylinder sięga tylko do Z = 2.0
-    
-    violation = EvaluatorModule._dist_segment_to_cylinder(
-        seg_start, seg_end, obs_center, obs_radius, obs_height
-    )
-    
-    # Całkowity brak penetracji
-    np.testing.assert_array_almost_equal(violation, [[0.0]])
-
-# ==========================================
-# TESTY WRAPPERA (VectorizedEvaluator)
-# ==========================================
-
-def test_vectorized_evaluator(sample_trajectories):
-    """
-    Intencja: Upewnienie się, że klasa nadrzędna poprawnie składa wszystkie 
-    funkcje F i G w macierze dla biblioteki pymoo.
-    """
-    start_pos = np.array([[0.0, 0.0, 0.0]])
-    target_pos = np.array([[4.0, 3.0, 0.0]]) # Odległość 5.0
-    
-    # Zostawiamy listę przeszkód pustą dla uproszczenia
-    evaluator = EvaluatorModule.VectorizedEvaluator(
-        obstacles=[], 
-        start_pos=start_pos, 
-        target_pos=target_pos,
-        params={"max_jerk": 100.0, "uniformity_std": 10.0} # Duża tolerancja by nie wchodzić w detale G
-    )
+    # Zbudujmy płaską (zerową) trajektorię, żeby uniknąć kar kinematycznych z diff1 i diff2
+    n_control_points = n_inner + 2 
+    control_points = np.zeros((pop_size, n_drones, n_control_points, 3))
     
     out = {}
-    evaluator.evaluate(sample_trajectories, out)
+    evaluator.evaluate(control_points, out)
     
-    # Sprawdzamy, czy słownik został uzupełniony macierzami o poprawnych wymiarach
+    # Weryfikacja wymiarowości (Zgodnie z protokołem Pymoo NSGA-III)
     assert "F" in out
     assert "G" in out
+    assert out["F"].shape == (pop_size, 3)
+    assert out["G"].shape == (pop_size, 3)
     
-    # F ma 3 cele: (Length, Risk, Elevation)
-    assert out["F"].shape == (2, 3) 
+    F = out["F"]
+    G = out["G"]
     
-    # G ma 5 ograniczeń: (Battery, Separation, Obstacle_Hard, Uniformity, Smoothness)
-    assert out["G"].shape == (2, 5)
+    # --- Cele (F) ---
+    # Kolumna 0: Długość (suma dla drona)
+    np.testing.assert_array_almost_equal(F[:, 0], [50.0, 45.0])
+    # Kolumna 1: Smoothness (0 dla pustych trajektorii)
+    np.testing.assert_array_almost_equal(F[:, 1], [0.0, 0.0])
+    # Kolumna 2: Ryzyko kolizji międzydronowej
+    np.testing.assert_array_almost_equal(F[:, 2], [0.0, 2.0])
+    
+    # --- Ograniczenia (G) ---
+    # Kolumna 0: Kary za uderzenia w przeszkody
+    np.testing.assert_array_almost_equal(G[:, 0], [1.0, 0.0])
+    # Kolumna 1: Bezpieczny margines roju (swarm_collisions - 0.01)
+    np.testing.assert_array_almost_equal(G[:, 1], [-0.01, 1.99])
+    # Kolumna 2: Kary kinematyczne (dist + accel) -> 0 w tym teście
+    np.testing.assert_array_almost_equal(G[:, 2], [0.0, 0.0])

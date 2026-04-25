@@ -57,9 +57,14 @@ def test_build_dynamic_search_space_includes_velocity_obstacle(mock_splev, drone
         relative_velocity=np.array([10.0, -10.0, 0.0])
     )
     
-    # t_max = 3.0 sekundy
-    builder = EvasionContextBuilder(t_min=1.0, t_max=3.0, floor_margin=0.0, ceiling_margin=0.0)
-    
+    # t_max = 3.0 sekundy; wyłączamy adaptacyjny bufor (gain=0) by test sprawdzał
+    # czystą geometrię VO niezależnie od skalowania do |rel_vel| (Faza 2.5 planu).
+    builder = EvasionContextBuilder(
+        t_min=1.0, t_max=3.0,
+        floor_margin=0.0, ceiling_margin=0.0,
+        margin_velocity_gain=0.0,
+    )
+
     context = builder.build(
         drone_id=1,
         current_time=10.0,
@@ -69,14 +74,14 @@ def test_build_dynamic_search_space_includes_velocity_obstacle(mock_splev, drone
         base_arc_progress=5.0,
         env_bounds=env_bounds
     )
-    
+
     # --- WERYFIKACJA LOGIKI VO (Velocity Obstacles) ---
     # Przewidywana pozycja przeszkody po czasie t_max (3.0s):
     # future_pos = [15.0, 0.0, 5.0] + [0.0, 10.0, 0.0] * 3.0 = [15.0, 30.0, 5.0]
     # To znacznie poza zadeklarowanym Bounding Boxem świata! (Y max to 10.0)
-    
+
     bbox_max = context.search_space_max
-    
+
     # Ponieważ przeszkoda "odlatuje" poza granicę świata (Y=30.0, ale granica env to Y=10.0),
     # Builder musi przyciąć BoundingBox do granicy świata i bufora.
     # Wartość Y_max nie może przekroczyć env_bounds[1][1] (10.0) pomniejszonego o bufor promienia (1.5)

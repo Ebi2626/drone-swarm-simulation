@@ -24,9 +24,6 @@ def test_normalize_matrix_standard():
         [30.0, 30.0]
     ])
     
-    # Oczekujemy:
-    # Kolumna 1: min=10, max=30, range=20. Wartości znormalizowane: [0.0, 0.5, 1.0]
-    # Kolumna 2: min=10, max=50, range=40. Wartości znormalizowane: [1.0, 0.0, 0.5]
     expected = np.array([
         [0.0, 1.0],
         [0.5, 0.0],
@@ -49,7 +46,6 @@ def test_normalize_matrix_zero_division_protection():
     
     result = normalize_matrix(matrix)
     
-    # Pierwsza kolumna powinna być wyzerowana, druga znormalizowana normalnie
     expected = np.array([
         [0.0, 0.0],
         [0.0, 0.5],
@@ -95,23 +91,20 @@ def test_filter_feasible_fallback():
 @pytest.fixture
 def sample_front():
     """
-    F1 = Długość trasy, F2 = Ryzyko kolizji
-    Rozwiązania:
-    0: (10, 0.8) - Bardzo krótka, ale ekstremalnie niebezpieczna
-    1: (20, 0.5) - Kompromis (Knee point)
-    2: (40, 0.0) - Długa, ale w 100% bezpieczna
-    3: (50, 0.0) - Zbyt długa i bezpieczna (zdominowana w F1 przez 2)
-    4: (15, 0.2) - Feasible w teorii, ale dodamy constraint violation by ją odrzucić
+    Trójkryterialna macierz celów:
+    F1 = Długość trasy (indeks 0)
+    F2 = Zużycie energii / Parametr pomocniczy (indeks 1)
+    F3 = Ryzyko kolizji (indeks 2)
     """
     F = np.array([
-        [10.0, 0.8],
-        [20.0, 0.5],
-        [40.0, 0.0],
-        [50.0, 0.0],
-        [15.0, 0.2]
+        [10.0, 5.0, 0.8],  # 0: Bardzo krótka, ale ekstremalnie niebezpieczna
+        [20.0, 5.0, 0.5],  # 1: Kompromis (Knee point)
+        [40.0, 5.0, 0.0],  # 2: Długa, ale w 100% bezpieczna
+        [50.0, 5.0, 0.0],  # 3: Zbyt długa i bezpieczna (zdominowana w F1 przez 2)
+        [15.0, 5.0, 0.2]   # 4: Feasible w teorii, ale dodamy constraint violation by ją odrzucić
     ])
     G = np.array([
-        [0.0], [0.0], [0.0], [0.0], [1.0] # Indeks 4 odpada przez G
+        [0.0], [0.0], [0.0], [0.0], [1.0] 
     ])
     return F, G
 
@@ -121,19 +114,10 @@ def test_equal_weights_decision(sample_front):
     """
     F, G = sample_front
     strategy = EqualWeightsDecision()
-    
-    # Analiza dla poprawnych indeksów [0, 1, 2, 3]:
-    # F = [[10, 0.8], [20, 0.5], [40, 0.0], [50, 0.0]]
-    # Normalizacja [0, 1]:
-    # F1_norm: [0.0, 0.25, 0.75, 1.0]
-    # F2_norm: [1.0, 0.625, 0.0, 0.0]
-    # Sumy:
-    # idx 0: 0.0 + 1.0 = 1.0
-    # idx 1: 0.25 + 0.625 = 0.875  <-- NAJMNIEJSZA SUMA
-    # idx 2: 0.75 + 0.0 = 0.75     <-- CZEKAJ, 0.75 to najmniejsza suma!
-    
     best_idx = strategy.select_best(F, G)
-    assert best_idx == 2  # Punkt (40, 0.0) ma najlepszą łączną notę po zrównaniu wag.
+    
+    # Punkt 2 (40, 5.0, 0.0) ma najlepszą łączną notę po zrównaniu wag (ze względu na dystans i ryzyko)
+    assert best_idx == 2  
 
 def test_safety_priority_decision(sample_front):
     """
@@ -142,7 +126,7 @@ def test_safety_priority_decision(sample_front):
     F, G = sample_front
     strategy = SafetyPriorityDecision()
     
-    # Bezpieczne (F2 <= 1e-3) to indeks 2 (40, 0.0) i indeks 3 (50, 0.0).
+    # Bezpieczne (F3 <= 1e-3) to indeks 2 (40, 5.0, 0.0) i indeks 3 (50, 5.0, 0.0).
     # Z nich najkrótszy (min F1) to indeks 2 (F1=40).
     best_idx = strategy.select_best(F, G)
     
@@ -150,20 +134,20 @@ def test_safety_priority_decision(sample_front):
 
 def test_safety_priority_fallback():
     """
-    Edge case: Brak jakichkolwiek bezpiecznych tras (wszędzie F2 > 1e-3).
+    Edge case: Brak jakichkolwiek bezpiecznych tras (wszędzie F3 > 1e-3).
     Strategia powinna wybrać to rozwiązanie, które ma NAJMNIEJSZE ryzyko absolutne.
     """
     F = np.array([
-        [10.0, 0.9],
-        [20.0, 0.5],
-        [30.0, 0.4]
+        [10.0, 5.0, 0.9],
+        [20.0, 5.0, 0.5],
+        [30.0, 5.0, 0.4]
     ])
     G = np.zeros((3, 1))
     
     strategy = SafetyPriorityDecision()
     best_idx = strategy.select_best(F, G)
     
-    # Najmniejsze ryzyko (F2=0.4) jest na indeksie 2
+    # Najmniejsze ryzyko (F3=0.4) jest na indeksie 2
     assert best_idx == 2
 
 def test_knee_point_decision():
@@ -172,16 +156,14 @@ def test_knee_point_decision():
     Zaprojektujmy ostry łuk (kompromis).
     """
     F = np.array([
-        [0.0, 100.0],  # Ekstremum A
-        [10.0, 10.0],  # Wyraźny Knee Point (świetny kompromis)
-        [100.0, 0.0]   # Ekstremum B
+        [0.0, 50.0, 100.0],   # Ekstremum A
+        [10.0, 50.0, 10.0],   # Wyraźny Knee Point (świetny kompromis)
+        [100.0, 50.0, 0.0]    # Ekstremum B
     ])
     G = np.zeros((3, 1))
     
     strategy = KneePointDecision()
     best_idx = strategy.select_best(F, G)
     
-    # Znormalizowane F wyniesie w przybliżeniu: [[0, 1], [0.1, 0.1], [1, 0]]
-    # Dystanse Euklidesowe od (0,0): 1.0, sqrt(0.02) ~ 0.14, 1.0.
-    # Indeks 1 wygrywa z ogromną przewagą.
+    # Indeks 1 (10.0, 50.0, 10.0) to najlepszy kompromis i najbliżej punktu utopii
     assert best_idx == 1

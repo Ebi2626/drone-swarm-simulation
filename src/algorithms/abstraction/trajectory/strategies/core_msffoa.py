@@ -22,9 +22,9 @@ Mapowanie sekcji paperu → kod (literature/MSFFOA.md):
 |             | rekompensuje brak smell-to-physical mappingu.                  |
 | Sec. 4 Eq.14| Krzyżowanie międzyrojowe `coe1 · leader_random + coe2 · X_g,i` |
 |             | (`optimize` → Phase 2: `new_pop`).                             |
-| Sec. 4      | Bezwarunkowe przejęcie środka roju przez winnera (offspring vs |
-|             | parent). Paper NIE definiuje elityzmu na tym etapie — globalny |
-|             | best trzymamy osobno (monotonicznie).                          |
+| Sec. 4      | Zaktualizowano (Eq. 18-19): Wprowadzono elityzm dla liderów    |
+|             | roju (środek roju ulega aktualizacji tylko gdy winner jest     |
+|             | ściśle lepszy od dotychczasowego best).                        |
 
 PRAGMATYCZNE ADAPTACJE vs paper (udokumentowane lokalnie w kodzie):
 1. Anizotropowy R (per-osi step_local) zamiast skalarnego R z paperu —
@@ -370,18 +370,6 @@ class MSFFOAOptimizer:
                         # =================================================================
                         # Phase 3: Competition & Update (Sec. 4 paperu)
                         # =================================================================
-                        # Paper, Sec. 4: „Środek ciężkości sub-roju g jest
-                        # aktualizowany do pozycji tego osobnika, który uzyskał
-                        # mniejszą wartość funkcji J."
-                        # Porównujemy najlepszego potomka (new_best, z Phase 2 Eq. 14)
-                        # z najlepszym osobnikiem macierzystym (old_best, z Phase 1
-                        # Eq. 7-10). Środek roju przejmuje pozycję winnera —
-                        # BEZWARUNKOWO, nawet jeśli winner jest gorszy od poprzedniego
-                        # lidera (paper nie definiuje elityzmu na tym etapie; pozwala
-                        # to na świadomą eksplorację i ucieczkę z lokalnych optimów).
-                        # Globalny best (`global_best_fitness`) trzymamy osobno
-                        # w sposób monotoniczny, więc nie tracimy najlepszej
-                        # znalezionej trajektorii nawet przy regresji liderów.
                         win_is_new = new_best_fit < old_best_fit
                         winner_fit = np.where(win_is_new, new_best_fit, old_best_fit)
                         winner_pos = np.where(
@@ -390,8 +378,21 @@ class MSFFOAOptimizer:
                             old_best_pos,
                         )
 
-                        self.swarm_best_fit = winner_fit.copy()
-                        self.swarm_best_pos = winner_pos.copy()
+                        # POPRAWKA ZGODNA Z LITERATURĄ: Elityzm lokalny liderów roju 
+                        # (Eq. 18-19, Shi et al. 2020). Lider pod-roju zastępowany jest
+                        # nową pozycją tylko i wyłącznie wtedy, gdy funkcja dopasowania 
+                        # zwycięzcy z danego kroku jest mniejsza od historycznie
+                        # najlepszej funkcji dopasowania dla tego pod-roju.
+                        update_mask = winner_fit < self.swarm_best_fit
+                        
+                        self.swarm_best_fit = np.where(
+                            update_mask, winner_fit, self.swarm_best_fit
+                        )
+                        
+                        update_mask_pos = update_mask[:, np.newaxis, np.newaxis, np.newaxis]
+                        self.swarm_best_pos = np.where(
+                            update_mask_pos, winner_pos, self.swarm_best_pos
+                        )
 
                         gen_global_idx = int(np.argmin(self.swarm_best_fit))
                         if self.swarm_best_fit[gen_global_idx] < self.global_best_fitness:
@@ -399,13 +400,6 @@ class MSFFOAOptimizer:
                             self.global_best_pos = self.swarm_best_pos[gen_global_idx].copy()
 
                         if self._history_writer is not None:
-                            # TrajectorySOOAdapter zapisuje ostatnią macierz F
-                            # (przed skalaryzacją) jako `last_objectives`.
-                            # Wcześniejsza wersja kodu odwoływała się do
-                            # nieistniejącego atrybutu `_last_objectives`, przez
-                            # co log zawierał tylko zeskalaryzowany fitness
-                            # (pop, 1) zamiast surowego F (pop, 3) — niezgodnie
-                            # z formatem NSGA-III / OOA.
                             raw_f = getattr(self.fitness_fn, "last_objectives", None)
                             if raw_f is not None:
                                 obj_matrix = np.asarray(raw_f, dtype=np.float64).copy()

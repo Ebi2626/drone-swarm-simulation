@@ -5,10 +5,9 @@ from unittest.mock import MagicMock, patch
 from mealpy import FloatVar
 
 from src.algorithms.abstraction.trajectory.strategies.ooa_strategy import (
-    _resample_polyline,
-    OspreyProblemAdapter,
-    _generate_starting_solutions,
+    OOAProblemAdapter,
     osprey_swarm_strategy,
+    LoggedOriginalOOA
 )
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.ooa_strategy"
@@ -26,14 +25,12 @@ def mock_world_data():
     world.bounds = np.array([[0.0, 100.0], [0.0, 100.0], [0.0, 20.0]])
     return world
 
-
 @pytest.fixture
 def basic_positions():
-    """Pozycje startowe i docelowe dla 2 dronow."""
+    """Pozycje startowe i docelowe dla 2 dronów."""
     starts = np.array([[10.0, 10.0, 2.0], [20.0, 20.0, 2.0]])
     targets = np.array([[90.0, 90.0, 5.0], [80.0, 80.0, 5.0]])
     return starts, targets
-
 
 @pytest.fixture
 def single_drone_positions():
@@ -42,240 +39,168 @@ def single_drone_positions():
     targets = np.array([[90.0, 90.0, 5.0]])
     return starts, targets
 
-
-@pytest.fixture
-def default_weights():
-    return {
-        "w_path_length": 1.0,
-        "w_collision_risk": 1.0,
-        "w_elevation": 1.0,
-    }
-
-
 @pytest.fixture
 def mock_evaluator():
-    """
-    Atrapa ewaluatora zwracajaca kontrolowane wartosci F i G.
-    F: (pop_size, 3) — cele (dystans, ryzyko kolizji, wysokosc)
-    G: (pop_size, 5) — ograniczenia (G <= 0 oznacza brak naruszen)
-    """
+    """Podstawowy mock ewaluatora zwracający zera dla celów wektoryzacji."""
     evaluator = MagicMock()
-
     def side_effect(trajectories, out):
         pop_size = trajectories.shape[0]
         out["F"] = np.ones((pop_size, 3)) * 10.0
-        out["G"] = np.full((pop_size, 5), -1.0)  # brak naruszen
-
-    evaluator.evaluate.side_effect = side_effect
-    return evaluator
-
-
-def _make_evaluator_with_values(f_values, g_values):
-    """Tworzy mock ewaluatora z podanymi wartosciami F i G."""
-    evaluator = MagicMock()
-
-    def side_effect(trajectories, out):
-        pop_size = trajectories.shape[0]
-        if callable(f_values):
-            out["F"] = f_values(pop_size)
-        else:
-            out["F"] = np.tile(f_values, (pop_size, 1))[:pop_size]
-        if callable(g_values):
-            out["G"] = g_values(pop_size)
-        else:
-            out["G"] = np.tile(g_values, (pop_size, 1))[:pop_size]
-
+        out["G"] = np.full((pop_size, 5), -1.0)
     evaluator.evaluate.side_effect = side_effect
     return evaluator
 
 
 # ===========================================================================
-# TESTY: _resample_polyline
+# TESTY: OOAProblemAdapter
 # ===========================================================================
 
-class TestResamplePolyline:
-    
-    def test_output_shape(self):
-        """Funkcja powinna zwracac zageszczona trajektorie o odpowiednim ksztalcie."""
-        pop_size, n_drones, n_in, dims = 5, 2, 4, 3
-        n_out = 20
-        waypoints = np.random.rand(pop_size, n_drones, n_in, dims)
-        
-        result = _resample_polyline(waypoints, num_samples=n_out)
-        
-        assert result.shape == (pop_size, n_drones, n_out, dims)
+class TestOOAProblemAdapter:
 
-
-# ===========================================================================
-# TESTY: OspreyProblemAdapter
-# ===========================================================================
-
-class TestOspreyProblemAdapter:
-
-    def _create_adapter(self, starts, targets, evaluator, weights, penalty_weight=100.0, expected_pop=0):
+    def _create_adapter(self, starts, targets, mock_scalar_adapter, mock_evaluator):
         n_drones = starts.shape[0]
         n_inner = 3
         d = n_drones * n_inner * 3
         bounds = FloatVar(lb=np.full(d, -50.0), ub=np.full(d, 150.0))
         
-        return OspreyProblemAdapter(
+        return OOAProblemAdapter(
             bounds=bounds,
-            evaluator=evaluator,
+            evaluator=mock_evaluator,
+            scalar_adapter=mock_scalar_adapter,
             start_pos=starts,
             target_pos=targets,
             n_drones=n_drones,
             n_inner=n_inner,
             n_output_samples=20,
-            weights=weights,
-            penalty_weight=penalty_weight,
-            expected_pop_size=expected_pop
         )
 
-    def test_compute_reference_scales_clamps_to_one(self, basic_positions, default_weights):
-        """Wartosci referencyjne mniejsze niz 1.0 (np. brak kolizji) powinny byc klampowane do 1.0."""
+    def test_amend_position_clamps_and_handles_nan(self, basic_positions):
+        """Metoda amend_position powinna chronić przed przekroczeniem barier przestrzeni oraz wartościami NaN."""
         starts, targets = basic_positions
+        adapter = self._create_adapter(starts, targets, MagicMock(), MagicMock())
         
-        # Ewaluator zwraca same zera w F (co zrobiloby blad dzielenia przez zero)
-        f_row = np.array([[0.0, 0.0, 0.0]])
-        g_row = np.array([[-1.0, -1.0, -1.0, -1.0, -1.0]])
-        evaluator = _make_evaluator_with_values(f_row, g_row)
-
-        adapter = self._create_adapter(starts, targets, evaluator, default_weights)
+        # Obliczenie poprawnego wymiaru (2 drony * 3 węzły wewnętrzne * 3 koordynaty)
+        n_drones = starts.shape[0]
+        n_inner = 3
+        d = n_drones * n_inner * 3  # = 18
         
-        # Klampowane do 1.0
-        np.testing.assert_array_equal(adapter._f_scale, np.array([1.0, 1.0, 1.0]))
+        # Tworzymy wektor docelowy i ustawiamy pierwsze trzy wartości na skrajne/błędne
+        pos = np.zeros(d)
+        pos[0] = 160.0   # Powyżej limitu ub (150)
+        pos[1] = -60.0   # Poniżej limitu lb (-50)
+        pos[2] = np.nan  # Do zastąpienia (według logiki nan -> ub)
+        
+        amended = adapter.amend_position(pos)
+        
+        # Oczekiwany wektor po korekcie
+        expected = np.zeros(d)
+        expected[0] = 150.0
+        expected[1] = -50.0
+        expected[2] = 150.0
+        
+        np.testing.assert_array_equal(amended, expected)
 
-    def test_obj_func_weights_and_normalization_applied(self, basic_positions):
-        """Wartosc fitness powinna byc poprawnie znormalizowana i zwazona."""
+    def test_obj_func_delegates_to_scalar_adapter(self, basic_positions):
+        """Sprawdza czy adapter rygorystycznie deleguje logikę ewaluacyjną fitness do scalera."""
         starts, targets = basic_positions
-        n_drones = 2
+        n_drones = starts.shape[0]
         n_inner = 3
         d = n_drones * n_inner * 3
 
-        call_count = [0]
-        def side_effect(trajectories, out):
-            ps = trajectories.shape[0]
-            if call_count[0] == 0:
-                # Pierwsze wywolanie to inicjalizacja _compute_reference_scales
-                out["F"] = np.ones((ps, 3)) * 2.0  # f_ref = [2.0, 2.0, 2.0]
-            else:
-                # Kolejne wywolania to obj_func
-                out["F"] = np.array([[4.0, 6.0, 8.0]]) # po normalizacji: [2.0, 3.0, 4.0]
-            out["G"] = np.full((ps, 5), -1.0)
-            call_count[0] += 1
-
-        evaluator = MagicMock()
-        evaluator.evaluate.side_effect = side_effect
-
-        weights = {"w_path_length": 1.0, "w_collision_risk": 2.0, "w_elevation": 3.0}
-        adapter = self._create_adapter(starts, targets, evaluator, weights)
+        mock_scalar_adapter = MagicMock()
+        mock_scalar_adapter.return_value = np.array([42.5])
         
+        adapter = self._create_adapter(starts, targets, mock_scalar_adapter, MagicMock())
         x = np.random.rand(d)
         fitness = adapter.obj_func(x)
         
-        # F_norm = [4/2, 6/2, 8/2] = [2, 3, 4]
-        # Fitness = 1*2 + 2*3 + 3*4 = 20.0
-        np.testing.assert_almost_equal(fitness, 20.0)
+        assert fitness == 42.5
+        mock_scalar_adapter.assert_called_once()
 
-    def test_obj_func_penalty_applied(self, basic_positions, default_weights):
-        """Naruszenia ograniczen (G > 0) powinny zwiekszac fitness o odpowiednia kare."""
+    def test_evaluate_population_returns_correct_shape(self, basic_positions):
+        """Funkcja ewaluacji wsadowej wektora powinna zachować pierwotny rozmiar populacji."""
         starts, targets = basic_positions
-        n_drones = 2
-        n_inner = 3
-        d = n_drones * n_inner * 3
-
-        f_row = np.array([[1.0, 1.0, 1.0]])
-        g_row = np.array([[2.0, 3.0, -1.0, -1.0, -1.0]])  # suma = 5.0
-        evaluator = _make_evaluator_with_values(f_row, g_row)
-
-        penalty_weight = 100.0
-        adapter = self._create_adapter(starts, targets, evaluator, default_weights, penalty_weight)
-        
-        x = np.random.rand(d)
-        fitness = adapter.obj_func(x)
-        
-        # f_ref = [1.0, 1.0, 1.0] -> F_norm = [1, 1, 1]
-        # obj_value = 1*1 + 1*1 + 1*1 = 3.0
-        # penalty = 100.0 * 5.0 = 500.0
-        np.testing.assert_almost_equal(fitness, 503.0)
-
-    def test_evaluate_batch_returns_correct_shape_and_values(self, basic_positions, default_weights):
-        """Funkcja evaluate_batch powinna wektoryzowac ewaluacje wielu osobnikow naraz."""
-        starts, targets = basic_positions
-        n_drones = 2
+        n_drones = starts.shape[0]
         n_inner = 3
         d = n_drones * n_inner * 3
         pop_size = 5
 
-        f_row = np.array([[2.0, 2.0, 2.0]])
-        g_row = np.array([[-1.0, -1.0, -1.0, -1.0, -1.0]])
-        evaluator = _make_evaluator_with_values(f_row, g_row)
-
-        adapter = self._create_adapter(starts, targets, evaluator, default_weights)
+        mock_scalar_adapter = MagicMock()
+        mock_scalar_adapter.return_value = np.full(pop_size, 10.0)
         
+        adapter = self._create_adapter(starts, targets, mock_scalar_adapter, MagicMock())
         population = np.random.rand(pop_size, d)
-        fitness = adapter.evaluate_batch(population)
+        fitness = adapter.evaluate_population(population)
         
         assert fitness.shape == (pop_size,)
-        # f_ref będzie miało postać [2.0, 2.0, 2.0], a ewaluacje zwrócą [2.0, 2.0, 2.0]
-        # F_norm = [1, 1, 1], weights = [1, 1, 1] => fitness = 3.0
-        np.testing.assert_allclose(fitness, np.full(pop_size, 3.0))
+        np.testing.assert_allclose(fitness, np.full(pop_size, 10.0))
 
 
 # ===========================================================================
-# TESTY: _generate_starting_solutions
-# ===========================================================================
-
-class TestGenerateStartingSolutions:
-
-    def test_output_shape_and_bounds(self, mock_world_data, basic_positions):
-        """Inicjalizacja heurystyczna powinna zwaracac macierz zgodna z granicami."""
-        starts, targets = basic_positions
-        n_drones = 2
-        n_inner = 3
-        pop_size = 10
-        d = n_drones * n_inner * 3
-        
-        xl = np.full(d, -50.0)
-        xu = np.full(d, 150.0)
-
-        X_init = _generate_starting_solutions(
-            start_pos=starts,
-            target_pos=targets,
-            n_drones=n_drones,
-            n_inner=n_inner,
-            pop_size=pop_size,
-            world_data=mock_world_data,
-            obstacles_data=None,
-            xl=xl,
-            xu=xu,
-        )
-
-        assert X_init.shape == (pop_size, d)
-        assert np.all(X_init >= xl)
-        assert np.all(X_init <= xu)
-        
-        # Test Z safe corridor (>0.5)
-        X_reshaped = X_init.reshape(pop_size, n_drones, n_inner, 3)
-        assert np.all(X_reshaped[..., 2] >= 0.5)
-
-# ===========================================================================
-# TESTY: osprey_swarm_strategy (orchestrator)
+# TESTY: osprey_swarm_strategy
 # ===========================================================================
 
 class TestOspreySwarmStrategy:
 
-    def test_output_shape(self, mock_world_data, basic_positions, mock_evaluator):
-        """Wynik powinien miec ksztalt (n_drones, n_waypoints, 3)."""
+    @pytest.fixture
+    def patch_deps(self, mock_evaluator):
+        """Mockuje wszystkie wywołania logiki wspólnej, aby testować jedynie logikę samej orkiestracji ssa_swarm_strategy bez śmiecenia dysku."""
+        # W module SSA używasz np. TrajectorySOOAdapter i VectorizedEvaluator.
+        # Musimy zablokować tworzenie plików historycznych wewnątrz SOO.
+        with patch(f"{TARGET_MODULE}.VectorizedEvaluator", return_value=mock_evaluator), \
+             patch(f"{TARGET_MODULE}.TrajectorySOOAdapter") as MockAdapter, \
+             patch(f"{TARGET_MODULE}.SwarmOptimizationProblem") as MockProblem, \
+             patch(f"{TARGET_MODULE}.StraightLineNoiseSampling") as MockSampling, \
+             patch(f"{TARGET_MODULE}.generate_bspline_batch") as MockBSpline, \
+             patch("hydra.core.hydra_config.HydraConfig") as mock_hydra, \
+             patch(f"{TARGET_MODULE}.OptimizationHistoryWriter") as mock_writer, \
+             patch(f"{TARGET_MODULE}.TimingCollector") as mock_timing:
+             
+            # Izolacja wyjścia hydry żeby zapobiec ewentualnym ucieczkom katalogu
+            mock_hydra.get.return_value.runtime.output_dir = "dummy_dir_in_memory"
+
+            # Wymuszone zignorowanie zapisu czasów
+            mock_timing.return_value.save_csv = MagicMock()
+            
+            # Wymuszone zignorowanie zapisu historii
+            mock_writer.return_value.put_generation_data = MagicMock()
+            mock_writer.return_value.close = MagicMock()
+
+            # Konfiguracja zwracanych obiektów
+            mock_scalar_instance = MagicMock()
+            mock_scalar_instance._f_ref = np.array([1.0, 1.0, 1.0])
+            MockAdapter.return_value = mock_scalar_instance
+            
+            mock_prob_instance = MagicMock()
+            mock_prob_instance.xl = np.full(10, -50.0)
+            mock_prob_instance.xu = np.full(10, 150.0)
+            MockProblem.return_value = mock_prob_instance
+            
+            mock_samp_instance = MagicMock()
+            mock_samp_instance._do.return_value = np.zeros((5, 10))
+            MockSampling.return_value = mock_samp_instance
+            
+            def bspline_side_effect(sparse, num_samples):
+                drones = sparse.shape[1]
+                return np.zeros((1, drones, num_samples, 3))
+            MockBSpline.side_effect = bspline_side_effect
+            
+            yield
+
+    def test_output_shape(self, mock_world_data, basic_positions, patch_deps):
+        """Wynik zoptymalizowanego lotu powinien zachować kształt narzucony przez architekturę B-Spline."""
         starts, targets = basic_positions
         n_waypoints = 20
         n_drones = 2
 
-        with patch(f"{TARGET_MODULE}.VectorizedEvaluator", return_value=mock_evaluator), \
-             patch("hydra.core.hydra_config.HydraConfig"), \
-             patch("src.utils.optimization_history_writer.OptimizationHistoryWriter"), \
-             patch("src.algorithms.abstraction.trajectory.strategies.timing_utils.TimingCollector"):
-            
+        with patch(f"{TARGET_MODULE}.LoggedOriginalOOA") as MockOOA:
+            mock_model = MagicMock()
+            mock_agent = MagicMock()
+            mock_agent.solution = np.zeros(2 * 3 * 3)
+            mock_agent.target.fitness = 10.0
+            mock_model.solve.return_value = mock_agent
+            MockOOA.return_value = mock_model
+
             result = osprey_swarm_strategy(
                 start_positions=starts,
                 target_positions=targets,
@@ -283,21 +208,24 @@ class TestOspreySwarmStrategy:
                 world_data=mock_world_data,
                 number_of_waypoints=n_waypoints,
                 drone_swarm_size=n_drones,
-                algorithm_params={"pop_size": 5, "n_gen": 1, "n_inner_waypoints": 3},  # ZMIANA: pop_size na 5
+                algorithm_params={"pop_size": 5, "n_gen": 1, "n_inner_waypoints": 3},
             )
 
         assert result.shape == (n_drones, n_waypoints, 3)
 
-    def test_single_drone(self, mock_world_data, single_drone_positions, mock_evaluator):
-        """Powinien dzialac poprawnie dla jednego drona."""
+    def test_single_drone(self, mock_world_data, single_drone_positions, patch_deps):
+        """Strategia optymalizacji wieloobiektowej powinna poprawnie rzutować się na jedno-agentowe loty UAV."""
         starts, targets = single_drone_positions
         n_waypoints = 15
 
-        with patch(f"{TARGET_MODULE}.VectorizedEvaluator", return_value=mock_evaluator), \
-             patch("hydra.core.hydra_config.HydraConfig"), \
-             patch("src.utils.optimization_history_writer.OptimizationHistoryWriter"), \
-             patch("src.algorithms.abstraction.trajectory.strategies.timing_utils.TimingCollector"):
-            
+        with patch(f"{TARGET_MODULE}.LoggedOriginalOOA") as MockOOA:
+            mock_model = MagicMock()
+            mock_agent = MagicMock()
+            mock_agent.solution = np.zeros(1 * 3 * 3)
+            mock_agent.target.fitness = 10.0
+            mock_model.solve.return_value = mock_agent
+            MockOOA.return_value = mock_model
+
             result = osprey_swarm_strategy(
                 start_positions=starts,
                 target_positions=targets,
@@ -305,32 +233,18 @@ class TestOspreySwarmStrategy:
                 world_data=mock_world_data,
                 number_of_waypoints=n_waypoints,
                 drone_swarm_size=1,
-                algorithm_params={"pop_size": 5, "n_gen": 1, "n_inner_waypoints": 3},  # ZMIANA: pop_size na 5
+                algorithm_params={"pop_size": 5, "n_gen": 1, "n_inner_waypoints": 3},
             )
 
         assert result.shape == (1, n_waypoints, 3)
 
-    def test_fallback_on_exception(self, mock_world_data, basic_positions):
-        """Blad w solverze mealpy powinien zwrocic trajektorie liniowa z Z podniesionym na bezpieczna wysokosc."""
+    def test_fallback_on_exception(self, mock_world_data, basic_positions, patch_deps):
+        """Sprawdza mechanizm uodpornienia (fallback) generujący bezpieczny lot liniowy w przypadku błędu Mealpy."""
         starts, targets = basic_positions
         n_waypoints = 10
         n_drones = 2
 
-        # Prawidłowo działający ewaluator (do inicjalizacji obiektu Problem)
-        evaluator = MagicMock()
-        def side_effect(trajectories, out):
-            ps = trajectories.shape[0]
-            out["F"] = np.ones((ps, 3))
-            out["G"] = np.full((ps, 5), -1.0)
-        evaluator.evaluate.side_effect = side_effect
-
-        with patch(f"{TARGET_MODULE}.VectorizedEvaluator", return_value=evaluator), \
-             patch(f"{TARGET_MODULE}.OriginalOOA") as MockOOA, \
-             patch("hydra.core.hydra_config.HydraConfig"), \
-             patch("src.utils.optimization_history_writer.OptimizationHistoryWriter"), \
-             patch("src.algorithms.abstraction.trajectory.strategies.timing_utils.TimingCollector"):
-            
-            # ZMIANA: Zmuszamy sam solver Mealpy do wybuchu, aby fallback został prawidłowo zainicjowany
+        with patch(f"{TARGET_MODULE}.LoggedOriginalOOA") as MockOOA:
             mock_model_instance = MagicMock()
             mock_model_instance.solve.side_effect = RuntimeError("Symulowany blad Mealpy/Evaluatora")
             MockOOA.return_value = mock_model_instance
@@ -342,66 +256,22 @@ class TestOspreySwarmStrategy:
                 world_data=mock_world_data,
                 number_of_waypoints=n_waypoints,
                 drone_swarm_size=n_drones,
-                algorithm_params={"pop_size": 5, "n_gen": 1, "n_inner_waypoints": 3},  # ZMIANA: pop_size na 5
+                algorithm_params={"pop_size": 5, "n_gen": 1, "n_inner_waypoints": 3},
             )
 
-        # Fallback powinien zwrocic poprawny ksztalt
         assert result.shape == (n_drones, n_waypoints, 3)
-
-        # Punkt startowy na Z powinien byc wymuszony do bezpiecznej wysokosci (default min_safe_alt=1.0)
         np.testing.assert_array_almost_equal(result[0, 0, :2], starts[0, :2])
         np.testing.assert_array_almost_equal(result[0, -1, :2], targets[0, :2])
 
-    def test_obstacles_data_as_single_object(self, mock_world_data, basic_positions, mock_evaluator):
-        """obstacles_data przekazany jako pojedynczy obiekt powinien zostac wrzucony w liste do ewaluatora."""
+    def test_mealpy_called_correctly(self, mock_world_data, basic_positions, patch_deps):
+        """Weryfikuje, czy Mealpy jest parametryzowany zgodnie z konfiguracją wejściową algorytmu z logowaniem danych."""
         starts, targets = basic_positions
-        single_obstacle = MagicMock()
+        custom_params = {"pop_size": 12, "n_gen": 5, "n_workers": 2, "seed": 42, "n_inner_waypoints": 3}
 
-        with patch(f"{TARGET_MODULE}.VectorizedEvaluator", return_value=mock_evaluator) as mock_cls, \
-             patch("hydra.core.hydra_config.HydraConfig"), \
-             patch("src.utils.optimization_history_writer.OptimizationHistoryWriter"), \
-             patch("src.algorithms.abstraction.trajectory.strategies.timing_utils.TimingCollector"):
-            
-            osprey_swarm_strategy(
-                start_positions=starts,
-                target_positions=targets,
-                obstacles_data=single_obstacle,
-                world_data=mock_world_data,
-                number_of_waypoints=20,
-                drone_swarm_size=2,
-                algorithm_params={"pop_size": 5, "n_gen": 1},  # ZMIANA: pop_size na 5
-            )
-
-            call_kwargs = mock_cls.call_args
-            obs_arg = call_kwargs.kwargs.get("obstacles") or call_kwargs[1].get("obstacles")
-            if obs_arg is None:
-                obs_arg = call_kwargs[0][0]  
-            
-            assert isinstance(obs_arg, list)
-            assert len(obs_arg) == 1
-            assert obs_arg[0] == single_obstacle
-
-    def test_mealpy_called_correctly(self, mock_world_data, basic_positions, mock_evaluator):
-        """Test czy OriginalOOA jest prawidlowo inicjalizowane i wywolywane z przekazanymi parametrami."""
-        starts, targets = basic_positions
-        
-        custom_params = {
-            "pop_size": 12,
-            "n_gen": 5,
-            "n_workers": 2,
-            "seed": 42
-        }
-
-        with patch(f"{TARGET_MODULE}.VectorizedEvaluator", return_value=mock_evaluator), \
-             patch(f"{TARGET_MODULE}.OriginalOOA") as MockOOA, \
-             patch("hydra.core.hydra_config.HydraConfig"), \
-             patch("src.utils.optimization_history_writer.OptimizationHistoryWriter"), \
-             patch("src.algorithms.abstraction.trajectory.strategies.timing_utils.TimingCollector"):
-            
-            # Konfiguracja zachowania mocka Mealpy
+        with patch(f"{TARGET_MODULE}.LoggedOriginalOOA") as MockOOA:
             mock_model_instance = MagicMock()
             mock_best_agent = MagicMock()
-            mock_best_agent.solution = np.zeros(2 * 5 * 3) # (Drones * Inner * 3) - symulacja rozwiazania
+            mock_best_agent.solution = np.zeros(2 * 3 * 3)
             mock_best_agent.target.fitness = 10.0
             mock_model_instance.solve.return_value = mock_best_agent
             MockOOA.return_value = mock_model_instance
@@ -416,10 +286,10 @@ class TestOspreySwarmStrategy:
                 algorithm_params=custom_params,
             )
 
-            # Assert inicjalizacja
-            MockOOA.assert_called_once_with(epoch=5, pop_size=12)
+            call_args, call_kwargs = MockOOA.call_args
+            assert call_kwargs["epoch"] == 5
+            assert call_kwargs["pop_size"] == 12
             
-            # Assert .solve() argumenty
             solve_kwargs = mock_model_instance.solve.call_args.kwargs
             assert solve_kwargs["mode"] == "thread"
             assert solve_kwargs["n_workers"] == 2

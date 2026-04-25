@@ -1,29 +1,47 @@
 _target_: src.algorithms.abstraction.trajectory.strategies.ssa_strategy.ssa_swarm_strategy
 _partial_: true
-_convert_: "all" 
+_convert_: "all"
 
 
-# Parametry optymalizacji dla Sparrow Search Algorithm (SSA)
+# Parametry specyficzne dla Sparrow Search Algorithm (SSA, Xue & Shen 2020).
+# Schemat pól zgodny z konfiguracją OOA — pozwala na porównanie ceteris paribus.
 algorithm_params:
   cruise_speed: 6.0
-  pop_size: 200
-  n_gen: 4000
-  
-  # --- Parametry biologiczne modelu SSA ---
-  st: 0.95           # Safety Threshold (Próg bezpieczeństwa) - wartość zalecana w literaturze: 0.8
-  pd_ratio: 0.3     # Odsetek Producentów (Producers) w populacji - wyznacza kierunek lotu (zwykle 20%)
-  sd_ratio: 0.4   # Odsetek Zwiadowców (Scouts) - zapobiega wpadaniu w lokalne minima (zalecane od 10% do 20%)
-  
-  # --- Agregacja i Kary (Skalaryzacja do jednego wymiaru oceny) ---
-  penalty_weight: 10000.0   # Twarda kara za naruszenie ograniczeń G (wlot w przeszkodę, zderzenie dronów)
-  weight_distance: 3.0      # Waga priorytetu dla najkrótszej drogi
-  weight_smoothness: 2.0    # Waga priorytetu dla gładkości (brak ostrych zakrętów)
-  weight_uniformity: 100.0    # Waga dla jednolitych odstępów między waypointami
-  
-  # --- Parametry ewaluatora (środowiskowe, bez zmian względem NSGA-III) ---
-  n_inner_waypoints: 15
-  min_dist: 1.5
-  ignore_ratio: 0.1
-  safety_margin: 2.0
-  uniformity_std: 50.0
-  max_jerk: 100.0
+  pop_size: 1000
+  epochs: 200
+  n_inner_waypoints: 11
+  seed: 42
+
+  # --- Parametry biologiczne SSA (paper Xue & Shen 2020) ---
+  # ST  ∈ [0.5, 1.0]  — safety threshold; R2 < ST ⇒ producer wide-search,
+  #                     R2 ≥ ST ⇒ rapid escape do bezpieczniejszej pozycji.
+  # PD  ∈ (0, 1)      — udział producentów (paper'owe ref.: 0.2 = 20%).
+  # SD  ∈ (0, 1)      — udział "świadomych zagrożenia" (paper'owe ref.: 0.1 = 10%).
+  ST: 0.8
+  PD: 0.2
+  SD: 0.1
+
+  # --- Wagi celów (po normalizacji względem trajektorii referencyjnej) ---
+  # Cele są dzielone przez F_ref (wartość F dla linii prostej Start→Target),
+  # więc wagi operują na bezwymiarowej skali ~1.0.
+  w_path_length: 0.05       # F1: długość trasy (znormalizowana)
+  w_collision_risk: 1.2     # F2: ryzyko kolizji (znormalizowane; F2_ref często ~1.0)
+  w_elevation: 0.1          # F3: zmiany wysokości (znormalizowane)
+
+  # --- Kara za naruszenia ograniczeń ---
+  # Weakest-link: największe pojedyncze naruszenie G[j] (np.max, nie np.sum)
+  # mnożone przez ten współczynnik. Wartość ujednolicona z OOA dla porównania
+  # ceteris paribus.
+  penalty_weight: 2.0
+
+  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
+  # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
+  obstacle_safety_margin: 3.0     # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m]
+  max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
+
+  # --- Szum inicjalizacji populacji (anizotropowy) ---
+  noise_std_xy: 2.0
+  noise_std_z: 0.3

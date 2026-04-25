@@ -107,8 +107,14 @@ class SafetyPriorityDecision:
     def select_best(self, pareto_front_F: NDArray, pareto_front_G: NDArray) -> int:
         F_feas, _, orig_indices = filter_feasible(pareto_front_F, pareto_front_G)
         
+        # ZABEZPIECZENIE: Brak jakichkolwiek dopuszczalnych rozwiązań
+        if len(F_feas) == 0:
+            raise ValueError("Brak dopuszczalnych rozwiązań (wszystkie naruszają ograniczenia G).")
+            # Alternatywnie możesz tu zwrócić np. -1 lub obsłużyć to inaczej,
+            # zależnie od architektury reszty systemu.
+        
         # F2 to Risk Score (kolumna indeks 1)
-        risk_scores = F_feas[:, 1]
+        risk_scores = F_feas[:, 2]
         
         # Szukamy rozwiązań z "zerowym" ryzykiem (z marginesem)
         safe_mask = risk_scores <= 1e-3
@@ -120,7 +126,6 @@ class SafetyPriorityDecision:
             subset_F1 = F_feas[safe_indices, 0]
             best_safe_idx = np.argmin(subset_F1)
             
-            # Mapowanie indeksów: subset -> safe -> feasible -> original
             return orig_indices[safe_indices[best_safe_idx]]
         else:
             # Nie ma w pełni bezpiecznych -> minimalizujemy ryzyko za wszelką cenę

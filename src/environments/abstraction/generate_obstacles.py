@@ -279,32 +279,22 @@ def generate_obstacles(
     # Counting obstacle positions with given strategy
     positions = placement_strategy(spawn_min, spawn_max, n_obstacles, start_positions, target_positions, safe_radius)
     
-    # Prepare data matrix for obstacles
-    dimensions = np.zeros((n_obstacles, 3))
-    
-    # Fill data matrix with obstacle coordinates and dimensions
-    # Different shapes can be used depending on the requirements
+    actual_n = positions.shape[0]
+    dimensions = np.zeros((actual_n, 3), dtype=np.float64)
+
     if shape_type == ObstacleShape.CYLINDER:
-        # [radius, height, 0]
         r = size_params.get('width', 5.0)
         h = size_params.get('height', 10.0)
         dimensions[:, 0] = r
         dimensions[:, 1] = h
-        
+
     elif shape_type == ObstacleShape.BOX:
-        # [length, width, height]
         length = size_params.get('length', 5.0)
         width = size_params.get('width', 5.0)
         height = size_params.get('height', 10.0)
         dimensions[:, 0] = length
         dimensions[:, 1] = width
         dimensions[:, 2] = height
-    
-    # Compound everything into single matrix (N, 6)
-    # [pos_x, pos_y, pos_z, dim1, dim2, dim3]
+
     full_data = np.hstack([positions, dimensions])
-    
-    return ObstaclesData(
-        data=full_data,
-        shape_type=shape_type
-    )
+    return ObstaclesData(data=full_data, shape_type=shape_type)

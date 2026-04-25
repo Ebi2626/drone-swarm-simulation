@@ -6,9 +6,9 @@ _convert_: "all"
 # Parametry specyficzne dla Osprey Optimization Algorithm (OOA)
 algorithm_params:
   cruise_speed: 6.0
-  pop_size: 500
-  n_gen: 100
-  n_inner_waypoints: 7
+  pop_size: 1000
+  n_gen: 200
+  n_inner_waypoints: 11
 
   # --- Wagi celow (po normalizacji wzgledem trajektorii referencyjnej) ---
   # Cele sa dzielone przez F_ref (wartosc F dla linii prostej Start->Target),
@@ -21,15 +21,15 @@ algorithm_params:
   # --- Kara za naruszenia ograniczen ---
   # Suma naruszen G1..G5 pomnozona przez penalty_weight.
   # Wysoka wartosc (100+) wymusza feasibility; niska pozwala na eksploracje.
-  penalty_weight: 1.0
+  penalty_weight: 2.0
 
   # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
   # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
-  obstacle_safety_margin: 1.5     # bufor wokół przeszkód [m]
-  min_drone_distance: 1.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  obstacle_safety_margin: 2.0    # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
   k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
-  absolute_min_node_dist: 1.0     # dolny próg dystansu między węzłami [m]
-  max_accel_limit: 5.0            # limit „drugiej różnicy” wielokąta kontrolnego
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m]
+  max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
 
   # --- Szum inicjalizacji populacji (anizotropowy) ---
   noise_std_xy: 2.0

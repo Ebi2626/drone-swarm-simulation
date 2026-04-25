@@ -1,21 +1,29 @@
 _target_: src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy.nsga3_swarm_strategy
 _partial_: true
-_convert_: "all" 
+_convert_: "all"
 
 # Parametry specyficzne dla NSGA-III
 algorithm_params:
-  pop_size: 500
-  n_gen: 2000
-  min_ideal_solutions: 100
-  crossover_prob: 0.95
-  mutation_prob: 0.4
-  eta_c: 5 # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja
-  eta_m: 3  # parametr rozkładu dla mutacji wielomianowej - im więcej tym mniej mutacji 
-  decision_mode: "safety" # knee_point | safety | equal
-  n_inner_waypoints: 11
-  safety_margin: 1.5
-  min_dist: 1.0
-  ignore_ratio: 0.1
-  uniformity_std: 100.0
-  max_jerk: 100.0
   cruise_speed: 6.0
+  pop_size: 1000
+  n_gen: 200
+  n_inner_waypoints: 11
+
+  min_ideal_solutions: 100
+  crossover_prob: 0.90
+  mutation_prob: 0.4
+  eta_c: 4 # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja
+  eta_m: 3  # parametr rozkładu dla mutacji wielomianowej - im więcej tym mniej mutacji
+  decision_mode: "safety" # knee_point | safety | equal
+
+  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
+  # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
+  obstacle_safety_margin: 2.0     # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m]
+  max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
+
+  # --- Szum inicjalizacji populacji (anizotropowy) ---
+  noise_std_xy: 2.0
+  noise_std_z: 0.3

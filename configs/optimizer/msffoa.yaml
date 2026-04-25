@@ -5,9 +5,9 @@ _convert_: "all"
 
 algorithm_params:
   cruise_speed: 6.0
-  pop_size: 500
+  pop_size: 1000
   epochs: 200
-  n_inner_waypoints: 7
+  n_inner_waypoints: 11
   seed: 42
 
   # --- Wagi celów (skalaryzacja MOO → SOO) ---
@@ -50,18 +50,18 @@ algorithm_params:
 
   # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
   # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
-  obstacle_safety_margin: 3.0     # bufor wokół przeszkód [m]
-  min_drone_distance: 1.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  obstacle_safety_margin: 2.0     # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
   k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
-  absolute_min_node_dist: 1.0     # dolny próg dystansu między węzłami [m] (zgodnie z OOA)
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m] (zgodnie z OOA)
   max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
 
 
   # --- Constraint penalty ---
   # Weakest-link: the worst single constraint violation (np.max, not np.sum)
   # is multiplied by this weight. High value enforces feasibility.
-  # Ujednolicone z OOA (1.0), by warunki porównania ceteris paribus były spełnione.
-  penalty_weight: 3.0
+  # Ujednolicone z OOA (2.0), by warunki porównania ceteris paribus były spełnione.
+  penalty_weight: 2.0
 
   # --- MSFOA-specific hyperparameters (Shi et al., 2020) ---
   # Eksponowane jako pola yaml, by można było przesterować z CLI bez

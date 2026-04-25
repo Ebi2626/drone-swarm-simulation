@@ -118,12 +118,13 @@ class MSFFOAOptimizer:
 
         # MSFOA Specific Parameters
         self.G = n_swarms
-        self.P = pop_size // n_swarms  # Number of flies per swarm
         self.coe1 = coe1
         self.coe2 = coe2
         self.threshold = threshold
 
         # Walidacje strukturalne (paper Sec. 1: G ≥ 1, M_pop podzielne przez G)
+        # MUSZĄ być przed `self.P = pop_size // n_swarms`, żeby n_swarms=0
+        # nie powodował ZeroDivisionError zamiast czytelnego ValueError.
         if self.G < 1:
             raise ValueError(f"n_swarms must be ≥ 1, got {n_swarms}.")
         if self.pop_size < self.G:
@@ -135,6 +136,8 @@ class MSFFOAOptimizer:
                 f"Population size ({pop_size}) must be divisible by "
                 f"number of swarms ({self.G})."
             )
+
+        self.P = pop_size // n_swarms  # Number of flies per swarm
 
         # Paper Shi et al. (2020), Sec. 1: warunek coe1 + coe2 = 1.
         # Zabezpieczenie przed konfiguracją łamiącą krzyżowanie z Eq. 14

@@ -1,0 +1,24 @@
+name: "complex_test"
+runs_per_configuration: 2
+
+parameters_grid:
+  simulation:
+    dynamic_obstacles: False
+    gui: False
+  optimizers:
+    - name: msffoa                     # Domyslne parametry (string)
+      overrides:
+        algorithm_params:
+          n_gen: 50
+    - name: nsga-3               # Skrócone parametry dla testów (dict)
+      overrides:
+        algorithm_params:
+          n_gen: 20
+    - name: ssa                  # Inne parametry dla testów (dict)
+      overrides:
+        algorithm_params:
+          n_gen: 50
+  environments:
+    - forest
+  avoidances:
+    - none

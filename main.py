@@ -1,8 +1,11 @@
+# flake8: noqa: E402
+import warnings
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+
 import sys
 import time
 import hydra
 import numpy as np
-import pybullet as p
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
@@ -14,9 +17,12 @@ from src.runner.ReplayDataStrategy import ReplayDataStrategy
 
 from src.utils.input_utils import InputHandler, CommandType
 from src.utils.SimulationLogger import SimulationLogger
+from src.utils.RunRegistry import RunRegistry
 from src.utils.pybullet_utils import update_camera_position
 from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgorithm
 from src.environments.obstacles.ObstacleShape import ObstacleShape
+
+import pybullet as p
 
 
 class ExperimentRunner:
@@ -34,7 +40,9 @@ class ExperimentRunner:
 
         # --- Dynamiczne przeszkody ---
         self.use_dynamic_obstacles = cfg.simulation.get("dynamic_obstacles", False)
-        self.num_dynamic_obstacles = self.num_drones if self.use_dynamic_obstacles else 0
+        self.num_dynamic_obstacles = (
+            self.num_drones if self.use_dynamic_obstacles else 0
+        )
         self.total_agents = self.num_drones + self.num_dynamic_obstacles
 
         # Parametry wizualizacji
@@ -56,7 +64,9 @@ class ExperimentRunner:
 
         # Parametry środowiska
         self.initial_rpys = cfg.environment.get("initial_rpys")
-        self.start_positions = np.array(cfg.environment.get("initial_xyzs"), dtype=np.float64)
+        self.start_positions = np.array(
+            cfg.environment.get("initial_xyzs"), dtype=np.float64
+        )
         self.end_positions = np.array(cfg.environment.get("end_xyzs"), dtype=np.float64)
         self.placement_strategy_name = cfg.environment.params.get("placement_strategy")
         self.ground_position = cfg.environment.params.get("ground_position")
@@ -71,7 +81,9 @@ class ExperimentRunner:
         self.safe_radius = cfg.environment.params.get("safe_radius")
 
         # Ustawienia optymalizatora
-        self.number_of_waypoints = cfg.optimizer.algorithm_params.get("n_inner_waypoints")
+        self.number_of_waypoints = cfg.optimizer.algorithm_params.get(
+            "n_inner_waypoints", 15
+        )
 
     # =========================================================================
     # PRZYGOTOWANIE EKSPERYMENTU
@@ -87,8 +99,10 @@ class ExperimentRunner:
             if output_dir is None:
                 output_dir = HydraConfig.get().runtime.output_dir
             self.logger = SimulationLogger(
-                output_dir=output_dir, log_freq=self.cfg.logging.log_freq,
-                ctrl_freq=self.ctrl_freq, num_drones=self.num_drones
+                output_dir=output_dir,
+                log_freq=self.cfg.logging.log_freq,
+                ctrl_freq=self.ctrl_freq,
+                num_drones=self.num_drones,
             )
 
         # Delegacja przygotowania danych (generacja lub wczytanie z CSV)
@@ -102,16 +116,28 @@ class ExperimentRunner:
             "ctrl_freq": self.ctrl_freq,
             "collision_radius": 0.5,
             "hover_duration": self.cfg.simulation.get("hover_duration", 3.0),
-            "cruise_speed": self.cfg.optimizer.algorithm_params.get("cruise_speed", 8.0),
+            "cruise_speed": self.cfg.optimizer.algorithm_params.get(
+                "cruise_speed", 8.0
+            ),
             "max_accel": self.cfg.optimizer.algorithm_params.get("max_accel", 2.0),
         }
+
+        avoidance_algo = None
+        if "avoidance" in self.cfg and self.cfg.avoidance.get("enable", False):
+            avoidance_algo = instantiate(self.cfg.avoidance)
+            print(f"[INFO] Aktywowano algorytm omijania: {avoidance_algo.name}")
 
         # Kontroler dla głównego roju
         self.trajectory_controller = TrajectoryFollowingAlgorithm(
             parent=self,
             num_drones=self.num_drones,
             is_obstacle=False,
-            params={**shared_params, "acceptance_radius": 0.2, "enable_avoidance": True}
+            avoidance_algorithm=avoidance_algo,
+            params={
+                **shared_params,
+                "acceptance_radius": 0.2,
+                "enable_avoidance": avoidance_algo is not None,
+            },
         )
 
         # Kontroler dla dynamicznych przeszkód (jeśli włączone w konfiguracji)
@@ -120,7 +146,12 @@ class ExperimentRunner:
                 parent=self,
                 num_drones=self.num_dynamic_obstacles,
                 is_obstacle=True,
-                params={**shared_params, "acceptance_radius": 0.5, "enable_avoidance": False}
+                avoidance_algorithm=None,
+                params={
+                    **shared_params,
+                    "acceptance_radius": 0.5,
+                    "enable_avoidance": False,
+                },
             )
 
     # =========================================================================
@@ -132,7 +163,6 @@ class ExperimentRunner:
         if self.use_dynamic_obstacles:
             all_initial_xyzs = np.vstack((self.start_positions, self.end_positions))
             all_end_xyzs = np.vstack((self.end_positions, self.start_positions))
-            # PODWÓJNA TABLICA KĄTÓW STARTOWYCH
             if self.initial_rpys is not None:
                 all_initial_rpys = np.vstack((self.initial_rpys, self.initial_rpys))
             else:
@@ -151,7 +181,7 @@ class ExperimentRunner:
             num_drones=self.total_agents,
             initial_xyzs=all_initial_xyzs,
             end_xyzs=all_end_xyzs,
-            initial_rpys=all_initial_rpys,  # <-- Przekazujemy podwojoną tablicę!
+            initial_rpys=all_initial_rpys,
             gui=self.cfg.simulation.gui,
             ctrl_freq=self.ctrl_freq,
             pyb_freq=self.pyb_freq,
@@ -159,6 +189,7 @@ class ExperimentRunner:
             dynamic_obstacles_enabled=self.use_dynamic_obstacles,
             num_dynamic_obstacles=self.num_dynamic_obstacles,
         )
+
     # =========================================================================
     # POMOCNICZE METODY PĘTLI
     # =========================================================================
@@ -171,38 +202,31 @@ class ExperimentRunner:
             drone_state=drone_states[self.tracked_drone_id],
             distance=self.cfg.visualization.camera_distance,
             yaw_offset=self.cfg.visualization.camera_yaw,
-            pitch=self.cfg.visualization.camera_pitch
+            pitch=self.cfg.visualization.camera_pitch,
         )
 
     def _init_active_drones(self):
         """Inicjalizuje zbiór aktywnych dronów głównego roju."""
         self.active_drones = set(range(self.num_drones))
-        self.acceptance_radius = self.trajectory_controller.params.get("acceptance_radius", 0.2)
+        self.acceptance_radius = self.trajectory_controller.params.get(
+            "acceptance_radius", 0.2
+        )
 
     def _process_collisions(self, sim_time: float, current_step: int):
-        """Przetwarza kolizje — loguje i usuwa z aktywnych tylko drony głównego roju.
-        
-        Przeszkody dynamiczne (indeksy >= num_drones) są ignorowane jako
-        źródło kolizji — lecą dalej niezależnie od zdarzeń kontaktu.
-        """
+        """Przetwarza kolizje — loguje i usuwa z aktywnych tylko drony głównego roju."""
         for d_id, o_id in self.environemnt.get_detailed_collisions():
-            # Filtrujemy: interesują nas kolizje tylko dronów głównego roju
             if d_id >= self.num_drones:
                 continue
-
             if self.logger:
                 self.logger.log_collision(sim_time, d_id, o_id)
-
             if d_id in self.active_drones:
                 self.active_drones.remove(d_id)
-                print(f"[INFO] Dron {d_id} uległ kolizji w czasie {sim_time:.2f}s (krok {current_step}).")
+                print(
+                    f"[INFO] Dron {d_id} uległ kolizji w czasie {sim_time:.2f}s (krok {current_step})."
+                )
 
     def _process_arrivals(self, drone_states: list, sim_time: float):
-        """Sprawdza czy drony głównego roju dotarły do celu.
-        
-        Przyjmuje skrojoną listę stanów (tylko drony, bez przeszkód),
-        dlatego indeksowanie jest bezpośrednie względem self.end_positions.
-        """
+        """Sprawdza czy drony głównego roju dotarły do celu."""
         try:
             radius = float(np.squeeze(self.acceptance_radius))
         except (TypeError, ValueError):
@@ -221,15 +245,21 @@ class ExperimentRunner:
 
     def _get_all_drone_states(self) -> list:
         """Zwraca stany wszystkich total_agents agentów ze środowiska."""
-        return [self.environemnt._getDroneStateVector(d) for d in range(self.total_agents)]
+        return [
+            self.environemnt._getDroneStateVector(d) for d in range(self.total_agents)
+        ]
 
     def _split_states(self, all_states: list) -> tuple[list, list]:
         """Rozdziela stany wszystkich agentów na drony i przeszkody."""
-        drone_states = all_states[:self.num_drones]
-        obstacle_states = all_states[self.num_drones:] if self.use_dynamic_obstacles else []
+        drone_states = all_states[: self.num_drones]
+        obstacle_states = (
+            all_states[self.num_drones :] if self.use_dynamic_obstacles else []
+        )
         return drone_states, obstacle_states
 
-    def _merge_actions(self, drone_actions: np.ndarray, obstacle_actions: np.ndarray | None) -> np.ndarray:
+    def _merge_actions(
+        self, drone_actions: np.ndarray, obstacle_actions: np.ndarray | None
+    ) -> np.ndarray:
         """Scala akcje dronów i przeszkód w jedną tablicę dla env.step()."""
         if obstacle_actions is None:
             return drone_actions
@@ -243,7 +273,6 @@ class ExperimentRunner:
         print("Running experiment...")
         self.initialize_world()
 
-        # LiDAR inicjalizowany tylko dla dronów głównych
         self.trajectory_controller.init_lidars(self.environemnt.CLIENT)
 
         is_running = not self.cfg.simulation.gui
@@ -253,13 +282,14 @@ class ExperimentRunner:
 
         self._init_active_drones()
         start_real_time = time.time()
-        print(f"[DEBUG] Start symulacji na {max_steps} kroków "
-              f"({'z' if self.use_dynamic_obstacles else 'bez'} dynamicznych przeszkód).")
+        print(
+            f"[DEBUG] Start symulacji na {max_steps} kroków "
+            f"({'z' if self.use_dynamic_obstacles else 'bez'} dynamicznych przeszkód)."
+        )
 
         while current_step < max_steps:
             loop_start = time.time()
 
-            # --- Obsługa wejścia GUI ---
             if self.cfg.simulation.gui:
                 cmd = self.input_handler.get_command()
                 if cmd:
@@ -269,63 +299,69 @@ class ExperimentRunner:
                         self.tracked_drone_id = cmd.payload
                     elif cmd.type == CommandType.TOGGLE_LIDAR_RAYS:
                         self.show_lidar_rays = not self.show_lidar_rays
-                        if not self.show_lidar_rays and hasattr(self.trajectory_controller, "clear_lidar_rays"):
+                        if not self.show_lidar_rays and hasattr(
+                            self.trajectory_controller, "clear_lidar_rays"
+                        ):
                             self.trajectory_controller.clear_lidar_rays()
 
             if is_running:
                 sim_time = current_step / self.ctrl_freq
 
-                # 1. Pobranie i podział stanów na drony i przeszkody
                 all_pre_states = self._get_all_drone_states()
-                drone_pre_states, obstacle_pre_states = self._split_states(all_pre_states)
+                drone_pre_states, obstacle_pre_states = self._split_states(
+                    all_pre_states
+                )
 
-                # 2. Akcje dla głównego roju
                 drone_actions = self.trajectory_controller.compute_actions(
                     drone_pre_states, current_time=sim_time
                 )
 
-                # 3. Akcje dla dynamicznych przeszkód (gdy włączone)
                 obstacle_actions = None
                 if self.use_dynamic_obstacles:
-                    obstacle_actions = self.dynamic_obstacle_trajectory_controller.compute_actions(
-                        obstacle_pre_states, current_time=sim_time
+                    obstacle_actions = (
+                        self.dynamic_obstacle_trajectory_controller.compute_actions(
+                            obstacle_pre_states, current_time=sim_time
+                        )
                     )
 
-                # 4. Wizualizacja LiDARu
                 if self.show_lidar_rays and self.cfg.simulation.gui:
                     if current_step % self.lidar_draw_interval == 0:
                         self.trajectory_controller.draw_lidar_rays(
                             drone_pre_states, self.tracked_drone_id
                         )
 
-                # 5. Krok fizyki — środowisko dostaje scalone akcje wszystkich agentów
-                self.environemnt.step(self._merge_actions(drone_actions, obstacle_actions))
+                self.environemnt.step(
+                    self._merge_actions(drone_actions, obstacle_actions)
+                )
 
-                # 6. Pobranie stanów po kroku i podział
                 all_post_states = self._get_all_drone_states()
                 drone_post_states, _ = self._split_states(all_post_states)
 
-                # 7. Logowanie — wyłącznie stany dronów głównych
                 if self.logger:
                     self.logger.log_step(current_step, sim_time, drone_post_states)
 
-                # 8. Detekcja zdarzeń — wyłącznie dla dronów głównych
                 self._process_collisions(sim_time, current_step)
                 self._process_arrivals(drone_post_states, sim_time)
 
                 if not self.active_drones:
-                    print(f"[DEBUG] Wszystkie drony zakończyły lot. Przerwano w kroku {current_step}.")
+                    print(
+                        f"[DEBUG] Wszystkie drony zakończyły lot. Przerwano w kroku {current_step}."
+                    )
                     break
 
                 current_step += 1
 
-                if not self.cfg.simulation.gui and current_step % progress_interval == 0:
+                if (
+                    not self.cfg.simulation.gui
+                    and current_step % progress_interval == 0
+                ):
                     pct = 100 * current_step / max_steps
                     print(f"[INFO] Postęp: {current_step}/{max_steps} ({pct:.0f}%)")
 
-            # --- Zarządzanie czasem GUI ---
             if self.cfg.simulation.gui:
-                drone_states_for_cam, _ = self._split_states(self._get_all_drone_states())
+                drone_states_for_cam, _ = self._split_states(
+                    self._get_all_drone_states()
+                )
                 self._update_camera(drone_states_for_cam)
                 elapsed = time.time() - loop_start
                 target_period = (1.0 / self.ctrl_freq) / self.sim_speed_multiplier
@@ -345,12 +381,107 @@ class ExperimentRunner:
 # PUNKTY WEJŚCIA
 # =============================================================================
 
+
+def _get_registry_job_key(cfg: DictConfig) -> dict | None:
+    """Wyciąga z konfiguracji Hydry klucz i upewnia się, że pasuje do formatu w bazie."""
+    if "experiment_meta" not in cfg or "id" not in cfg.experiment_meta:
+        return None
+
+    # 1. OPTYMALIZATOR
+    # Skrypt prepare_experiment.py zapisuje krótkie nazwy: 'msffoa', 'ssa', 'ooa', 'nsga-3'
+    # Musimy zmapować pełną ścieżkę z powrotem na tę krótką nazwę.
+    opt_target = str(cfg.get("optimizer", {}).get("_target_", "")).lower()
+    if "msffoa" in opt_target:
+        optimizer_name = "msffoa"
+    elif "ssa" in opt_target:
+        optimizer_name = "ssa"
+    elif "ooa" in opt_target:
+        optimizer_name = "ooa"
+    elif "nsga" in opt_target:
+        optimizer_name = "nsga-3"
+    else:
+        optimizer_name = "unknown"
+
+    # 2. ŚRODOWISKO
+    env_name = str(cfg.get("environment", {}).get("name", "unknown")).lower()
+
+    # 3. AVOIDANCE
+    # W bazie jest 'none' z małej litery, w cfg często 'None'
+    avoidance_name = str(cfg.get("avoidance", {}).get("name", "none")).lower()
+
+    # 4. SEED
+    seed_val = int(cfg.get("seed", 0))
+
+    return {
+        "exp_id": cfg.experiment_meta.id,
+        "optimizer": optimizer_name,
+        "environment": env_name,
+        "avoidance": avoidance_name,
+        "seed": seed_val,
+    }
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main_generate(cfg: DictConfig):
     OmegaConf.resolve(cfg)
-    runner = ExperimentRunner(cfg, GenerationDataStrategy())
-    runner.prepare_experiment()
-    runner.run()
+
+    # --- RunRegistry: guard wznawiania ---
+    registry = None
+    job_key = None
+    job_meta = _get_registry_job_key(cfg)
+
+    if job_meta:
+        # Wyciągamy exp_id i usuwamy go z dict, żeby reszta posłużyła jako kwargs do bazy
+        exp_id = job_meta.pop("exp_id")
+        job_key = job_meta  # teraz zawiera tylko 4 klucze: optimizer, env, avoid, seed
+
+        db_path = Path("results") / exp_id / "registry.db"
+
+        # Tworzymy folder tylko jeśli nie istnieje (Hydra Joblib robi to z opóźnieniem)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        registry = RunRegistry(db_path)
+
+        if not registry.should_run(**job_key):
+            print(
+                f"[SKIP] Zadanie już ukończone: "
+                f"{job_key['optimizer']}/{job_key['environment']}/"
+                f"avoidance={job_key['avoidance']}/seed={job_key['seed']}"
+            )
+            return
+
+        registry.mark_started(**job_key)
+        print(
+            f"[REGISTRY] Start: {job_key['optimizer']}/{job_key['environment']}/"
+            f"avoidance={job_key['avoidance']}/seed={job_key['seed']}"
+        )
+
+    # --- Właściwe uruchomienie eksperymentu ---
+    try:
+        runner = ExperimentRunner(cfg, GenerationDataStrategy())
+        runner.prepare_experiment()
+        runner.run()
+
+        if registry and job_key:
+            registry.mark_completed(**job_key)
+            print(f"[REGISTRY] Ukończono: seed={job_key['seed']}")
+
+    except BaseException as exc:
+        if registry and job_key:
+            error_message = (
+                "Przerwano przez użytkownika (CTRL+C)"
+                if isinstance(exc, KeyboardInterrupt)
+                else str(exc)
+            )
+            registry.mark_failed(**job_key, error_msg=error_message)
+            print(f"[REGISTRY] Błąd: seed={job_key['seed']} — {exc}")
+        raise
+    finally:
+        # Gwarantowane ubicie wątków fizyki w C++ po zakończeniu
+        try:
+            if p.isConnected():
+                p.disconnect()
+        except Exception:
+            pass
 
 
 def main_replay(results_dir: str, headless: bool = False):
@@ -377,12 +508,14 @@ def main_replay(results_dir: str, headless: bool = False):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--replay":
         if len(sys.argv) < 3:
-            print("Użycie: python main.py --replay <ścieżka_do_katalogu_wyników> [--headless]")
+            print(
+                "Użycie: python main.py --replay <ścieżka_do_katalogu_wyników> [--headless]"
+            )
             sys.exit(1)
         replay_path = sys.argv[2]
         headless = "--headless" in sys.argv[3:]
         sys.argv = [sys.argv[0]]
-        main_replay(replay_path, headless=headless)
+        main_replay(replay_path, headless)
     else:
         if "--headless" in sys.argv:
             sys.argv.remove("--headless")

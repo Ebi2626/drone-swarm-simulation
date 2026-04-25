@@ -2,32 +2,97 @@ _target_: src.algorithms.abstraction.trajectory.strategies.msffoa_strategy.msffo
 _partial_: true
 _convert_: "all"
 
+
 algorithm_params:
-  pop_size: 400
-  epochs: 2000
-  n_inner_waypoints: 5
+  cruise_speed: 6.0
+  pop_size: 1000
+  epochs: 200
+  n_inner_waypoints: 11
   seed: 42
 
-  # --- Objective weights (after F_ref normalization) ---
-  # Objectives are divided by F_ref (straight-line reference) before weighting,
-  # so weights operate on a dimensionless ~1.0 scale.
-  objective_weights: [1.0, 2.0, 0.5]
-  #   [0]: w_path_length    — trajectory length
-  #   [1]: w_collision_risk  — obstacle penetration (dominant weight)
-  #   [2]: w_elevation       — altitude changes
+  # --- Wagi celów (skalaryzacja MOO → SOO) ---
+  # Pełny wzór fitness obliczany w TrajectorySOOAdapter.__call__:
+  #   fitness(x) = Σ_i  weights[i] * F[i](x) / F_ref[i]
+  #              + penalty_weight * max_j max(0, G[j](x))
+  #
+  # Wektor F pochodzi z VectorizedEvaluator.evaluate (objective_constrains.py)
+  # i ma TRZY składowe — każda waga steruje jednym konkretnym aspektem:
+  #
+  #   weights[0] → F[0] = swarm_total_length
+  #     Suma długości łuku B-Spline po wszystkich dronach (∝ czas/energia lotu).
+  #     ZWIĘKSZ → wymusza krótsze trasy (mniej objazdów wokół przeszkód).
+  #     ZMNIEJSZ → pozwala dłuższym trasom omijać przeszkody bezpieczniej.
+  #
+  #   weights[1] → F[1] = swarm_smoothness
+  #     Suma kwadratów drugich różnic wielokąta kontrolnego (∝ ostrość zakrętów).
+  #     ZWIĘKSZ → premiuje gładkie krzywe; tłumi zygzaki, ale algorytm może
+  #               przedkładać łagodność nad omijanie przeszkód.
+  #     ZMNIEJSZ → pozwala na ostrzejsze manewry uniku.
+  #     UWAGA: F_ref[1] dla linii prostej = 0 → klipowane do 1.0, więc każde
+  #            zaszumienie populacji daje F_norm[1] rzędu 10²–10³ (skala
+  #            niezdegenerowana). Faza 4 w plan.md przewiduje rekalibrację.
+  #
+  #   weights[2] → F[2] = swarm_collisions  (kolizje WEWNĄTRZ roju, dron-dron)
+  #     Suma penetracji par dronów poniżej `min_drone_distance` na próbkach
+  #     krzywej. Miękki sygnał gradientu — twarda kara za to samo siedzi w G[1].
+  #     ZWIĘKSZ → silniej rozsuwa drony w trakcie lotu.
+  #     ZMNIEJSZ → drony mogą przelatywać bliżej siebie (rzadziej domyślnie).
+  #
+  # Wagi spójne z konfiguracją OOA (wzorzec). Wartości zostały zweryfikowane
+  # eksperymentalnie na środowisku forest — patrz plan.md.
+  #
+  # ❗ Kolizje z PRZESZKODAMI (nie z innymi dronami) nie są w F. Trafiają do
+  # G[0] = swarm_collision_penalty i są karane przez `penalty_weight` niżej.
+  objective_weights: [0.05, 1.0, 0.25]
+  #                    │     │    └─ weights[2] = waga F[2] swarm_collisions (dron-dron)
+  #                    │     └────── weights[1] = waga F[1] swarm_smoothness (gładkość)
+  #                    └──────────── weights[0] = waga F[0] swarm_total_length (długość)
+
+  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
+  # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
+  obstacle_safety_margin: 2.0     # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m] (zgodnie z OOA)
+  max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
+
 
   # --- Constraint penalty ---
   # Weakest-link: the worst single constraint violation (np.max, not np.sum)
   # is multiplied by this weight. High value enforces feasibility.
-  penalty_weight: 50.0
+  # Ujednolicone z OOA (2.0), by warunki porównania ceteris paribus były spełnione.
+  penalty_weight: 2.0
 
-  # --- MSFFOA-specific hyperparameters ---
-  levy_beta: 1.5              # Levy exponent for Strategy 2 (heavy-tail jumps)
-  sigma_min_fraction: 0.01    # Minimum Gaussian sigma as fraction of world size
+  # --- MSFOA-specific hyperparameters (Shi et al., 2020) ---
+  # Eksponowane jako pola yaml, by można było przesterować z CLI bez
+  # konieczności użycia prefiksu „+" (Hydra struct-mode wymaga deklaracji
+  # klucza w config). Defaults pokrywają się z paperem (z udokumentowanymi
+  # adaptacjami w docstringu MSFFOAOptimizer).
+  n_swarms: 5                 # G — liczba podrojów (sub-swarms)
+  coe1: 0.8                   # waga lidera w Eq. 14 (offspring competition)
+  coe2: 0.2                   # waga aktualnej muchy w Eq. 14 (coe1 + coe2 = 1)
+  threshold_ratio: 0.18       # próg fitness do przełączenia faza global ↔ 
+                              # (dynamicznie skalowany przez initial_fitness)
 
-  # --- VectorizedEvaluator parameters (shared across all optimizers) ---
-  min_dist: 0.5
-  ignore_ratio: 0.4
-  safety_margin: 3.0
-  uniformity_std: 50.0
-  max_jerk: 50.0
+  # --- Amplitudy perturbacji (paper Sec. 1: R jako parametr) ---
+  # Frakcja zakresu świata na każdą oś [X, Y, Z]. Krok mnożony przez
+  # `world_size = upper_bound - lower_bound` z SwarmOptimizationProblem.
+  # Anizotropia (różne wartości per oś) to świadoma adaptacja vs paper —
+  # dla świata 60×600×11m izotropia powodowałaby albo zbyt małe kroki Y,
+  # albo zbyt duże kroki Z. Patrz docstring MSFFOAOptimizer.
+  #
+  # Defaults dobrane empirycznie (grid-search forest, plan.md):
+  #   - paperowe ~10% (tj. [0.10, 0.10, 0.05]) generują kandydatów ~200×
+  #     gorszych od liderów na fitness landscape zdominowanym przez
+  #     F_smoothness → algorytm „utyka" bez postępu.
+  #   - 1% XY / 0.5% Z (poniżej) daje monotoniczną zbieżność porównywalną
+  #     z OOA na forest.
+  step_global_frac: [0.020, 0.010, 0.005]    # faza globalna: x_best + sin(2·rand) · world_size · frac
+  step_local_frac:  [0.003, 0.001, 0.001]    # faza lokalna:  x_best + rand · world_size · frac
+
+  # --- Szum inicjalizacji populacji (anizotropowy) ---
+  # Zakres Z (start ↔ cel) w typowych scenariuszach jest rzędu pojedynczych
+  # metrów; izotropowy szum (σ=2m) zepchnąłby populację Z na dolny limit
+  # po klipowaniu — stąd osobne σ_z.
+  noise_std_xy: 2.0
+  noise_std_z: 0.3

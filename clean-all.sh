@@ -1,0 +1,1 @@
+./clean-results.sh && ./clean-experiments.sh

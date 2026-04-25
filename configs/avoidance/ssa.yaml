@@ -1,0 +1,18 @@
+_target_: src.algorithms.avoidance.SSAAvoidance.SSAAvoidance
+name: "SSA Local Planner"
+enable: true
+
+# Parametry rojowe (Sparrow Search Algorithm)
+pop_size: 20               # Rozmiar roju wróbli
+n_iterations: 10           # Liczba iteracji
+discoverer_ratio: 0.20     # Odsetek wróbli odkrywców (najlepsze lokalizacje) [web:79]
+sentinel_ratio: 0.15       # Odsetek wróbli alarmujących (szybka ucieczka na krawędź) [web:79]
+safety_threshold: 0.8      # Próg alarmowy wymuszający rozproszenie roju
+
+# Parametry wygładzania Cubic Splines używanego na koniec przez SSA [web:77]
+use_cubic_splines: true    
+
+# Wagi kary ewolucyjnej (Fitness)
+weight_smoothness: 1.0     
+weight_energy: 0.5         
+weight_safety: 2.5         

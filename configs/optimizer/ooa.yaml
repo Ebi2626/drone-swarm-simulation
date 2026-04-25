@@ -2,29 +2,20 @@ _target_: src.algorithms.abstraction.trajectory.strategies.ooa_strategy.osprey_s
 _partial_: true
 _convert_: "all"
 
+
 # Parametry specyficzne dla Osprey Optimization Algorithm (OOA)
 algorithm_params:
-  pop_size: 500
-  n_gen: 300
-  n_inner_waypoints: 7
-  seed: 1
-
-  # --- Multithreading ---
-  # mealpy wymusza ewaluacje per-osobnik (obj_func);
-  # n_workers > 1 aktywuje tryb "thread" (ThreadPoolExecutor).
-  # NumPy zwalnia GIL, wiec watki daja realne przyspieszenie.
-  # UWAGA: OriginalOOA w mealpy 3.x wymusza tryb "single" –
-  #   parametr n_workers jest ignorowany przez ten algorytm.
-  #   Wartosc jest zachowana, poniewaz inne algorytmy mealpy (np. PSO, GA)
-  #   moga korzystac z tego samego pliku konfiguracyjnego z pelnym wsparciem watkow.
-  n_workers: 4
+  cruise_speed: 6.0
+  pop_size: 1000
+  n_gen: 200
+  n_inner_waypoints: 11
 
   # --- Wagi celow (po normalizacji wzgledem trajektorii referencyjnej) ---
   # Cele sa dzielone przez F_ref (wartosc F dla linii prostej Start->Target),
   # wiec wagi operuja na bezwymiarowej skali ~1.0.
   # Przyklad: w_collision_risk = 5.0 oznacza "kolizja 5x wazniejsza niz dlugosc trasy".
   w_path_length: 0.05       # F1: dlugosc trasy (znormalizowana)
-  w_collision_risk: 10.0     # F2: ryzyko kolizji (znormalizowane; F2_ref czesto ~1.0)
+  w_collision_risk: 1.2     # F2: ryzyko kolizji (znormalizowane; F2_ref czesto ~1.0)
   w_elevation: 0.1          # F3: zmiany wysokosci (znormalizowane)
 
   # --- Kara za naruszenia ograniczen ---
@@ -32,9 +23,14 @@ algorithm_params:
   # Wysoka wartosc (100+) wymusza feasibility; niska pozwala na eksploracje.
   penalty_weight: 2.0
 
-  # --- Parametry VectorizedEvaluator (wspoldzielone z NSGA-III) ---
-  min_dist: 1.5
-  ignore_ratio: 0.4
-  safety_margin: 1.5
-  uniformity_std: 50.0
-  max_jerk: 50.0
+  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
+  # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
+  obstacle_safety_margin: 2.0    # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m]
+  max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
+
+  # --- Szum inicjalizacji populacji (anizotropowy) ---
+  noise_std_xy: 2.0
+  noise_std_z: 0.3

@@ -1,17 +1,19 @@
 defaults:
   - _self_
   - environment: forest
-  - optimizer: nsga-3
+  - optimizer: ssa
+  - avoidance: none
 
 simulation:
   duration_sec: 180
-  gui: true
+  gui: True
   pyb_freq: 240
   ctrl_freq: 48
   drone_model: "CF2X"
   physics: "PYB"
-  sim_speed_multiplier: 5.0
+  sim_speed_multiplier: 10.0
   dynamic_obstacles: False
+  collision_radius: 2.0
 
 seed: 43
 experiment_name: "test_run"
@@ -32,7 +34,6 @@ visualization:
 hydra:
   run:
     dir: results/${now:%Y-%m-%d}/${now:%H-%M-%S}_${environment.name}_${hydra:runtime.choices.optimizer}
-  
   job_logging:
     version: 1
     root:

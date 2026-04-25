@@ -189,7 +189,7 @@ class SwarmBaseWorld(BaseAviary):
         fallback_rpm = getattr(self, "MAX_RPM", 21703)
         act_upper = np.array([[fallback_rpm] * 4] * self.total_agents)
         
-        return spaces.Box(low=act_lower, high=act_upper, dtype=np.float32)
+        return spaces.Box(low=act_lower, high=act_upper, dtype=np.float64)
 
     def _observationSpace(self):
         print("[DEBUG] _observationSpace()")
@@ -197,13 +197,13 @@ class SwarmBaseWorld(BaseAviary):
             low=-np.inf,
             high=np.inf,
             shape=(self.total_agents, 20),
-            dtype=np.float32
+            dtype=np.float64
         )
 
     def _computeObs(self):
         return np.vstack(
             [self._getDroneStateVector(i) for i in range(self.total_agents)]
-        ).astype(np.float32)
+        ).astype(np.float64)
 
     def _preprocessAction(self, action):
         return action

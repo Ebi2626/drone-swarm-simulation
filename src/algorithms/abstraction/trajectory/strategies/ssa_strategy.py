@@ -1,541 +1,375 @@
-import math
-import os
-import random
-import numpy as np
-from typing import Any, Dict, Optional, List, Union
-from numpy.typing import NDArray
-from contextlib import nullcontext
+"""
+Sparrow Search Algorithm (SSA) Swarm Strategy.
 
-# Zakładam obecność funkcji resample_polyline_batch z Twojego pliku referencyjnego
-from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
-from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import resample_polyline_batch
-from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
-from src.utils.optimization_history_writer import OptimizationHistoryWriter
+Single-objective trajectory optimization using mealpy ``OriginalSSA`` based on:
+Xue, J., & Shen, B. (2020). A novel swarm intelligence optimization approach:
+sparrow search algorithm. Systems Science & Control Engineering, 8(1), 22-34.
+
+Implementacja wzorowana 1:1 na ``osprey_swarm_strategy`` (OOA) — różnica
+ogranicza się do silnika optymalizacji (``OriginalSSA`` zamiast ``OriginalOOA``)
+oraz adaptera problemu mealpy. Cała pozostała infrastruktura — granice
+problemu (``SwarmOptimizationProblem``), inicjalizacja populacji
+(``StraightLineNoiseSampling``), skalaryzacja MOO→SOO (``TrajectorySOOAdapter``),
+post-processing B-Spline (``generate_bspline_batch``), historia optymalizacji
+(``OptimizationHistoryWriter``) i timingi (``TimingCollector``) — jest
+wspólna z OOA / MSFFOA / NSGA-III, co gwarantuje warunek ceteris paribus
+przy porównywaniu algorytmów w pracy magisterskiej.
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import nullcontext
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+
+import numpy as np
+from numpy.typing import NDArray
 from hydra.core.hydra_config import HydraConfig
 
+from mealpy import FloatVar
+from mealpy import Problem as MealpyProblem
+from mealpy.swarm_based.SSA import OriginalSSA
 
-def evaluate_ssa_population(
-    X_flat: NDArray, 
-    n_drones: int, 
-    n_inner: int, 
-    n_out: int,
-    starts: NDArray, 
-    targets: NDArray, 
-    evaluator: Any,
-    penalty_weight: float,
-    weights: NDArray
-) -> tuple[NDArray, NDArray]:
-    
-    pop_size = X_flat.shape[0]
-    
-    inner_waypoints = X_flat.reshape(pop_size, n_drones, n_inner, 3)
-    starts_bc = np.tile(starts[None, :, None, :], (pop_size, 1, 1, 1))
-    targets_bc = np.tile(targets[None, :, None, :], (pop_size, 1, 1, 1))
-    sparse_trajectory = np.concatenate([starts_bc, inner_waypoints, targets_bc], axis=2)
-    
-    trajectories = resample_polyline_batch(sparse_trajectory, num_samples=n_out)
-    
-    out = {}
-    evaluator.evaluate(trajectories, out)
-    
-    F = out.get("F", np.zeros((pop_size, 3)))  
-    G = out.get("G", np.zeros((pop_size, 1)))  
-    
-    # ---------------------------------------------------------
-    # PEŁNA WEKTORYZACJA: Całkowicie usunięta pętla for!
-    # ---------------------------------------------------------
-    # 1. Iloczyn macierzowy celów i wag: (Pop, 3) x (3,) -> (Pop,)
-    obj_score = np.dot(F, weights) 
-    
-    # 2. Agregacja wektorowa kar dla każdego osobnika z osobna:
-    constraint_violation = np.sum(np.maximum(0, G), axis=1) 
-    
-    # 3. Wektor sumarycznego przystosowania (fitness)
-    fitness = obj_score + penalty_weight * constraint_violation
-        
-    # Zwracamy wektor fitness i pełną macierz celów do logowania
-    return fitness, F
+from src.algorithms.abstraction.trajectory.objective_constrains import (
+    VectorizedEvaluator,
+)
+
+# Wspólne komponenty z OOA / MSFFOA / NSGA-III
+from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
+    SwarmOptimizationProblem,
+)
+from src.algorithms.abstraction.trajectory.strategies.soo_adapter import (
+    TrajectorySOOAdapter,
+)
+from src.algorithms.abstraction.trajectory.strategies.shared.bspline_utils import (
+    generate_bspline_batch,
+)
+from src.algorithms.abstraction.trajectory.strategies.shared.StraightLineNoiseSampling import (
+    StraightLineNoiseSampling,
+)
+from src.algorithms.abstraction.trajectory.strategies.timing_utils import (
+    TimingCollector,
+)
+from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.utils.optimization_history_writer import OptimizationHistoryWriter
+
+if TYPE_CHECKING:
+    pass
 
 
-def sparrow_search_algorithm_classic(
-    X_init: NDArray,
-    bounds_min: NDArray,
-    bounds_max: NDArray,
-    iter_max: int,
-    n_drones: int,
-    n_inner: int,
-    n_out: int,
-    starts: NDArray,
-    targets: NDArray,
-    evaluator: Any,
-    st: float,
-    pd_ratio: float,
-    sd_ratio: float,
-    penalty_weight: float,
-    weights: NDArray,
-    _measure: Any = None
-) -> NDArray:
+# ---------------------------------------------------------------------------
+# Adapter problemu SSA — Hard Bounding (analogiczny do OOAProblemAdapter)
+# ---------------------------------------------------------------------------
+
+class SSAProblemAdapter(MealpyProblem):
     """
-    Klasyczna implementacja modelu matematycznego SSA.
-    Parametry hiperheurystyki są teraz wstrzykiwane jawnie przez argumenty.
-    
-    Zintegrowano inicjalizację mechanizmu logowania wewnątrz metody wraz
-    z bezpiecznym zamykaniem strumieni dyskowych.
+    Problem mealpy dla SSA z bezwzględnym wymuszaniem granic (Hard Clipping).
+
+    SSA bywa numerycznie niestabilne — Eq. (4) zawiera ``Q · exp((X_worst - X_i) / i^2)``,
+    co dla dużych różnic pozycji potrafi wygenerować wartości ±∞. Dlatego clipping
+    pozycji jest realizowany na trzech poziomach: w ``amend_position`` (wywoływane
+    przez mealpy po każdym ruchu), w ``obj_func`` (fail-safe na wejściu) oraz
+    w ``LoggedOriginalSSA.evolve`` (przed zapisem historii).
     """
-    if _measure is None:
-        _measure = lambda *a, **kw: nullcontext()
 
-    # 1. Lokalna inicjalizacja asynchronicznego loggera na podstawie konfiguracji Hydra
-    try:
-        from src.utils.optimization_history_writer import OptimizationHistoryWriter
-        output_dir = HydraConfig.get().runtime.output_dir
-        log_dir = os.path.join(output_dir, "optimization_history")
-        writer = OptimizationHistoryWriter(output_dir=log_dir)
-    except Exception as e:
-        print(f"[SSA Classic] Ostrzeżenie: Nie udało się zainicjalizować loggera. Brak zapisu historii. Błąd: {e}")
-        writer = None
+    def __init__(
+        self,
+        *,
+        bounds: FloatVar,
+        evaluator: VectorizedEvaluator,
+        scalar_adapter: TrajectorySOOAdapter,
+        start_pos: NDArray[np.float64],
+        target_pos: NDArray[np.float64],
+        n_drones: int,
+        n_inner: int,
+        n_output_samples: int,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(bounds=bounds, minmax="min", **kwargs)
 
-    try:
-        n, d = X_init.shape
-        X = np.copy(X_init)
-        
-        # Wyliczanie stałych rozmiarów podgrup stada na podstawie zadanych proporcji
-        PD = max(1, int(pd_ratio * n))
-        SD = max(1, int(sd_ratio * n))
-        
-        global_best_X = np.copy(X[0])
-        global_best_f = float('inf')
+        self.evaluator = evaluator
+        self.scalar_adapter = scalar_adapter
+        self.n_drones = n_drones
+        self.n_inner = n_inner
+        self.n_output_samples = n_output_samples
 
-        print(f"[SSA Classic] Rozpoczęto optymalizację: Populacja={n}, Wymiary={d}, Iter={iter_max}, PD={PD}, SD={SD}")
-        
-        # Wstępna ewaluacja populacji bazowej - powrót macierzy F_pop niezbędnej do logowania
-        fitness, F_pop = evaluate_ssa_population(
-            X, n_drones, n_inner, n_out, starts, targets, evaluator, penalty_weight, weights
-        )
+        self._starts_bc = start_pos[np.newaxis, :, np.newaxis, :]
+        self._targets_bc = target_pos[np.newaxis, :, np.newaxis, :]
 
-        with _measure("generation_loop"):
-            for t in range(iter_max):
-                sort_idx = np.argsort(fitness)
-                X = X[sort_idx]
-                fitness = fitness[sort_idx]
-                F_pop = F_pop[sort_idx]  # Synchronizacja macierzy celów
-                
-                if fitness[0] < global_best_f:
-                    global_best_f = fitness[0]
-                    global_best_X = np.copy(X[0])
-                    
-                X_best = np.copy(X[0])
-                X_worst = np.copy(X[-1])
-                f_g = fitness[0]
-                f_w = fitness[-1]
-                
-                X_new = np.copy(X)
-                R_2 = random.random()
-                
-                # ETAP 1: Producenci
-                for i in range(PD):
-                    for j in range(d):
-                        if R_2 < st:
-                            alpha = random.uniform(0.0001, 1.0)
-                            X_new[i, j] = X[i, j] * math.exp(-(i + 1) / (alpha * iter_max))
-                        else:
-                            Q = random.gauss(0, 1)
-                            X_new[i, j] = X[i, j] + Q
-                            
-                X_P = np.copy(X_new[0])
+        self._lb = np.asarray(bounds.lb, dtype=np.float64)
+        self._ub = np.asarray(bounds.ub, dtype=np.float64)
 
-                # ETAP 2: Wyzyskiwacze
-                for i in range(PD, n):
-                    for j in range(d):
-                        if i > n / 2:
-                            Q = random.gauss(0, 1)
-                            X_new[i, j] = Q * math.exp((X_worst[j] - X[i, j]) / ((i + 1) ** 2))
-                        else:
-                            A_j = 1 if random.random() > 0.5 else -1
-                            A_plus_j = A_j / d 
-                            X_new[i, j] = X_P[j] + abs(X[i, j] - X_P[j]) * A_plus_j
+    def amend_position(self, position: np.ndarray, *args: Any, **kwargs: Any) -> np.ndarray:
+        return np.clip(np.nan_to_num(position, nan=self._ub), self._lb, self._ub)
 
-                # ETAP 3: Zwiadowcy
-                danger_indices = random.sample(range(n), SD)
-                for i in danger_indices:
-                    for j in range(d):
-                        if fitness[i] > f_g:
-                            beta = random.gauss(0, 1)
-                            X_new[i, j] = X_best[j] + beta * abs(X[i, j] - X_best[j])
-                        else:
-                            K_val = random.uniform(-1, 1)
-                            epsilon = 1e-8
-                            step_size = abs(X[i, j] - X_worst[j]) / (fitness[i] - f_w + epsilon)
-                            X_new[i, j] = X[i, j] + K_val * step_size
+    def _decode_inner(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
+        pop_size = population.shape[0]
+        return population.reshape(pop_size, self.n_drones, self.n_inner, 3)
 
-                # Ograniczenia przestrzeni
-                for i in range(n):
-                    for j in range(d):
-                        if X_new[i, j] < bounds_min[j]:
-                            X_new[i, j] = bounds_min[j]
-                        elif X_new[i, j] > bounds_max[j]:
-                            X_new[i, j] = bounds_max[j]
-                            
-                # Ewaluacja nowo wygenerowanych pozycji (X_new)
-                fitness_new, F_new = evaluate_ssa_population(
-                    X_new, n_drones, n_inner, n_out, starts, targets, evaluator, penalty_weight, weights
-                )
-                
-                # Krok selekcji: Aktualizacja tylko lepszych rozwiązań (Greedy Acceptance)
-                for i in range(n):
-                    if fitness_new[i] < fitness[i]:
-                        X[i] = np.copy(X_new[i])
-                        fitness[i] = fitness_new[i]
-                        F_pop[i] = np.copy(F_new[i])  # Indywidualna aktualizacja profilu celów
-                        
-                        if fitness[i] < global_best_f:
-                            global_best_f = fitness[i]
-                            global_best_X = np.copy(X[i])
+    def evaluate_population(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
+        inner = self._decode_inner(population)
+        fitness = np.asarray(self.scalar_adapter(inner), dtype=np.float64).reshape(-1)
+        return fitness
 
-                # 2. Rejestracja stanu na końcu iteracji - bez blokowania głównego wątku
-                if writer is not None:
-                    writer.put_generation_data({
-                        "objectives_matrix": F_pop.copy(),
-                        "decisions_matrix": X.copy()
-                    })
-                
-                if (t + 1) % 100 == 0 or t == 0:
-                    print(f"Iteracja {t+1}/{iter_max}, Najlepszy koszt (Fitness): {global_best_f:.4f}")
+    def evaluate_objectives(self, population: NDArray[np.float64]) -> NDArray[np.float64]:
+        inner = self._decode_inner(population)
+        out: Dict[str, Any] = {}
+        self.evaluator.evaluate(inner, out)
+        return np.asarray(out["F"], dtype=np.float64)
 
-        return global_best_X
-
-    finally:
-        # 3. Zabezpieczenie na wypadek przerwanej symulacji (np. KeyboardInterrupt)
-        # Nakazuje asynchronicznemu daemonowi opróżnienie buforów IO
-        if 'writer' in locals() and writer is not None:
-            writer.close()
+    def obj_func(self, x: np.ndarray) -> float:
+        x_safe = np.clip(np.nan_to_num(x, nan=self._ub), self._lb, self._ub)
+        return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
 
 
-def sparrow_search_algorithm_vectorized(
-    X_init: NDArray,
-    bounds_min: NDArray,
-    bounds_max: NDArray,
-    iter_max: int,
-    n_drones: int,
-    n_inner: int,
-    n_out: int,
-    starts: NDArray,
-    targets: NDArray,
-    evaluator: Any,
-    st: float,
-    pd_ratio: float,
-    sd_ratio: float,
-    penalty_weight: float,
-    weights: NDArray,
-    _measure: Any = None
-) -> NDArray:
-    """
-    Zwektoryzowana implementacja modelu matematycznego SSA.
-    Wykorzystuje operacje macierzowe biblioteki NumPy w celu eliminacji pętli `for` 
-    i przyspieszenia symulacji dla wielowymiarowych wielowirnikowców.
-    Zintegrowano wektoryzowane logowanie populacji.
-    """
-    if _measure is None:
-        _measure = lambda *a, **kw: nullcontext()
+# ---------------------------------------------------------------------------
+# Subklasa SSA z generacyjnym logowaniem historii
+# ---------------------------------------------------------------------------
 
-    n, d = X_init.shape
-    X = np.copy(X_init)
-    
-    # Wyliczanie stałych rozmiarów podgrup stada
-    PD = max(1, int(pd_ratio * n))
-    SD = max(1, int(sd_ratio * n))
-    
-    global_best_X = np.copy(X[0])
-    global_best_f = float('inf')
+class LoggedOriginalSSA(OriginalSSA):
+    def __init__(
+        self,
+        *args: Any,
+        history_writer: Optional[OptimizationHistoryWriter] = None,
+        history_problem: Optional[SSAProblemAdapter] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._history_writer = history_writer
+        self._history_problem = history_problem
 
-    print(f"[SSA Vectorized] Rozpoczęto optymalizację macierzową: Pop={n}, Wym={d}, Iter={iter_max}")
+    def evolve(self, epoch: int) -> None:
+        super().evolve(epoch)
 
-    # Wstępna ewaluacja macierzowa całej populacji bazowej
-    # ZMIANA: Zwracana jest również wektoryzowana macierz celów (F_pop) dla logera
-    fitness, F_pop = evaluate_ssa_population(
-        X, n_drones, n_inner, n_out, starts, targets, evaluator, penalty_weight, weights
-    )
+        if self._history_writer is None or self._history_problem is None:
+            return
 
-    output_dir = HydraConfig.get().runtime.output_dir
-    writer = OptimizationHistoryWriter(output_dir=os.path.join(output_dir, "optimization_history"))
-
-    # Pre-kalkulacja do odwracania macierzy uprzywilejowanych Wyzyskiwaczy
-    # Pozwala na szybkie wyznaczanie A_plus w głównej pętli bez liczenia tego w każdej iteracji
-    with _measure("generation_loop"):
-        for t in range(iter_max):
-            # 1. Sortowanie macierzy (po wierszach)
-            sort_idx = np.argsort(fitness)
-            X = X[sort_idx]
-            fitness = fitness[sort_idx]
-            F_pop = F_pop[sort_idx]  # <--- ZMIANA: Sortowanie macierzy celów razem z populacją
-            
-            # Aktualizacja globalnego optimum
-            if fitness[0] < global_best_f:
-                global_best_f = fitness[0]
-                global_best_X = np.copy(X[0])
-                
-            X_best = np.copy(X[0])
-            X_worst = np.copy(X[-1])
-            f_g = fitness[0]
-            f_w = fitness[-1]
-            
-            X_new = np.copy(X)
-            R_2 = np.random.rand()
-            
-            # -------------------------------------------------------------
-            # ETAP 1: Producenci (od indeksu 0 do PD)
-            # -------------------------------------------------------------
-            if R_2 < st:
-                # Wektoryzowane zwężanie korytarza przeszukiwań (exploration mode)
-                # Wymiar alphas: (PD, 1), broadcasting przemnoży odpowiednio wszystkie wymiary 'd'
-                Q_explore = np.random.randn(PD, d)
-                X_new[:PD] = X[:PD] + Q_explore * np.abs(X[:PD] - global_best_X)        
-            else:
-                # Wektoryzowana ucieczka przed drapieżnikiem (exploitation mode)
-                Q_mat = np.random.randn(PD, d)
-                X_new[:PD] = X[:PD] + Q_mat
-                
-            X_P = np.copy(X_new[0])
-
-            # -------------------------------------------------------------
-            # ETAP 2: Wyzyskiwacze (od indeksu PD do n)
-            # -------------------------------------------------------------
-            # Część pierwsza: uprzywilejowani (od PD do mid_index)
-            mid_index = int(n / 2) + 1  
-
-            if mid_index > PD:
-                num_privileged = mid_index - PD
-                
-                # Wersja macierzowa wyliczenia A_plus dla wszystkich uprzywilejowanych naraz
-                A_mat = np.random.choice([-1, 1], size=(num_privileged, d))
-                # Przybliżenie wektorowe zgodnie z założeniem modelu akademickiego: A^+_j = A_j / d
-                A_plus_mat = A_mat / d 
-                
-                X_new[PD:mid_index] = X_P + np.abs(X[PD:mid_index] - X_P) * A_plus_mat
-
-            # Część druga: głodujący (od mid_index do n)
-            num_starving = n - mid_index
-            if num_starving > 0:
-                Q_starving = np.random.randn(num_starving, d)
-                row_idx_starving = np.arange(mid_index + 1, n + 1).reshape(num_starving, 1)
-                # Potęgowanie wektorowe dla równania wykładniczego
-                X_new[mid_index:] = Q_starving * np.exp((X_worst - X[mid_index:]) / (row_idx_starving ** 2))
-
-            # -------------------------------------------------------------
-            # ETAP 3: Zwiadowcy (grupa narażona na ataki drapieżników)
-            # -------------------------------------------------------------
-            # Wybór unikalnych indeksów symulujących losowe rozłożenie drapieżników
-            danger_indices = np.random.choice(n, SD, replace=False)
-            
-            f_danger = fitness[danger_indices]
-            better_mask = f_danger > f_g
-            worse_mask = ~better_mask
-            
-            idx_better = danger_indices[better_mask]
-            idx_worse = danger_indices[worse_mask]
-            
-            if len(idx_better) > 0:
-                # Wróble uciekające ze skraju stada bezpośrednio w bezpieczne centrum (X_best)
-                beta_mat = np.random.randn(len(idx_better), d)
-                X_new[idx_better] = X_best + beta_mat * np.abs(X[idx_better] - X_best)
-                
-            if len(idx_worse) > 0:
-                # Wróble w centrum rozpraszające się nawzajem losowo (unikanie kolizji)
-                K_mat = np.random.uniform(-1, 1, size=(len(idx_worse), d))
-                epsilon = 1e-8
-                
-                # reshape(-1, 1) dla bezpiecznego broadcastingu przy dzieleniu (Wymiar: Nx1)
-                f_diff = (fitness[idx_worse] - f_w + epsilon).reshape(-1, 1)
-                step_sizes = np.abs(X[idx_worse] - X_worst) / f_diff
-                
-                X_new[idx_worse] = X[idx_worse] + K_mat * step_sizes
-
-            # -------------------------------------------------------------
-            # Ograniczenia i Greedy Acceptance (Krok Selekcji)
-            # -------------------------------------------------------------
-            # Wektoryzowane przycinanie zmiennych przestrzennych do granic mapy
-            X_new = np.clip(X_new, bounds_min, bounds_max)
-            
-            # Macierzowa ewaluacja nowo wygenerowanych propozycji lotu
-            # ZMIANA: Zwraca również macierz celów nowej populacji
-            fitness_new, F_new = evaluate_ssa_population(
-                X_new, n_drones, n_inner, n_out, starts, targets, evaluator, penalty_weight, weights
+        try:
+            decisions = np.vstack(
+                [
+                    self._history_problem.amend_position(np.asarray(agent.solution, dtype=np.float64))
+                    for agent in self.pop
+                ]
             )
-            
-            # Wektoryzowany Greedy Acceptance: przyjmujemy genotyp drona tylko wtedy gdy f_new < f_old
-            # Tworzenie wektora logicznego [True/False] o rozmiarze (n,)
-            improved_mask = fitness_new < fitness
-            
-            # Zaktualizowanie tylko tych wierszy (osobników), dla których maska to True
-            X[improved_mask] = X_new[improved_mask]
-            fitness[improved_mask] = fitness_new[improved_mask]
-            F_pop[improved_mask] = F_new[improved_mask]  # <--- ZMIANA: Aktualizacja macierzy celów przez szybką maskę wbudowaną w NumPy
-            
-            # --- ZMIANA: Asynchroniczne logowanie stanu generacji do pliku HDF5/NPZ ---
-            if writer is not None:
-                writer.put_generation_data({
-                    "objectives_matrix": F_pop.copy(),
-                    "decisions_matrix": X.copy()
-                })
-            # --------------------------------------------------------------------------
+            objectives = self._history_problem.evaluate_objectives(decisions)
 
-            # Macierzowa aktualizacja globalnego optimum po przypisaniu
-            current_best_idx = np.argmin(fitness)
-            if fitness[current_best_idx] < global_best_f:
-                global_best_f = fitness[current_best_idx]
-                global_best_X = np.copy(X[current_best_idx])
-                
-            if (t + 1) % 100 == 0 or t == 0:
-                print(f"Iteracja {t+1}/{iter_max}, Najlepszy koszt (Fitness): {global_best_f:.4f}")
-
-    return global_best_X
+            self._history_writer.put_generation_data(
+                {
+                    "objectives_matrix": objectives,
+                    "decisions_matrix": decisions,
+                }
+            )
+        except Exception as e:
+            print(f"[SSA] Warning: history logging failed at epoch {epoch}: {e}")
 
 
-# --- Główny Orchestrator (Punkt Wejścia dla Hydry) ---
+# ---------------------------------------------------------------------------
+# Główna strategia SSA
+# ---------------------------------------------------------------------------
 
 def ssa_swarm_strategy(
-    *, 
+    *,
     start_positions: NDArray[np.float64],
     target_positions: NDArray[np.float64],
-    obstacles_data: Union[Any, List[Any]], 
-    world_data: Any,
-    number_of_waypoints: int, 
-    drone_swarm_size: int, 
+    obstacles_data: Union[Any, List[Any]],
+    world_data: WorldData,
+    number_of_waypoints: int,
+    drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
-    timing: Optional["TimingCollector"] = None
+    timing: Optional["TimingCollector"] = None,
 ) -> NDArray[np.float64]:
-    
+
+    params = algorithm_params or {}
+
     local_timing = False
     if timing is None:
         try:
-            from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
             timing = TimingCollector("SSA_Swarm")
             local_timing = True
-        except ImportError:
+        except Exception:
             timing = None
 
     _measure = timing.measure if timing is not None else lambda *a, **kw: nullcontext()
 
+    writer: Optional[OptimizationHistoryWriter] = None
+
     try:
         with _measure("total_optimization"):
+            pop_size: int = int(params.get("pop_size", 200))
+            max_generations: int = int(params.get("epochs", params.get("n_gen", 500)))
+            n_inner: int = int(params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1))))
+            seed: int = int(params.get("seed", 42))
+
+            # Parametry biologiczne SSA (Xue & Shen, 2020)
+            #   ST  ∈ [0.5, 1.0]  — safety threshold (default paper'owy: 0.8)
+            #   PD  ∈ (0, 1)      — udział producentów w populacji (default: 0.2)
+            #   SD  ∈ (0, 1)      — udział "świadomych zagrożenia" (default: 0.1)
+            ST: float = float(params.get("ST", params.get("st", 0.8)))
+            PD: float = float(params.get("PD", params.get("pd_ratio", 0.2)))
+            SD: float = float(params.get("SD", params.get("sd_ratio", 0.1)))
+
+            if "objective_weights" in params:
+                weights = np.asarray(params["objective_weights"], dtype=np.float64)
+            else:
+                weights = np.asarray(
+                    [
+                        params.get("w_path_length", 0.05),
+                        params.get("w_collision_risk", 100.0),
+                        params.get("w_elevation", 0.1),
+                    ],
+                    dtype=np.float64,
+                )
+
+            penalty_weight: float = float(params.get("penalty_weight", 1.0))
+            noise_std_xy = float(params.get("noise_std_xy", 2.0))
+            noise_std_z = float(params.get("noise_std_z", 0.3))
+
+            n_workers: int = int(params.get("n_workers", 1))
+            mode: str = "thread" if n_workers > 1 else "swarm"
+
+            try:
+                output_dir = HydraConfig.get().runtime.output_dir
+            except ValueError:
+                output_dir = os.getcwd()
+
+            writer = OptimizationHistoryWriter(output_dir=os.path.join(output_dir, "optimization_history"))
+
             with _measure("initialization"):
-                params = algorithm_params or {}
-                
-                # 1. Rozpakowanie ogólnych parametrów optymalizacji
-                pop_size = params.get("pop_size", 100)
-                n_gen = params.get("n_gen", 100)
-                n_inner = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
-                
-                # 2. Rozpakowanie hiperparametrów biologicznych modelu SSA
-                st = params.get("st", 0.8)
-                pd_ratio = params.get("pd_ratio", 0.2)
-                sd_ratio = params.get("sd_ratio", 0.15)
-                
-                # 3. Rozpakowanie wag do skalaryzacji (Penalty + cele: dystans, gładkość, równomierność)
-                penalty_weight = params.get("penalty_weight", 10000.0)
-                weights = np.array([
-                    params.get("weight_distance", 1.0),
-                    params.get("weight_smoothness", 1.0),
-                    params.get("weight_uniformity", 1.0)
-                ], dtype=np.float64)
-                
-                if isinstance(obstacles_data, list):
-                    obs_list = obstacles_data
-                else:
-                    obs_list = [obstacles_data]
-                    
-                print(f"[SSA Strategy] Inicjalizacja. Rój: {drone_swarm_size}, Inner: {n_inner}, ST={st}, Kary={penalty_weight}")
-
-                margin = 50.0 
-                xl_one = np.array(world_data.min_bounds, dtype=float) - margin
-                xu_one = np.array(world_data.max_bounds, dtype=float) + margin
-                
-                MIN_Z_ALTITUDE = 0.5 
-                xl_one[2] = max(MIN_Z_ALTITUDE, world_data.min_bounds[2])
-                max_flight_z = min(world_data.max_bounds[2], xu_one[2] - 3.0)
-                xu_one[2] = max_flight_z
-                
-                d = drone_swarm_size * n_inner * 3
-                bounds_min = np.tile(xl_one, drone_swarm_size * n_inner)
-                bounds_max = np.tile(xu_one, drone_swarm_size * n_inner)
-                
-                # Heurystyczna inicjalizacja populacji wzdłuż wektora Start -> Cel
-                X_init = np.zeros((pop_size, drone_swarm_size, n_inner, 3))
-                t_vals = np.linspace(0, 1, n_inner + 2)[1:-1]
-                t_vals = t_vals.reshape(1, 1, n_inner, 1)
-                
-                s = start_positions[None, :, None, :]
-                e = target_positions[None, :, None, :]
-                base_points = s + t_vals * (e - s)
-                
-                X_init = np.tile(base_points, (pop_size, 1, 1, 1))
-                
-                # Dodanie szumu xy
-                noise_xy = np.random.normal(0, 10.0, (pop_size, drone_swarm_size, n_inner, 2))
-                X_init[..., :2] += noise_xy
-                
-                # Dodanie bezpiecznego korytarza dla osi Z
-                random_z = np.random.uniform(MIN_Z_ALTITUDE, max_flight_z, (pop_size, drone_swarm_size, n_inner))
-                X_init[..., 2] = random_z
-                
-                X_init = X_init.reshape(pop_size, d)
-                X_init = np.clip(X_init, bounds_min, bounds_max)
-
                 evaluator = VectorizedEvaluator(
-                    obstacles=obs_list,
+                    obstacles=obstacles_data,
                     start_pos=start_positions,
                     target_pos=target_positions,
-                    params=params
+                    n_inner_points=n_inner,
+                    params=params,
+                )
+
+                scalar_adapter = TrajectorySOOAdapter(
+                    evaluator=evaluator,
+                    start_positions=start_positions,
+                    target_positions=target_positions,
+                    n_drones=drone_swarm_size,
+                    n_inner=n_inner,
+                    weights=weights,
+                    penalty_weight=penalty_weight,
+                )
+
+                scalar_adapter._f_ref = np.maximum(scalar_adapter._f_ref, 1.0)
+
+                print(f"[SSA] F_ref (normalization scales): {scalar_adapter._f_ref}")
+
+                problem_ref = SwarmOptimizationProblem(
+                    n_drones=drone_swarm_size,
+                    n_inner_points=n_inner,
+                    world_data=world_data,
+                    evaluator=evaluator,
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    min_altitude=params.get("min_altitude"),
+                    max_altitude=params.get("max_altitude"),
+                )
+
+                xl = np.asarray(problem_ref.xl, dtype=np.float64)
+                xu = np.asarray(problem_ref.xu, dtype=np.float64)
+
+                sampling = StraightLineNoiseSampling(
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    n_inner_points=n_inner,
+                    n_drones=drone_swarm_size,
+                    noise_std=noise_std_xy,
+                    noise_std_z=noise_std_z,
+                )
+
+                starting_solutions_raw = np.asarray(sampling._do(problem_ref, pop_size), dtype=np.float64)
+                starting_solutions = [sol for sol in starting_solutions_raw]
+
+                mealpy_problem = SSAProblemAdapter(
+                    bounds=FloatVar(lb=xl, ub=xu),
+                    evaluator=evaluator,
+                    scalar_adapter=scalar_adapter,
+                    start_pos=start_positions,
+                    target_pos=target_positions,
+                    n_drones=drone_swarm_size,
+                    n_inner=n_inner,
+                    n_output_samples=number_of_waypoints,
+                    log_to="console",
+                )
+
+                print(
+                    f"[SSA B-Spline] Start. Pop: {pop_size}, Epochs: {max_generations}, "
+                    f"Control Pts: {n_inner}, Weights: {weights}, Penalty: {penalty_weight}, "
+                    f"ST: {ST}, PD: {PD}, SD: {SD}, Mode: {mode}, Workers: {n_workers}"
+                )
+
+                model = LoggedOriginalSSA(
+                    epoch=max_generations,
+                    pop_size=pop_size,
+                    ST=ST,
+                    PD=PD,
+                    SD=SD,
+                    history_writer=writer,
+                    history_problem=mealpy_problem,
                 )
 
             with _measure("optimization"):
-                # Przekazanie rozpakowanych argumentów bezpośrednio do matematycznego silnika algorytmu
-                best_genotype_flat = sparrow_search_algorithm_vectorized(
-                    X_init=X_init,
-                    bounds_min=bounds_min,
-                    bounds_max=bounds_max,
-                    iter_max=n_gen,
-                    n_drones=drone_swarm_size,
-                    n_inner=n_inner,
-                    n_out=number_of_waypoints,
-                    starts=start_positions,
-                    targets=target_positions,
-                    evaluator=evaluator,
-                    st=st,
-                    pd_ratio=pd_ratio,
-                    sd_ratio=sd_ratio,
-                    penalty_weight=penalty_weight,
-                    weights=weights,
-                    _measure=_measure
+                best_agent = model.solve(
+                    problem=mealpy_problem,
+                    mode=mode,
+                    n_workers=n_workers,
+                    starting_solutions=starting_solutions,
+                    seed=seed,
                 )
-            
+
+                best_x = mealpy_problem.amend_position(np.asarray(best_agent.solution, dtype=np.float64))
+                best_fitness = float(best_agent.target.fitness)
+
+                print(f"[SSA] Optimization Finished. Best Fitness: {best_fitness:.4f}")
+
             with _measure("decision_and_reconstruction"):
-                inner = best_genotype_flat.reshape(1, drone_swarm_size, n_inner, 3)
-                s = start_positions[None, :, None, :]
-                t = target_positions[None, :, None, :]
-                sparse = np.concatenate([s, inner, t], axis=2)
-                
-                final_traj = resample_polyline_batch(sparse, num_samples=number_of_waypoints)
-                return final_traj[0]
-            
+                inner = best_x.reshape(1, drone_swarm_size, n_inner, 3)
+                starts = start_positions[np.newaxis, :, np.newaxis, :]
+                targets = target_positions[np.newaxis, :, np.newaxis, :]
+                sparse_trajectory = np.concatenate([starts, inner, targets], axis=2)
+
+                print("[SSA] Applying B-Spline Post-Processing...")
+                final_dense_traj = generate_bspline_batch(
+                    sparse_trajectory,
+                    num_samples=number_of_waypoints,
+                )
+
+                return np.asarray(final_dense_traj[0], dtype=np.float64)
+
     except Exception as e:
-        with _measure("fallback"):
-            print(f"[SSA Strategy] Błąd optymalizacji: {e}")
-            # Fallback na trajektorię liniową
-            t_arr = np.linspace(0, 1, number_of_waypoints)
-            out = np.empty((drone_swarm_size, number_of_waypoints, 3))
-            for d_idx in range(drone_swarm_size):
-                for i in range(2):
-                    out[d_idx, :, i] = np.interp(t_arr, [0, 1], [start_positions[d_idx, i], target_positions[d_idx, i]])
-                z_s = max(start_positions[d_idx, 2], MIN_Z_ALTITUDE)
-                z_t = max(target_positions[d_idx, 2], MIN_Z_ALTITUDE)
-                out[d_idx, :, 2] = np.interp(t_arr, [0, 1], [z_s, z_t])
-            return out
-            
+        print(f"[SSA] Optimization error: {e}. Returning straight-line fallback.")
+
     finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
         if local_timing and timing is not None:
             try:
                 out_dir = HydraConfig.get().runtime.output_dir
                 timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
-            except Exception as save_err:
-                print(f"[SSA Strategy] Nie udało się zapisać logów czasowych: {save_err}")
+            except Exception:
+                pass
+
+    with _measure("fallback"):
+        print("[SSA] Fallback: generating straight-line trajectory.")
+        t_line = np.linspace(0, 1, number_of_waypoints)
+        out = np.empty((drone_swarm_size, number_of_waypoints, 3), dtype=np.float64)
+        min_safe_alt = params.get("min_safe_altitude", 1.0)
+
+        for d in range(drone_swarm_size):
+            for axis in range(2):
+                out[d, :, axis] = np.interp(
+                    t_line,
+                    [0, 1],
+                    [start_positions[d, axis], target_positions[d, axis]],
+                )
+            z_start = max(float(start_positions[d, 2]), min_safe_alt)
+            z_target = max(float(target_positions[d, 2]), min_safe_alt)
+            out[d, :, 2] = np.interp(t_line, [0, 1], [z_start, z_target])
+
+        return out

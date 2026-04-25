@@ -1,48 +1,43 @@
 """
-Single-Objective Adapter for VectorizedEvaluator.
+Generic Single-Objective Adapter for VectorizedEvaluator.
 
-Bridges the multi-objective VectorizedEvaluator (F: 3 objectives, G: 5 constraints)
-to a scalar fitness value suitable for single-objective optimizers like MSFFOAOptimizer.
+Bridges the multi-objective VectorizedEvaluator (F: objectives, G: constraints)
+to a scalar fitness value suitable for single-objective metaheuristics 
+(e.g., PSO, DE, FOA variants).
 
 Golden Rules enforced:
-  1. Objective Normalization — F is divided by F_ref (straight-line reference)
-     before weighting, so objectives operate on a dimensionless ~1.0 scale.
-  2. Weakest-Link Penalty — the worst single constraint violation (np.max)
-     defines the penalty, not the sum. One catastrophic violation cannot be
-     diluted by four clean constraints.
+1. Objective Normalization — F is divided by F_ref (straight-line reference)
+   before weighting, so objectives operate on a dimensionless ~1.0 scale.
+2. Weakest-Link Penalty — the worst single constraint violation (np.max)
+   defines the penalty, not the sum. One catastrophic violation cannot be
+   diluted by clean constraints.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Any, Dict, Optional
 
 import numpy as np
 from numpy.typing import NDArray
 
-from src.algorithms.abstraction.trajectory.objective_constrains import (
-    VectorizedEvaluator,
-)
-from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (
-    _generate_bezier_curve
-)
+# Zmiana nazwy importu zgodnie z fizyczną nazwą w projekcie
+from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
 
-if TYPE_CHECKING:
-    from src.utils.optimization_history_writer import OptimizationHistoryWriter
 
 class TrajectorySOOAdapter:
     """Converts VectorizedEvaluator outputs into a single scalar fitness.
 
     Designed as a callable: an instance can be passed directly as the
-    ``fitness_function`` argument to ``MSFFOAOptimizer``.
+    ``fitness_function`` argument to any SOO optimizer that operates on
+    inner waypoints tensors.
 
     Pipeline (per call):
-        1. Receive inner waypoints ``(Pop, D, Inner, 3)``.
-        2. Prepend start positions, append target positions.
-        3. Resample sparse polyline to dense trajectory.
-        4. Query ``VectorizedEvaluator`` -> ``F (Pop, 3)``, ``G (Pop, 5)``.
-        5. Normalize ``F`` by ``F_ref`` (Golden Rule #1).
-        6. Aggregate ``G`` via weakest-link max (Golden Rule #2).
-        7. Return ``(Pop,)`` scalar fitness.
+    1. Receive inner waypoints ``(Pop, N_drones, Inner, 3)``.
+    2. Prepend start positions, append target positions (Polyline construction).
+    3. Query ``VectorizedEvaluator`` -> ``F (Pop, M)``, ``G (Pop, K)``.
+    4. Normalize ``F`` by ``F_ref`` (Golden Rule #1).
+    5. Aggregate ``G`` via weakest-link max (Golden Rule #2).
+    6. Return ``(Pop,)`` scalar fitness.
 
     Args:
         evaluator: Pre-configured VectorizedEvaluator instance.
@@ -50,9 +45,9 @@ class TrajectorySOOAdapter:
         target_positions: (N_drones, 3) fixed target positions.
         n_drones: Number of drones.
         n_inner: Number of inner waypoints per drone.
-        n_output_samples: Dense trajectory length for evaluation.
-        weights: (3,) objective weights [w_path_length, w_collision_risk, w_elevation].
+        weights: (M,) objective weights [w_path_length, w_smoothness, w_collision_risk].
         penalty_weight: Multiplier for the weakest-link constraint penalty.
+        history_writer: Optional logger for saving generational data.
     """
 
     def __init__(
@@ -62,25 +57,28 @@ class TrajectorySOOAdapter:
         target_positions: NDArray[np.float64],
         n_drones: int,
         n_inner: int,
-        n_output_samples: int,
         weights: NDArray[np.float64],
         penalty_weight: float = 100.0,
-        history_writer: OptimizationHistoryWriter | None = None,
+        history_writer: Optional[Any] = None,
     ) -> None:
         self.evaluator = evaluator
         self.n_drones = n_drones
         self.n_inner = n_inner
-        self.n_output_samples = n_output_samples
-        self.weights = np.asarray(weights, dtype=np.float64)  # (3,)
+        self.weights = np.asarray(weights, dtype=np.float64)
         self.penalty_weight = penalty_weight
-        self._history_writer = history_writer
+        self.history_writer = history_writer
 
-        # Broadcast-ready endpoint shapes: (1, D, 1, 3)
-        self._starts_bc = start_positions[np.newaxis, :, np.newaxis, :]
-        self._targets_bc = target_positions[np.newaxis, :, np.newaxis, :]
+        # Broadcast-ready endpoint shapes: (1, N_drones, 1, 3)
+        self._starts_bc = np.asarray(start_positions, dtype=np.float64)[np.newaxis, :, np.newaxis, :]
+        self._targets_bc = np.asarray(target_positions, dtype=np.float64)[np.newaxis, :, np.newaxis, :]
 
         # Golden Rule #1: compute F_ref from a straight-line trajectory
         self._f_ref = self._compute_reference_scales()
+        
+        # State tracking for logger/optimizer access
+        self.last_objectives: NDArray[np.float64] | None = None
+        self.last_constraints: NDArray[np.float64] | None = None
+        self._debug_printed: bool = False
 
     # ------------------------------------------------------------------
     # Reference scale computation (Golden Rule #1)
@@ -89,27 +87,32 @@ class TrajectorySOOAdapter:
     def _compute_reference_scales(self) -> NDArray[np.float64]:
         """Evaluate a straight-line trajectory to obtain F_ref for normalization.
 
-        F2 (collision risk) is often zero on the straight line, so a floor of
-        1.0 is applied to prevent division by zero while keeping the raw scale
-        for objectives that lack a meaningful reference.
+        F2 (collision risk) is often zero on the straight line. A tiny epsilon
+        is applied to prevent DivisionByZero, preserving the original scale 
+        for structurally small objectives (like smoothness).
 
         Returns:
-            (3,) reference objective values, each >= 1.0.
+            (M,) reference objective values, guaranteed > 0.
         """
+        # Generate evenly spaced intermediate points along the straight line
         t_vals = np.linspace(0, 1, self.n_inner + 2)[1:-1]
         t = t_vals.reshape(1, 1, self.n_inner, 1)
 
+        # Interpolation via broadcasting
         inner_ref = self._starts_bc + t * (self._targets_bc - self._starts_bc)
+        
+        # Assemble sparse points
         sparse_ref = np.concatenate(
-            [self._starts_bc, inner_ref, self._targets_bc], axis=2,
+            [self._starts_bc, inner_ref, self._targets_bc], axis=2
         )
-        traj_ref = _generate_bezier_curve(sparse_ref, self.n_output_samples)
 
         out_ref: Dict[str, Any] = {}
-        self.evaluator.evaluate(traj_ref, out_ref)
-        f_ref = out_ref["F"][0]  # (3,)
+        self.evaluator.evaluate(sparse_ref, out_ref)
+        
+        f_ref = out_ref["F"][0]  # Take the first (and only) population element's objectives
 
-        return np.maximum(f_ref, 1.0)
+        # Use 1e-6 instead of 1.0 to avoid flattening naturally small values (e.g., smoothness)
+        return np.maximum(f_ref, 1e-6)
 
     # ------------------------------------------------------------------
     # Callable interface
@@ -126,42 +129,41 @@ class TrajectorySOOAdapter:
         """
         pop_size = inner_waypoints.shape[0]
 
-        starts = np.broadcast_to(self._starts_bc, (pop_size, self.n_drones, 1, 3)).copy()
-        targets = np.broadcast_to(self._targets_bc, (pop_size, self.n_drones, 1, 3)).copy()
-        
-        # Traktujemy wygenerowane przez MSFFOA punkty jako PUNKTY KONTROLNE
-        control_points = np.concatenate([starts, inner_waypoints, targets], axis=2)
+        # Use np.broadcast_to to create memory-efficient views without copying
+        starts = np.broadcast_to(self._starts_bc, (pop_size, self.n_drones, 1, 3))
+        targets = np.broadcast_to(self._targets_bc, (pop_size, self.n_drones, 1, 3))
 
-        # GENERUJEMY GŁADKĄ KRZYWĄ BEZIERA zamiast liniowej interpolacji
-        # Ewaluator dostanie n_output_samples punktów, które fizycznie nie mają ostrych kątów
-        trajectories = _generate_bezier_curve(control_points, self.n_output_samples)
+        # Reconstruct the full polyline (discrete waypoints)
+        trajectories = np.concatenate([starts, inner_waypoints, targets], axis=2)
 
-        # 3. Query VectorizedEvaluator
+        # Query VectorizedEvaluator
         out: Dict[str, Any] = {}
         self.evaluator.evaluate(trajectories, out)
 
-        F = out["F"]  # (Pop_size, 3)
-        G = out["G"]  # (Pop_size, 5)
+        F = out["F"]  # Objectives: (Pop_size, M)
+        G = out["G"]  # Constraints: (Pop_size, K)
 
-        # Udostępnij surowe wartości dla loggera w MSFFOAOptimizer
-        self._last_objectives = F
-        self._last_constraints = G
+        self.last_objectives = F
+        self.last_constraints = G
 
-        if self._history_writer is not None:
-            self._history_writer.put_generation_data({
-                "objectives_matrix": F.copy(),
-                "decisions_matrix": inner_waypoints.reshape(pop_size, -1).copy(),
-            })
+        # Golden Rule #1: Normalize objectives by reference scales
+        # F shapes: (Pop_size, M) / (M,) -> Broadcasts naturally
+        F_norm = F / self._f_ref
 
-        # 4. Golden Rule #1: Normalize objectives by reference scales
-        F_norm = F / self._f_ref[np.newaxis, :]  # (Pop_size, 3)
+        # Weighted objective sum (vectorized dot product)
+        # F_norm @ weights mathematically executes \sum_{i=1}^{M} w_i * F_{norm, i}
+        obj_values = F_norm @ self.weights  # Result shape: (Pop_size,)
 
-        # 5. Weighted objective sum (vectorized dot product over Pop_size)
-        obj_values = F_norm @ self.weights  # (Pop_size,)
+        # Golden Rule #2: Weakest-link penalty (max violation, not sum)
+        # pymoo standard: G <= 0 is feasible, G > 0 is a violation.
+        # np.maximum(0.0, G) clips all feasible scores to zero.
+        # np.max(..., axis=1) finds the most severe violation for each population member.
+        penalties = self.penalty_weight * np.max(np.maximum(0.0, G), axis=1)
 
-        # 6. Golden Rule #2: Weakest-link penalty (max violation, not sum)
-        penalties = self.penalty_weight * np.max(
-            np.maximum(0.0, G), axis=1,
-        )  # (Pop_size,)
+        # Optional: Print debug info only on the first pass
+        if not self._debug_printed:
+            print(f"\n[DEBUG SOO] Obj Norm (First Mem): {F_norm[0]} | Raw G: {G[0]}")
+            print(f"[DEBUG SOO] Fitness: {obj_values[0]:.4f} | Penalty: {penalties[0]:.4f}")
+            self._debug_printed = True
 
         return obj_values + penalties

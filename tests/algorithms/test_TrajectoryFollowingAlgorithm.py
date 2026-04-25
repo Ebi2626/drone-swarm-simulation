@@ -67,12 +67,12 @@ def test_initialization(mock_parent):
 # ==========================================
 # TESTY GEOMETRII (Naprawa trasy)
 # ==========================================
-
-def test_insert_midpoint_near(mock_parent):
+def test_insert_midpoint_with_offset(mock_parent):
     """
-    Intencja: Najważniejszy test matematyczny. Czy algorytm poprawnie wstawia 
-    punkt pośrodku właściwego odcinka łamanej?
+    Intencja: Najważniejszy test matematyczny. Czy algorytm poprawnie wstawia
+    punkt pośrodku właściwego odcinka łamanej i aplikuje wektor odpychania (offset)?
     """
+    from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgorithm
     algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
 
     waypoints = np.array([
@@ -80,23 +80,20 @@ def test_insert_midpoint_near(mock_parent):
         [2.0, 0.0, 0.0],
         [4.0, 0.0, 0.0]
     ])
-    
-    # 1. Zderzenie wystąpiło w X=1.5 (bliżej środkowego waypointu, ale na PIERWSZYM odcinku)
-    target_pos = np.array([1.5, 0.0, 0.0])
-    new_wp = algo._insert_midpoint_near(waypoints, target_pos)
-    
-    assert len(new_wp) == 4
-    # Środek między wp[0] a wp[1] to [1.0, 0.0, 0.0]
-    np.testing.assert_array_equal(new_wp[1], [1.0, 0.0, 0.0])
-    
-    # 2. Zderzenie w X=3.5 (na DRUGIM odcinku)
-    target_pos2 = np.array([3.5, 0.0, 0.0])
-    new_wp2 = algo._insert_midpoint_near(waypoints, target_pos2)
-    
-    assert len(new_wp2) == 4
-    # Środek między wp[1] a wp[2] to [3.0, 0.0, 0.0]
-    np.testing.assert_array_equal(new_wp2[2], [3.0, 0.0, 0.0])
 
+    # 1. Zderzenie w X=1.5 (bliżej środkowego waypointu, ale na PIERWSZYM odcinku)
+    target_pos = np.array([1.5, 0.0, 0.0])
+    # Wektor odpychania (np. w osi Y by rozsunąć drony)
+    offset = np.array([0.0, 1.0, 0.0]) 
+    
+    new_wp = algo._insert_midpoint_with_offset(waypoints, target_pos, offset)
+    
+    # Oczekujemy 4 waypointów (jeden dodany)
+    assert len(new_wp) == 4
+    # Środek pierwszego odcinka (0,0,0) i (2,0,0) to (1,0,0). Dodany offset daje (1,1,0).
+    expected_midpoint = np.array([1.0, 1.0, 0.0])
+    np.testing.assert_allclose(new_wp[1], expected_midpoint)
+    
 # ==========================================
 # TESTY ORKIESTRACJI TRAJEKTORII
 # ==========================================

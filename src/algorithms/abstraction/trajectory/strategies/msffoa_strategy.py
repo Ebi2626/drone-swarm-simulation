@@ -21,6 +21,7 @@ REFACTORING NOTE (Rygor Naukowy i Porównywalność z NSGA-III):
 - Wygładzanie: Zastąpiono dedykowany kod B-Spline wspólną funkcją generate_bspline_batch.
 """
 
+import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
@@ -54,6 +55,8 @@ from src.algorithms.abstraction.trajectory.strategies.shared.StraightLineNoiseSa
     StraightLineNoiseSampling,
 )
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
+
+logger = logging.getLogger(__name__)
 
 
 def msffoa_strategy(
@@ -104,9 +107,9 @@ def msffoa_strategy(
 
             if pop_size % n_swarms != 0:
                 pop_size = (pop_size // n_swarms) * n_swarms
-                print(f"[MSFOA] Adjusted pop_size to {pop_size} to be divisible by n_swarms ({n_swarms}).")
+                logger.info(f"[MSFOA] Adjusted pop_size to {pop_size} to be divisible by n_swarms ({n_swarms}).")
 
-            print(
+            logger.info(
                 f"[MSFOA B-Spline] Start. Pop: {pop_size}, Epochs: {max_generations}, "
                 f"Control Pts: {n_inner}, Weights: {weights}, Penalty: {penalty_weight}"
             )
@@ -142,7 +145,7 @@ def msffoa_strategy(
 
                 adapter._f_ref = np.maximum(adapter._f_ref, 1.0)
 
-                print(f"[MSFOA] F_ref (normalization scales): {adapter._f_ref}")
+                logger.info(f"[MSFOA] F_ref (normalization scales): {adapter._f_ref}")
 
                 # Dynamiczny próg (Shi et al., 2020)
                 t_vals = np.linspace(0, 1, n_inner + 2)[1:-1]
@@ -163,8 +166,8 @@ def msffoa_strategy(
                 THRESHOLD_FLOOR = 0.01
                 dynamic_threshold = max(initial_fitness * threshold_ratio, THRESHOLD_FLOOR)
 
-                print(f"[MSFOA] Initial Straight-Line Fitness: {initial_fitness:.4f}")
-                print(f"[MSFOA] Dynamic Threshold: {dynamic_threshold:.4f} (Ratio: {threshold_ratio})")
+                logger.info(f"[MSFOA] Initial Straight-Line Fitness: {initial_fitness:.4f}")
+                logger.info(f"[MSFOA] Dynamic Threshold: {dynamic_threshold:.4f} (Ratio: {threshold_ratio})")
 
                 # --- INSTANCJONOWANIE TEGO SAMEGO PROBLEMU CO NSGA-III ---
                 # Gwarantuje to identyczne limity clippingu (xl, xu)
@@ -249,14 +252,14 @@ def msffoa_strategy(
                 finally:
                     writer.close()
 
-            print(f"[MSFOA] Optimization Finished. Best Polyline Fitness: {best_fitness:.4f}")
+            logger.info(f"[MSFOA] Optimization Finished. Best Polyline Fitness: {best_fitness:.4f}")
 
             # 4. Rekonstrukcja trajektorii i wygładzanie
             with _measure("decision_and_reconstruction"):
                 sparse_trajectory = optimizer.get_best_dense_trajectory()
                 control_points_batch = sparse_trajectory[np.newaxis, ...]
                 
-                print("[MSFOA] Applying B-Spline Post-Processing...")
+                logger.info("[MSFOA] Applying B-Spline Post-Processing...")
                 final_dense_traj = generate_bspline_batch(
                     control_points_batch, num_samples=number_of_waypoints
                 )
@@ -264,7 +267,7 @@ def msffoa_strategy(
                 return final_dense_traj[0]
 
     except Exception as e:
-        print(f"[MSFOA] Optimization error: {e}. Returning straight-line fallback.")
+        logger.warning(f"[MSFOA] Optimization error: {e}. Returning straight-line fallback.")
 
     finally:
         if local_timing and timing is not None:
@@ -272,11 +275,11 @@ def msffoa_strategy(
                 out_dir = HydraConfig.get().runtime.output_dir
                 timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
             except Exception as e:
-                print(f"[MSFOA] Nie udało się zapisać logów czasowych: {e}")
+                logger.warning(f"[MSFOA] Nie udało się zapisać logów czasowych: {e}")
 
     # 5. Fallback w przypadku błędu
-    with _measure("fallback"):
-        print("[MSFOA] Fallback: generating straight-line trajectory.")
+    with _measure("fallback", success=False):
+        logger.warning("[MSFOA] Fallback: generating straight-line trajectory.")
         t_line = np.linspace(0, 1, number_of_waypoints)
         out    = np.empty((drone_swarm_size, number_of_waypoints, 3))
         min_safe_alt = params.get("min_safe_altitude", 1.0)

@@ -80,10 +80,13 @@ class ExperimentRunner:
         self.obstacle_length = cfg.environment.params.get("obstacle_length")
         self.safe_radius = cfg.environment.params.get("safe_radius")
 
-        # Ustawienia optymalizatora
-        self.number_of_waypoints = cfg.optimizer.algorithm_params.get(
-            "n_inner_waypoints", 15
-        )
+        # Liczba próbek wynikowej dense trajektorii (B-Spline po
+        # post-processingu) — NIEZALEŻNA od `n_inner_waypoints`, czyli liczby
+        # wewnętrznych węzłów kontrolnych optymalizowanych przez metaheurystykę.
+        # Wcześniej oba pola dzieliły wartość, więc kontroler dostawał ~28
+        # punktów na trajektorię ~600m → ~21 m między próbkami, za rzadko dla
+        # PID 48 Hz (patrz plan.md, Krok 4). Default 200 daje ~3 m / próbkę.
+        self.number_of_waypoints = cfg.simulation.get("dense_samples", 200)
 
     # =========================================================================
     # PRZYGOTOWANIE EKSPERYMENTU

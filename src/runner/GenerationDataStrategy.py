@@ -6,6 +6,7 @@ from configs.environment.strategies.placement_strategies import get_placement_st
 from src.environments.abstraction.generate_obstacles import generate_obstacles
 from src.environments.abstraction.generate_world_boundaries import generate_world_boundaries
 from src.runner.ExperimentDataStrategy import ExperimentDataStrategy
+from src.utils.trajectory_validator import validate_trajectories
 
 if TYPE_CHECKING:
     from main import ExperimentRunner
@@ -56,7 +57,17 @@ class GenerationDataStrategy(ExperimentDataStrategy):
         
         print(f"\n🚀 Uruchamianie obliczeń algorytmu metaheurystycznego...")
         runner.drones_trajectories = counting_protocol()
-        
+
+        # Sanity-check zaraz po wyjściu ze strategii — patologie typu
+        # „drony stojące w starcie" (plan.md, Krok 2) muszą być widoczne
+        # w stdout PRZED startem PyBullet, a nie dopiero w post-mortem ETL.
+        opt_label = str(runner.cfg.optimizer.get("_target_", "strategy")).split(".")[-1]
+        validate_trajectories(
+            runner.drones_trajectories,
+            runner.start_positions,
+            label=opt_label,
+        )
+
         # 4. Archiwizacja stanu początkowego
         if runner.logger is not None:
             runner.logger.log_chosen_trajectories(runner.drones_trajectories)

@@ -15,9 +15,52 @@ class ExperimentAnalyzer:
         
         if not self.metrics_file.exists():
             raise FileNotFoundError(f"Nie znaleziono pliku: {self.metrics_file}")
-            
+
         self.df = pd.read_parquet(self.metrics_file)
-        
+
+        # Filtrowanie po RZECZYWISTYM ruchu w PyBullet (`motion_observed`)
+        # zamiast po `data_quality_flag`. Powód: NSGA-III często wpada w
+        # gałąź `fallback` (linia prosta start→target) i dostaje
+        # `optimization_failed`, ale PyBullet ŻE TAK wykonuje tę linię —
+        # drone'y faktycznie lecą i mają sensowne `total_path_length` /
+        # `mean_inter_drone_distance`. Wyrzucanie ich z wykresów to strata
+        # ważnego pomiaru bazowego (linia prosta vs B-Spline). Patologią,
+        # którą trzeba wykluczyć, jest TYLKO `no_motion` — drone'y stoją
+        # mimo OK strategii (bug w runtime PyBullet). Surowy `self.df`
+        # zachowany do diagnostyki.
+        if "motion_observed" in self.df.columns:
+            self.df_clean = self.df[self.df["motion_observed"]].copy()
+            n_dropped = len(self.df) - len(self.df_clean)
+            if n_dropped > 0:
+                drop_breakdown = (
+                    self.df[~self.df["motion_observed"]]
+                    .groupby(["optimizer", "data_quality_flag"], observed=True)
+                    .size()
+                    .to_dict()
+                )
+                logger.warning(
+                    f"Pominięto {n_dropped}/{len(self.df)} rekordów bez "
+                    f"motion_observed: {drop_breakdown}"
+                )
+            # Dodatkowy info-log: ile zachowanych runów było w fallback
+            # (chcemy żeby user wiedział że są w wykresach mimo
+            # `optimization_failed`).
+            if "optimization_path" in self.df_clean.columns:
+                fallback_kept = (
+                    self.df_clean[self.df_clean["optimization_path"] == "fallback"]
+                    .groupby("optimizer", observed=True).size().to_dict()
+                )
+                if fallback_kept:
+                    logger.info(
+                        f"W wykresach zachowano runy z optimization_path='fallback' "
+                        f"(motion był obserwowany): {fallback_kept}"
+                    )
+        else:
+            # Wsteczna kompatybilność dla parquet zbudowanego przed dodaniem flagi.
+            logger.warning("Parquet nie zawiera kolumny 'motion_observed' — "
+                           "używam pełnego DataFrame'a bez filtracji.")
+            self.df_clean = self.df.copy()
+
         # Ustawienia stylu akademickiego dla wykresów
         sns.set_theme(style="whitegrid", context="paper")
         plt.rcParams.update({
@@ -32,9 +75,9 @@ class ExperimentAnalyzer:
         """Generuje wykres pudełkowy dla średniej długości ścieżki drona."""
         plt.figure(figsize=(10, 6))
         ax = sns.boxplot(
-            data=self.df, 
-            x='optimizer', 
-            y='mean_path_length_per_drone', 
+            data=self.df_clean,
+            x='optimizer',
+            y='mean_path_length_per_drone',
             hue='avoidance',
             palette='Set2'
         )
@@ -53,9 +96,9 @@ class ExperimentAnalyzer:
         """Generuje wykres rozproszenia roju (odległości między dronami)."""
         plt.figure(figsize=(10, 6))
         ax = sns.boxplot(
-            data=self.df, 
-            x='optimizer', 
-            y='mean_inter_drone_distance', 
+            data=self.df_clean,
+            x='optimizer',
+            y='mean_inter_drone_distance',
             hue='avoidance',
             palette='pastel'
         )
@@ -73,7 +116,7 @@ class ExperimentAnalyzer:
     def plot_planning_time(self):
         """Generuje wykres czasu planowania uniku dla różnych strategii."""
         # Filtrujemy eksperymenty, gdzie avoidance != "none"
-        df_avoidance = self.df[self.df['avoidance'] != 'none'].copy()
+        df_avoidance = self.df_clean[self.df_clean['avoidance'] != 'none'].copy()
         
         if df_avoidance.empty:
             logger.warning("Brak danych z aktywnym algorytmem uniku do narysowania czasów planowania.")

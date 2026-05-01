@@ -35,6 +35,7 @@ from src.algorithms.abstraction.trajectory.strategies.timing_utils import (
 )
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
+from src.utils.SeedRegistry import SeedRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,7 @@ def osprey_swarm_strategy(
     drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
     timing: Optional["TimingCollector"] = None,
+    seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
     
     params = algorithm_params or {}
@@ -187,7 +189,6 @@ def osprey_swarm_strategy(
             pop_size: int = int(params.get("pop_size", 200))
             max_generations: int = int(params.get("epochs", params.get("n_gen", 500)))
             n_inner: int = int(params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1))))
-            seed: int = int(params.get("seed", 42))
 
             if "objective_weights" in params:
                 weights = np.asarray(params["objective_weights"], dtype=np.float64)
@@ -260,6 +261,7 @@ def osprey_swarm_strategy(
                     n_drones=drone_swarm_size,
                     noise_std=noise_std_xy,
                     noise_std_z=noise_std_z,
+                    rng=seeds.rng("sampling")
                 )
 
                 # Konwersja do List[1D array], aby Mealpy poprawnie potraktowało każdy wektor bazowy
@@ -297,7 +299,7 @@ def osprey_swarm_strategy(
                     mode=mode,
                     n_workers=n_workers,
                     starting_solutions=starting_solutions,
-                    seed=seed,
+                    seed=seeds.seed("optimizer")
                 )
 
                 # Bezpieczne pobranie z klipowaniem

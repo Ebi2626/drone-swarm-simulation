@@ -64,6 +64,7 @@ def strategy_random_uniform(
     start_positions: Optional[np.ndarray] = None,
     target_positions: Optional[np.ndarray] = None,
     safe_radius: float = 30.0,
+    rng: np.random.Generator | int | None = None,
     *args
 ) -> np.ndarray:
     """
@@ -81,6 +82,10 @@ def strategy_random_uniform(
     Returns:
         np.ndarray: positions of obstacles (N, 3) [x, y, z]
     """
+
+    # 0. Usawienie seeda
+    rng = np.random.default_rng(rng)
+
     # 1. Agregacja i unifikacja wszystkich chronionych punktów do formatu 2D
     protected_points = []
     if start_positions is not None:
@@ -100,7 +105,7 @@ def strategy_random_uniform(
         needed = count - len(positions)
         
         # Generowanie paczki kandydatów
-        candidates = np.random.uniform(low=min_b, high=max_b, size=(needed, 3))
+        candidates = rng.uniform(low=min_b, high=max_b, size=(needed, 3))
         
         if len(protected_array) > 0:
             # Wektoryzowane obliczanie odległości euklidesowych (Broadcasting)
@@ -121,14 +126,15 @@ def strategy_random_uniform(
         
     return positions
 
-
 def strategy_grid_jitter(
     min_b: np.ndarray, 
     max_b: np.ndarray, 
     count: int,
     start_positions: Optional[np.ndarray] = None,
     target_positions: Optional[np.ndarray] = None,
-    safe_radius: float = 15.0
+    safe_radius: float = 15.0,
+    rng: np.random.Generator | int | None = None,
+
 ) -> np.ndarray:
     """
     Generates obstacles in a grid pattern preserving aspect ratio,
@@ -142,6 +148,9 @@ def strategy_grid_jitter(
         target_positions (np.ndarray, optional): Array of target points (N, 3) to protect.
         safe_radius (float): Radius around start/target where no obstacles can exist.
     """
+    # 0. Ustawienie seeda
+    rng = np.random.default_rng(rng)
+
     # 1. Obliczenie wymiarów obszaru
     lx = max_b[0] - min_b[0]
     ly = max_b[1] - min_b[1]
@@ -181,7 +190,7 @@ def strategy_grid_jitter(
     # Dzięki temu sprawdzamy rzeczywistą pozycję przeszkody, a nie idealną kratkę
     avg_block_size = (lx/nx + ly/ny) / 2
     noise_scale = avg_block_size * 0.15
-    noise = np.random.normal(0, noise_scale, candidates.shape)
+    noise = rng.normal(0, noise_scale, candidates.shape)
     noise[:, 2] = 0
     candidates += noise
     
@@ -222,7 +231,7 @@ def strategy_grid_jitter(
         # Tutaj zwracam po prostu mniej przeszkód, żeby nie tworzyć "duchów" w (0,0,0)
         return valid_candidates
         
-    indices = np.random.choice(available, count, replace=False)
+    indices = rng.choice(available, count, replace=False)
     final_positions = valid_candidates[indices]
     
     return final_positions
@@ -233,7 +242,8 @@ def strategy_empty(
     count: int,
     start_positions: Optional[NDArray[np.float64]] = None,
     target_positions: Optional[NDArray[np.float64]] = None,
-    safe_radius: float = 15.0
+    safe_radius: float = 15.0,
+    rng: np.random.Generator | int | None = None,
 ) -> NDArray[np.float64]:
     """
     Dummy strategy for an empty environment.
@@ -241,7 +251,6 @@ def strategy_empty(
     """
     # Zwraca pustą macierz o poprawnym kształcie (0 wierszy, 3 kolumny: X, Y, Z)
     return np.empty((0, 3), dtype=np.float64)
-
 
 def generate_obstacles(
     world: WorldData,
@@ -251,7 +260,8 @@ def generate_obstacles(
     size_params: SizeParams = {'height': 20.0, 'width': 5.0, 'length': 5.0},
     start_positions: np.ndarray = None,
     target_positions: np.ndarray = None,
-    safe_radius: float = 15.0
+    safe_radius: float = 15.0,
+    rng: np.random.Generator | int | None = None,
 ) -> ObstaclesData:
     """
     Generating obstacles of given type, size and amount with given strategy 
@@ -268,6 +278,9 @@ def generate_obstacles(
             data (np.ndarray): Matrix (N, 6)  conatining coordinates of obstacles and their dimensions. \n
             shape_type (str): 'CYLINDER' lub 'BOX'
     """
+    # Seeding
+    rng = np.random.default_rng(rng)
+
     # Creating copy of world boundaries to avoid modifying the original data
     spawn_min = world.min_bounds.copy()
     spawn_max = world.max_bounds.copy()
@@ -277,7 +290,7 @@ def generate_obstacles(
     spawn_max[2] = 0.0 
     
     # Counting obstacle positions with given strategy
-    positions = placement_strategy(spawn_min, spawn_max, n_obstacles, start_positions, target_positions, safe_radius)
+    positions = placement_strategy(spawn_min, spawn_max, n_obstacles, start_positions, target_positions, safe_radius, rng=rng)
     
     actual_n = positions.shape[0]
     dimensions = np.zeros((actual_n, 3), dtype=np.float64)

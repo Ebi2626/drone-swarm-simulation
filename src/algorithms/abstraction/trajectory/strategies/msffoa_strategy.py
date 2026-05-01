@@ -55,6 +55,7 @@ from src.algorithms.abstraction.trajectory.strategies.shared.StraightLineNoiseSa
     StraightLineNoiseSampling,
 )
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
+from src.utils.SeedRegistry import SeedRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,8 @@ def msffoa_strategy(
     drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
     timing: Optional["TimingCollector"] = None,
+    seeds: SeedRegistry = None,
+
 ) -> NDArray[np.float64]:
     """
     Trajectory generation via Multiple Swarm Fruit Fly Optimization Algorithm.
@@ -95,7 +98,6 @@ def msffoa_strategy(
             pop_size: int          = params.get("pop_size", 200)
             max_generations: int   = params.get("epochs", 500)
             n_inner: int           = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
-            seed: int              = params.get("seed", 42)
 
             w_list   = params.get("objective_weights", [0.05, 100.0, 0.1])
             weights  = np.array(w_list, dtype=np.float64)
@@ -130,7 +132,7 @@ def msffoa_strategy(
                     start_pos=start_positions,
                     target_pos=target_positions,
                     n_inner_points=n_inner,
-                    params=params,
+                    params=params
                 )
 
                 adapter = TrajectorySOOAdapter(
@@ -192,6 +194,7 @@ def msffoa_strategy(
                     n_drones=drone_swarm_size,
                     noise_std=noise_std_xy,
                     noise_std_z=noise_std_z,
+                    rng=seeds.rng("sampling")
                 )
 
                 # Generowanie i formatowanie zaszumionej linii z clippingiem Pymoo
@@ -233,7 +236,7 @@ def msffoa_strategy(
                     target_positions=target_positions,
                     fitness_function=adapter,
                     max_generations=max_generations,
-                    seed=seed,
+                    rng=seeds.rng("optimizer"),
                     n_swarms=n_swarms,
                     coe1=coe1,
                     coe2=coe2,

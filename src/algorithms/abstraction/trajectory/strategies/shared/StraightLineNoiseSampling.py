@@ -19,7 +19,9 @@ class StraightLineNoiseSampling(Sampling):
                  n_inner_points: int,
                  n_drones: int,
                  noise_std: float = 2.0,
-                 noise_std_z: float | None = None):
+                 noise_std_z: float | None = None,
+                 rng: np.random.Generator | int | None = None
+                ):
         """
         :param start_pos: Pozycje startowe dronów (Kształt: [n_drones, 3])
         :param target_pos: Pozycje docelowe dronów (Kształt: [n_drones, 3])
@@ -34,6 +36,7 @@ class StraightLineNoiseSampling(Sampling):
                             o zakres większy niż realna geometria lotu.
         """
         super().__init__()
+        self.rng = np.random.default_rng(rng)
         self.start = start_pos
         self.target = target_pos
         self.n_inner_points = n_inner_points
@@ -67,7 +70,7 @@ class StraightLineNoiseSampling(Sampling):
         noise_scale[..., 0] *= self.noise_std
         noise_scale[..., 1] *= self.noise_std
         noise_scale[..., 2] *= self.noise_std_z
-        noise = np.random.normal(loc=0.0, scale=1.0, size=X.shape) * noise_scale
+        noise = self.rng.normal(loc=0.0, scale=1.0, size=X.shape) * noise_scale
         X_noisy = X + noise
         
         # 4. Spłaszczenie tensora do postaci oczekiwanej przez Pymoo (n_samples, n_vars)

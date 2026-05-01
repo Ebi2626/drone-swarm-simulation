@@ -38,6 +38,7 @@ from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.decision_maker
 )
 
 from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.utils.SeedRegistry import SeedRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +156,11 @@ def nsga3_swarm_strategy(
     number_of_waypoints: int, 
     drone_swarm_size: int, 
     algorithm_params: Optional[Dict[str, Any]] = None,
-    timing: Optional["TimingCollector"] = None 
+    timing: Optional["TimingCollector"] = None,
+    seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
     
+
     # --- Konfiguracja pomiaru czasu ---
     local_timing = False
     if timing is None:
@@ -215,7 +218,7 @@ def nsga3_swarm_strategy(
                     start_pos=start_positions,
                     target_pos=target_positions,
                     n_inner_points=n_inner,
-                    params=params
+                    params=params,
                 )
 
                 problem = SwarmOptimizationProblem(
@@ -242,6 +245,7 @@ def nsga3_swarm_strategy(
                     n_drones=drone_swarm_size,
                     noise_std=noise_std_xy,
                     noise_std_z=noise_std_z,
+                    rng=seeds.rng("sampling")
                 )
                 
                 algorithm = NSGA3(
@@ -261,7 +265,7 @@ def nsga3_swarm_strategy(
                         problem,
                         algorithm,
                         termination=termination,
-                        seed=1,
+                        seed=seeds.seed("optimizer"),
                         verbose=True,
                         save_history=True,
                         callback=callback,

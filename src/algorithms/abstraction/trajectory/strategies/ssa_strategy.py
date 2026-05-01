@@ -53,6 +53,7 @@ from src.algorithms.abstraction.trajectory.strategies.timing_utils import (
 )
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
+from src.utils.SeedRegistry import SeedRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,7 @@ def ssa_swarm_strategy(
     drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
     timing: Optional["TimingCollector"] = None,
+    seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
 
     params = algorithm_params or {}
@@ -201,7 +203,6 @@ def ssa_swarm_strategy(
             pop_size: int = int(params.get("pop_size", 200))
             max_generations: int = int(params.get("epochs", params.get("n_gen", 500)))
             n_inner: int = int(params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1))))
-            seed: int = int(params.get("seed", 42))
 
             # Parametry biologiczne SSA (Xue & Shen, 2020)
             #   ST  ∈ [0.5, 1.0]  — safety threshold (default paper'owy: 0.8)
@@ -281,6 +282,7 @@ def ssa_swarm_strategy(
                     n_drones=drone_swarm_size,
                     noise_std=noise_std_xy,
                     noise_std_z=noise_std_z,
+                    rng=seeds.rng("sampling")
                 )
 
                 starting_solutions_raw = np.asarray(sampling._do(problem_ref, pop_size), dtype=np.float64)
@@ -320,7 +322,7 @@ def ssa_swarm_strategy(
                     mode=mode,
                     n_workers=n_workers,
                     starting_solutions=starting_solutions,
-                    seed=seed,
+                    seed=seeds.seed("optimizer")
                 )
 
                 best_x = mealpy_problem.amend_position(np.asarray(best_agent.solution, dtype=np.float64))

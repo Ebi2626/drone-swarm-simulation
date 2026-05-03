@@ -15,20 +15,22 @@ from src.runner.ExperimentDataStrategy import ExperimentDataStrategy
 from src.runner.GenerationDataStrategy import GenerationDataStrategy
 from src.runner.ReplayDataStrategy import ReplayDataStrategy
 
+from src.utils.SeedRegistry import SeedRegistry, bootstrap_global_seed, seed_numba
 from src.utils.input_utils import InputHandler, CommandType
 from src.utils.SimulationLogger import SimulationLogger
 from src.utils.RunRegistry import RunRegistry
 from src.utils.pybullet_utils import update_camera_position
-from src.algorithms.TrajectoryFollowingAlgorithm import TrajectoryFollowingAlgorithm
+from src.algorithms.SwarmFlightController import SwarmFlightController
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 import pybullet as p
 
 
 class ExperimentRunner:
-    def __init__(self, cfg: DictConfig, data_strategy: ExperimentDataStrategy):
+    def __init__(self, cfg: DictConfig, data_strategy: ExperimentDataStrategy, seeds=SeedRegistry):
         self.cfg = cfg
         self.data_strategy = data_strategy
+        self.seeds=seeds
 
         # Parametry symulacji i drona
         self.drone_model = cfg.simulation.get("drone_model", "CF2X")
@@ -92,7 +94,7 @@ class ExperimentRunner:
     # PRZYGOTOWANIE EKSPERYMENTU
     # =========================================================================
 
-    def prepare_experiment(self):
+    def prepare_experiment(self, seeds: SeedRegistry):
         """Przygotowuje wszystkie wymagane dane i komponenty dla symulacji."""
         if self.cfg.simulation.gui:
             self.input_handler = InputHandler(self.num_drones)
@@ -106,10 +108,11 @@ class ExperimentRunner:
                 log_freq=self.cfg.logging.log_freq,
                 ctrl_freq=self.ctrl_freq,
                 num_drones=self.num_drones,
+                log_lidar_hits=self.cfg.simulation.get("log_lidar_hits", False)
             )
 
         # Delegacja przygotowania danych (generacja lub wczytanie z CSV)
-        self.data_strategy.prepare_data(self)
+        self.data_strategy.prepare_data(self, seeds=seeds)
 
         self._init_trajectory_following_algorithm()
 
@@ -127,11 +130,16 @@ class ExperimentRunner:
 
         avoidance_algo = None
         if "avoidance" in self.cfg and self.cfg.avoidance.get("enable", False):
-            avoidance_algo = instantiate(self.cfg.avoidance)
-            print(f"[INFO] Aktywowano algorytm omijania: {avoidance_algo.name}")
+            avoidance_algo = instantiate(
+                    self.cfg.avoidance,
+                    optimizer={
+                        "rng": self.seeds.seed("avoidance")
+                    },
+                )
+            print(f"[INFO] Aktywowano algorytm omijania: {avoidance_algo.name} z seedem: {self.seeds.seed('avoidance')}")
 
         # Kontroler dla głównego roju
-        self.trajectory_controller = TrajectoryFollowingAlgorithm(
+        self.trajectory_controller = SwarmFlightController(
             parent=self,
             num_drones=self.num_drones,
             is_obstacle=False,
@@ -145,7 +153,7 @@ class ExperimentRunner:
 
         # Kontroler dla dynamicznych przeszkód (jeśli włączone w konfiguracji)
         if self.use_dynamic_obstacles:
-            self.dynamic_obstacle_trajectory_controller = TrajectoryFollowingAlgorithm(
+            self.dynamic_obstacle_trajectory_controller = SwarmFlightController(
                 parent=self,
                 num_drones=self.num_dynamic_obstacles,
                 is_obstacle=True,
@@ -190,7 +198,7 @@ class ExperimentRunner:
             pyb_freq=self.pyb_freq,
             primary_num_drones=self.num_drones,
             dynamic_obstacles_enabled=self.use_dynamic_obstacles,
-            num_dynamic_obstacles=self.num_dynamic_obstacles,
+            num_dynamic_obstacles=self.num_dynamic_obstacles
         )
 
     # =========================================================================
@@ -428,6 +436,10 @@ def _get_registry_job_key(cfg: DictConfig) -> dict | None:
 def main_generate(cfg: DictConfig):
     OmegaConf.resolve(cfg)
 
+    seeds = SeedRegistry(master_seed=int(cfg.seed))
+    bootstrap_global_seed(seeds.seed("global"))
+    seed_numba(seeds.seed("numba"))
+
     # --- RunRegistry: guard wznawiania ---
     registry = None
     job_key = None
@@ -460,8 +472,8 @@ def main_generate(cfg: DictConfig):
 
     # --- Właściwe uruchomienie eksperymentu ---
     try:
-        runner = ExperimentRunner(cfg, GenerationDataStrategy())
-        runner.prepare_experiment()
+        runner = ExperimentRunner(cfg, GenerationDataStrategy(), seeds=seeds)
+        runner.prepare_experiment(seeds=seeds)
         runner.run()
 
         if registry and job_key:
@@ -496,6 +508,9 @@ def main_replay(results_dir: str, headless: bool = False):
         sys.exit(1)
 
     cfg = OmegaConf.load(cfg_path)
+    seeds = SeedRegistry(master_seed=int(cfg.seed))
+    bootstrap_global_seed(seeds.seed("global"))
+    seed_numba(seeds.seed("numba"))
     replay_output_dir = results_path / "replay"
     replay_output_dir.mkdir(exist_ok=True)
     OmegaConf.update(cfg, "logging.enabled", False)
@@ -503,8 +518,8 @@ def main_replay(results_dir: str, headless: bool = False):
     if headless:
         OmegaConf.update(cfg, "simulation.gui", False)
 
-    runner = ExperimentRunner(cfg, ReplayDataStrategy(results_path))
-    runner.prepare_experiment()
+    runner = ExperimentRunner(cfg, ReplayDataStrategy(results_path), seeds=seeds)
+    runner.prepare_experiment(seeds=seeds)
     runner.run()
 
 

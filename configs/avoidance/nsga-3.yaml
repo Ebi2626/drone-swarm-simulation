@@ -59,7 +59,6 @@ optimizer:
                                # (n_partitions value irrelevant dla n_obj=1)
   decision_mode: "safety"      # DEPRECATED po Krok 1 (n_obj=1, scalar argmin)
   min_compute_time_s: 0.05
-  rng: 42                      # reproducibility (Krok 3 fairness)
 
 # === Pola czytane przez SwarmFlightController i EvasionContextBuilder ===
 evasion_time_min: 1.2

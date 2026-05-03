@@ -54,7 +54,6 @@ optimizer:
                                    # (paper Shi 2020 Eq. 14 wymaga ≥ 4 per swarm)
   n_swarms: 3                      # G — 3 swarms × 4 individuals = 12
   max_generations: 10000           # effectively unreachable; budget.check_or_raise() binds
-  rng: 42                          # reproducibility (Krok 3 fairness)
   coe1: 0.8                        # waga lidera w cross-swarm crossover (Eq. 14, paper Shi 2020)
   coe2: 0.2                        # waga własnej pozycji; coe1 + coe2 == 1 (paper Sec. 1)
   threshold_ratio: 0.5             # threshold_dynamic = initial_fit · ratio (separator faz globalnej/lokalnej)

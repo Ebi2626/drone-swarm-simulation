@@ -21,9 +21,6 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 from numpy.typing import NDArray
-
-# Lazy import — mealpy startup time jest niezerowy, lepiej żeby AStarowe
-# konfiguracje nie płaciły tego kosztu.
 try:
     from mealpy import FloatVar
     from mealpy import Problem as MealpyProblem

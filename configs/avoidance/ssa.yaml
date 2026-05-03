@@ -70,7 +70,6 @@ optimizer:
   epoch: 10000                 # effectively unreachable; max_time wins
   pop_size: 12                 # ujednolicone między 4 algorytmami (Krok 2 fairness 2026-05-03)
   min_compute_time_s: 0.05
-  rng: 42                      # reproducibility (Krok 3 fairness); per-run override przez Hydra CLI
   algorithm_factory:
     _target_: mealpy.swarm_based.SSA.OriginalSSA
     _partial_: true            # Hydra zwraca partial(OriginalSSA), MealpyOptimizer woła z (epoch, pop_size, **kwargs)

@@ -31,7 +31,6 @@ from numpy.typing import NDArray
 # Pymoo lazy imports — startup czas niezerowy.
 try:
     from pymoo.algorithms.moo.nsga3 import NSGA3
-    from pymoo.core.callback import Callback
     from pymoo.core.problem import Problem as PymooProblem
     from pymoo.optimize import minimize
     from pymoo.util.ref_dirs import get_reference_directions

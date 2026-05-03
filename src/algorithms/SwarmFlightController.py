@@ -1151,35 +1151,6 @@ class SwarmFlightController():
         self._last_preferred_axis[drone_id] = plan.preferred_axis
         self._flight_modes[drone_id] = self.MODE_EVASION
 
-        # === Diagnostyka: zrzut stanu trajektorii w momencie aktywacji uniku.
-        # Aktywne tylko gdy ENV var DRONE_DEBUG_DUMP_EVASION=1. NIE wpływa na produkcję.
-        try:
-            from src.utils.evasion_dump import dump_evasion_trigger, is_enabled as _dump_enabled
-            if _dump_enabled():
-                import os as _os
-                dump_evasion_trigger(
-                    output_dir=_os.getcwd(),
-                    drone_id=drone_id,
-                    current_time=current_time,
-                    base_flight_time=self._base_flight_time(drone_id, current_time),
-                    base_spline=base_spline,
-                    evasion_spline=plan.evasion_spline,
-                    drone_state=drone_kinematic,
-                    threat=threat,
-                    rejoin_point=plan.rejoin_point,
-                    rejoin_base_arc=plan.rejoin_base_arc,
-                    preferred_axis=plan.preferred_axis,
-                    search_bbox_min=context.search_space_min,
-                    search_bbox_max=context.search_space_max,
-                    astar_success=plan.astar_success,
-                    fallback_used=plan.fallback_used,
-                    planning_wall_time_s=plan.planning_wall_time_s,
-                    ttc=ttc,
-                    threat_distance=dist,
-                )
-        except Exception as _dump_exc:
-            print(f"[DEBUG] Evasion dump failed for drone {drone_id}: {_dump_exc}")
-
         if logger is not None and hasattr(logger, "log_evasion_event"):
             logger.log_evasion_event(
                 current_time=current_time,

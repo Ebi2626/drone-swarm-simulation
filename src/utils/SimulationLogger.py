@@ -47,7 +47,7 @@ _EVASION_HEADERS = [
 ]
 
 class SimulationLogger:
-    def __init__(self, output_dir, log_freq, ctrl_freq, num_drones):
+    def __init__(self, output_dir, log_freq, ctrl_freq, num_drones, log_lidar_hits: bool):
         self.output_dir = output_dir
         self.log_step_interval = max(1, int(ctrl_freq / log_freq))
         self.num_drones = num_drones
@@ -55,6 +55,7 @@ class SimulationLogger:
         self.collision_buffer = []
         self.optimization_timing_buffer: List[Dict[str, Any]] = []
         self.crashed_drones = set()
+        self.log_lidar_hits = log_lidar_hits
         
         # Nowy bufor na logi z sensorów LiDAR
         self._lidar_writer = LidarHDF5Writer(output_dir)
@@ -105,15 +106,16 @@ class SimulationLogger:
     def log_lidar_hit(self, current_time: float, drone_id: int, hit):
         """Zapisuje w buforze konkretne uderzenie promienia LiDARu."""
         # Ze względu na ogromną liczbę promieni, zaokrąglamy dla oszczędności pamięci
-        self._lidar_writer.put((
-            round(current_time, 3),
-            drone_id,
-            hit.object_id,
-            round(hit.distance, 3),
-            round(hit.hit_position[0], 3),
-            round(hit.hit_position[1], 3),
-            round(hit.hit_position[2], 3),
-        ))
+        if(self.log_lidar_hits is True):
+            self._lidar_writer.put((
+                round(current_time, 3),
+                drone_id,
+                hit.object_id,
+                round(hit.distance, 3),
+                round(hit.hit_position[0], 3),
+                round(hit.hit_position[1], 3),
+                round(hit.hit_position[2], 3),
+            ))
 
     def log_evasion_event(
         self,

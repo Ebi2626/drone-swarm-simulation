@@ -1,18 +1,18 @@
 defaults:
   - _self_
-  - environment: forest
-  - optimizer: ssa
-  - avoidance: none
+  - environment: forest # city, forest
+  - optimizer: msffoa # nsga-3, ooa, ssa, msffoa
+  - avoidance: msffoa # nsga-3, ooa, ssa, msffoa
 
 simulation:
-  duration_sec: 180
-  gui: False
-  pyb_freq: 240
-  ctrl_freq: 48
-  drone_model: "CF2X"
-  physics: "PYB"
-  sim_speed_multiplier: 10.0
-  dynamic_obstacles: False
+  duration_sec: 180 # twardy limit czasu symulacji
+  gui: True # renderowanie wizualizacji symulacji
+  pyb_freq: 240 # częstotliwość fizyki symulacji
+  ctrl_freq: 48 # częstotliwość kontrolera symulacji
+  drone_model: "CF2X" # model drona z pybullet-gym-drones
+  physics: "PYB" # silnik fizyki z pybullet-gym-drones
+  sim_speed_multiplier: 5.0 # poziom przyspieszenia renderowanej symulacji
+  dynamic_obstacles: True # dynamiczne przeszkody - wrogie drony
   collision_radius: 2.0
   # Liczba próbek wynikowej (dense) trajektorii podawanej kontrolerowi
   # `TrajectoryFollowingAlgorithm`. NIE mylić z `optimizer.algorithm_params.
@@ -20,9 +20,10 @@ simulation:
   # B-Spline (zmiennych decyzyjnych optymalizatora). Tu dostajemy gęsto
   # próbkowaną krzywą po post-processingu, żeby PID drona miał wystarczającą
   # rozdzielczość czasową (patrz plan.md, Krok 4).
-  dense_samples: 200
+  dense_samples: 200 # cześtotliwość próbkowania trajektorii B-Spline
+  log_lidar_hits: False # logowanie surowych odczytów lidaru do pliku .h5
 
-seed: 43
+seed: 42 # master-seed - 43 do naprawienia w fazie offline!
 experiment_name: "test_run"
 debug: true
 logging:

@@ -1,14 +1,81 @@
-_target_: src.algorithms.avoidance.MSFFOAAvoidance.MSFFOAAvoidance
-name: "MSFFOA Local Planner"
+# Online avoidance: MSFOA (Multiple Swarm Fruit Fly Optimization Algorithm).
+#
+# MSFOA jest CUSTOM (nie mealpy) — ma własny IPathOptimizer
+# `MSFFOAOnlineOptimizer` z cooperative `budget.check_or_raise()` w pętli
+# generacji. Architektura `GenericOptimizingAvoidance` + 4 sub-strategie
+# pozostała taka sama jak w ssa.yaml/ooa.yaml.
+#
+# Reference: Shi, Zhang & Xia (2020), "Multiple Swarm Fruit Fly Optimization
+#   Algorithm Based Path Planning Method for Multi-UAVs", Applied Sciences 10(8):2822.
+
+_target_: src.algorithms.avoidance.GenericOptimizingAvoidance.GenericOptimizingAvoidance
+name: "msffoa"
 enable: true
 
-# Parametry rojowe zoptymalizowane pod online replanning
-num_swarms: 2              # Zredukowana liczba sub-rojów (zazwyczaj 5-10 w offline)
-swarm_size: 10             # Liczba "muszek" w sub-roju
-n_iterations: 10           # Maksymalna liczba iteracji zapachu
-smell_radius: 1.5          # Zasięg eksploracji wokół punktu heurystycznego APF
+time_budget_s: 0.5
+hard_kill_factor: 1.0
 
-# Wagi oceny stężenia zapachu (Smell Concentration Judgement)
-weight_smoothness: 1.0     
-weight_energy: 0.5         
-weight_safety: 2.5         
+predictor:
+  _target_: src.algorithms.avoidance.predictors.ConstantVelocityPredictor.ConstantVelocityPredictor
+
+path_representation:
+  _target_: src.algorithms.avoidance.path.SingleArcDeflection.SingleArcDeflection
+  magnitude_min_m: 0.8
+  magnitude_max_m: 4.0
+  peak_position_min: 0.3
+  peak_position_max: 0.7
+  evasion_speed_multiplier: 0.85
+  floor_safe_margin_m: 1.0
+  ceiling_safe_margin_m: 1.0
+  min_applied_cruise_ratio: 0.4
+  axis_chooser:
+    _target_: src.algorithms.avoidance.path.AxisChooser.AxisChooser
+    w_clearance: 1.0
+    w_anti_threat: 1.0
+    w_secondary_blocking: 0.5
+    sticky_hint_threshold: 0.7
+    secondary_block_cone_deg: 20.0
+    secondary_block_range_m: 10.0
+
+fitness:
+  _target_: src.algorithms.avoidance.fitness.WeightedSumFitness.WeightedSumFitness
+  w_safety: 50.0
+  w_energy: 0.5
+  w_jerk: 0.1
+  w_symmetry: 1.0
+  safe_clearance_m: 1.5
+  n_samples: 32
+
+optimizer:
+  _target_: src.algorithms.avoidance.optimizers.MSFFOAOnlineOptimizer.MSFFOAOnlineOptimizer
+  n_inner_waypoints: 5             # legacy field; SingleArcDeflection ignoruje
+  pop_size: 12                     # ujednolicone (Krok 2 fairness 2026-05-03)
+                                   # 12 / n_swarms=3 = 4 osobników per swarm
+                                   # (paper Shi 2020 Eq. 14 wymaga ≥ 4 per swarm)
+  n_swarms: 3                      # G — 3 swarms × 4 individuals = 12
+  max_generations: 10000           # effectively unreachable; budget.check_or_raise() binds
+  rng: 42                          # reproducibility (Krok 3 fairness)
+  coe1: 0.8                        # waga lidera w cross-swarm crossover (Eq. 14, paper Shi 2020)
+  coe2: 0.2                        # waga własnej pozycji; coe1 + coe2 == 1 (paper Sec. 1)
+  threshold_ratio: 0.5             # threshold_dynamic = initial_fit · ratio (separator faz globalnej/lokalnej)
+  step_global_frac: 0.10           # 10% zakresu genów na krok eksploracji globalnej (Eq. 7)
+  step_local_frac: 0.03            # 3% zakresu genów na krok eksploitacji lokalnej (Eq. 8)
+  min_compute_time_s: 0.05         # poniżej tego budżetu zwracamy timed_out od razu
+
+# === Pola czytane przez SwarmFlightController i EvasionContextBuilder ===
+evasion_time_min: 1.2
+evasion_time_max: 3.0
+trigger_ttc: 3.5
+trigger_distance_base: 6.0
+trigger_distance_ttc_factor: 1.0
+critical_distance_base: 25.0
+critical_distance_ttc_factor: 1.5
+forward_cone_cos: 0.5
+margin_velocity_gain: 0.05
+floor_safe_margin: 1.0
+ceiling_safe_margin: 1.0
+rejoin_arc_distance_m: 8.0
+rejoin_flyby_safety_m: 3.0
+rejoin_switch_radius_m: 1.5
+blend_duration: 0.6
+no_plan_cooldown_s: 0.5

@@ -8,9 +8,12 @@ from src.trajectory.BSplineTrajectory import BSplineTrajectory
 class EvasionPlan:
     """Wynik planowania uniku: lokalny spline + informacja gdzie wracamy na bazową trasę."""
     evasion_spline: BSplineTrajectory
-    rejoin_point: np.ndarray          
-    rejoin_base_arc: float            
-    preferred_axis: str               
+    rejoin_point: np.ndarray
+    rejoin_base_arc: float
+    preferred_axis: str
+    astar_success: bool = True
+    fallback_used: bool = False
+    planning_wall_time_s: float = 0.0
 
 
 class BaseAvoidance(ABC):

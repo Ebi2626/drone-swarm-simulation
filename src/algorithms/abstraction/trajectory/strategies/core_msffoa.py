@@ -99,7 +99,7 @@ class MSFFOAOptimizer:
         target_positions: NDArray[np.float64],
         fitness_function: Callable[[NDArray[np.float64]], NDArray[np.float64]],
         max_generations: int = 500,
-        seed: int = 42,
+        rng: np.random.Generator | int | None = None,
         n_swarms: int = 5,
         coe1: float = 0.8,
         coe2: float = 0.2,
@@ -111,6 +111,8 @@ class MSFFOAOptimizer:
         timing: "TimingCollector | None" = None,
         initial_population: Optional[NDArray[np.float64]] = None,
     ) -> None:
+        self.rng = np.random.default_rng(rng)
+
         self.pop_size = pop_size
         self.n_drones = n_drones
         self.n_inner = n_inner
@@ -207,7 +209,6 @@ class MSFFOAOptimizer:
         self.step_local = self.world_size * sl_frac
 
         self._history_writer = history_writer
-        self.rng = np.random.default_rng(seed)
 
         self._local_timing = False
         if timing is None:

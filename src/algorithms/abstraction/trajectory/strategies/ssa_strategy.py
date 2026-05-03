@@ -18,6 +18,7 @@ przy porównywaniu algorytmów w pracy magisterskiej.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
@@ -52,6 +53,9 @@ from src.algorithms.abstraction.trajectory.strategies.timing_utils import (
 )
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
+from src.utils.SeedRegistry import SeedRegistry
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -160,7 +164,7 @@ class LoggedOriginalSSA(OriginalSSA):
                 }
             )
         except Exception as e:
-            print(f"[SSA] Warning: history logging failed at epoch {epoch}: {e}")
+            logger.warning(f"[SSA] Warning: history logging failed at epoch {epoch}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +181,7 @@ def ssa_swarm_strategy(
     drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
     timing: Optional["TimingCollector"] = None,
+    seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
 
     params = algorithm_params or {}
@@ -198,7 +203,6 @@ def ssa_swarm_strategy(
             pop_size: int = int(params.get("pop_size", 200))
             max_generations: int = int(params.get("epochs", params.get("n_gen", 500)))
             n_inner: int = int(params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1))))
-            seed: int = int(params.get("seed", 42))
 
             # Parametry biologiczne SSA (Xue & Shen, 2020)
             #   ST  ∈ [0.5, 1.0]  — safety threshold (default paper'owy: 0.8)
@@ -255,7 +259,7 @@ def ssa_swarm_strategy(
 
                 scalar_adapter._f_ref = np.maximum(scalar_adapter._f_ref, 1.0)
 
-                print(f"[SSA] F_ref (normalization scales): {scalar_adapter._f_ref}")
+                logger.info(f"[SSA] F_ref (normalization scales): {scalar_adapter._f_ref}")
 
                 problem_ref = SwarmOptimizationProblem(
                     n_drones=drone_swarm_size,
@@ -278,6 +282,7 @@ def ssa_swarm_strategy(
                     n_drones=drone_swarm_size,
                     noise_std=noise_std_xy,
                     noise_std_z=noise_std_z,
+                    rng=seeds.rng("sampling")
                 )
 
                 starting_solutions_raw = np.asarray(sampling._do(problem_ref, pop_size), dtype=np.float64)
@@ -295,7 +300,7 @@ def ssa_swarm_strategy(
                     log_to="console",
                 )
 
-                print(
+                logger.info(
                     f"[SSA B-Spline] Start. Pop: {pop_size}, Epochs: {max_generations}, "
                     f"Control Pts: {n_inner}, Weights: {weights}, Penalty: {penalty_weight}, "
                     f"ST: {ST}, PD: {PD}, SD: {SD}, Mode: {mode}, Workers: {n_workers}"
@@ -317,13 +322,13 @@ def ssa_swarm_strategy(
                     mode=mode,
                     n_workers=n_workers,
                     starting_solutions=starting_solutions,
-                    seed=seed,
+                    seed=seeds.seed("optimizer")
                 )
 
                 best_x = mealpy_problem.amend_position(np.asarray(best_agent.solution, dtype=np.float64))
                 best_fitness = float(best_agent.target.fitness)
 
-                print(f"[SSA] Optimization Finished. Best Fitness: {best_fitness:.4f}")
+                logger.info(f"[SSA] Optimization Finished. Best Fitness: {best_fitness:.4f}")
 
             with _measure("decision_and_reconstruction"):
                 inner = best_x.reshape(1, drone_swarm_size, n_inner, 3)
@@ -331,7 +336,7 @@ def ssa_swarm_strategy(
                 targets = target_positions[np.newaxis, :, np.newaxis, :]
                 sparse_trajectory = np.concatenate([starts, inner, targets], axis=2)
 
-                print("[SSA] Applying B-Spline Post-Processing...")
+                logger.info("[SSA] Applying B-Spline Post-Processing...")
                 final_dense_traj = generate_bspline_batch(
                     sparse_trajectory,
                     num_samples=number_of_waypoints,
@@ -340,7 +345,7 @@ def ssa_swarm_strategy(
                 return np.asarray(final_dense_traj[0], dtype=np.float64)
 
     except Exception as e:
-        print(f"[SSA] Optimization error: {e}. Returning straight-line fallback.")
+        logger.warning(f"[SSA] Optimization error: {e}. Returning straight-line fallback.")
 
     finally:
         if writer is not None:
@@ -355,8 +360,8 @@ def ssa_swarm_strategy(
             except Exception:
                 pass
 
-    with _measure("fallback"):
-        print("[SSA] Fallback: generating straight-line trajectory.")
+    with _measure("fallback", success=False):
+        logger.warning("[SSA] Fallback: generating straight-line trajectory.")
         t_line = np.linspace(0, 1, number_of_waypoints)
         out = np.empty((drone_swarm_size, number_of_waypoints, 3), dtype=np.float64)
         min_safe_alt = params.get("min_safe_altitude", 1.0)

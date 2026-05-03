@@ -6,15 +6,16 @@ from configs.environment.strategies.placement_strategies import get_placement_st
 from src.environments.abstraction.generate_obstacles import generate_obstacles
 from src.environments.abstraction.generate_world_boundaries import generate_world_boundaries
 from src.runner.ExperimentDataStrategy import ExperimentDataStrategy
+from src.utils.trajectory_validator import validate_trajectories
+from src.utils.SeedRegistry import SeedRegistry
 
 if TYPE_CHECKING:
     from main import ExperimentRunner
 
 
 class GenerationDataStrategy(ExperimentDataStrategy):
-    def prepare_data(self, runner: "ExperimentRunner"):
+    def prepare_data(self, runner: "ExperimentRunner", seeds: SeedRegistry):
         print("[INFO] Generowanie nowego środowiska i optymalizacja trajektorii (Offline Path-Planning)...")
-        
         # 1. Generowanie granic świata
         runner.world_data = generate_world_boundaries(
             width=runner.track_width, 
@@ -37,7 +38,8 @@ class GenerationDataStrategy(ExperimentDataStrategy):
                 },
                 start_positions=runner.start_positions,
                 target_positions=runner.end_positions,
-                safe_radius=runner.safe_radius
+                safe_radius=runner.safe_radius,
+                rng=seeds.rng("environment")
             )
         
         # 3. Zgodnie z oryginałem - wstrzykujemy DOKŁADNIE 6 argumentów do strategii.
@@ -51,12 +53,23 @@ class GenerationDataStrategy(ExperimentDataStrategy):
             obstacles_data=runner.obstacles_data,
             world_data=runner.world_data,
             number_of_waypoints=runner.number_of_waypoints,
-            drone_swarm_size=runner.num_drones
+            drone_swarm_size=runner.num_drones,
+            seeds=seeds
         )
         
         print(f"\n🚀 Uruchamianie obliczeń algorytmu metaheurystycznego...")
         runner.drones_trajectories = counting_protocol()
-        
+
+        # Sanity-check zaraz po wyjściu ze strategii — patologie typu
+        # „drony stojące w starcie" (plan.md, Krok 2) muszą być widoczne
+        # w stdout PRZED startem PyBullet, a nie dopiero w post-mortem ETL.
+        opt_label = str(runner.cfg.optimizer.get("_target_", "strategy")).split(".")[-1]
+        validate_trajectories(
+            runner.drones_trajectories,
+            runner.start_positions,
+            label=opt_label,
+        )
+
         # 4. Archiwizacja stanu początkowego
         if runner.logger is not None:
             runner.logger.log_chosen_trajectories(runner.drones_trajectories)

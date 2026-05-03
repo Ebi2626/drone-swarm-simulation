@@ -61,19 +61,27 @@ class TimingCollector:
     def measure(
         self,
         stage_name: str,
+        success: bool = True,
     ) -> Generator[None, None, None]:
         """Context manager that times the enclosed block.
 
-        On normal exit ``success=True``; if an exception propagates,
-        ``success=False`` — the exception is **not** suppressed.
+        On normal exit ``success`` is taken from the explicit argument
+        (default ``True``); if an exception propagates, ``success=False``
+        regardless of the argument and the exception is **not** suppressed.
+
+        Use ``success=False`` to mark *expected* unhappy-path stages such
+        as fallback branches — those run cleanly (no exception) yet must
+        not be treated as a successful optimization in downstream ETL.
 
         Args:
             stage_name: Label for the measured stage (e.g. ``"optimization"``).
+            success: Outcome flag for normal exit. Pass ``False`` for
+                fallback / known-failure stages.
         """
         ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         wall_start = time.perf_counter()
         cpu_start = time.process_time()
-        ok = True
+        ok = success
         try:
             yield
         except BaseException:

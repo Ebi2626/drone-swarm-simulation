@@ -1,16 +1,78 @@
-_target_: src.algorithms.avoidance.OOAAvoidance.OOAAvoidance
-name: "OOA Local Planner"
+# Online avoidance: OOA (Osprey Optimization Algorithm) z mealpy.
+#
+# Identyczna struktura co ssa.yaml — różnica TYLKO w sekcji `optimizer`
+# (factory + algorithm_kwargs). MealpyOptimizer jest wymienialny przez
+# `algorithm_factory` zgodnie z założeniem Fazy 2 (jeden adapter dla
+# wszystkich mealpy-based heuristics).
+#
+# Reference: Dehghani & Trojovský (2023), "Osprey optimization algorithm:
+#   A new bio-inspired metaheuristic algorithm for solving engineering
+#   optimization problems", Frontiers in Mechanical Engineering.
+
+_target_: src.algorithms.avoidance.GenericOptimizingAvoidance.GenericOptimizingAvoidance
+name: "ooa"
 enable: true
 
-# Parametry populacyjne
-pop_size: 15               # Populacja
-n_iterations: 8            # Iteracje dopasowane do time-constraint
+time_budget_s: 0.5
+hard_kill_factor: 1.0
 
-# Balans fazy eksploracji do eksploatacji (w online chcemy więcej eksploatacji lokalnej z APF)
-exploration_ratio: 0.2     # Ułamek iteracji poświęcony na 1 fazę (Position Identification)
-exploitation_ratio: 0.8    # Ułamek iteracji poświęcony na 2 fazę (Carrying the Fish - wygładzanie)
+predictor:
+  _target_: src.algorithms.avoidance.predictors.ConstantVelocityPredictor.ConstantVelocityPredictor
 
-# Wagi kary ewolucyjnej (Fitness)
-weight_smoothness: 1.0     
-weight_energy: 0.5         
-weight_safety: 2.5         
+path_representation:
+  _target_: src.algorithms.avoidance.path.SingleArcDeflection.SingleArcDeflection
+  magnitude_min_m: 0.8
+  magnitude_max_m: 4.0
+  peak_position_min: 0.3
+  peak_position_max: 0.7
+  evasion_speed_multiplier: 0.85
+  floor_safe_margin_m: 1.0
+  ceiling_safe_margin_m: 1.0
+  min_applied_cruise_ratio: 0.4
+  axis_chooser:
+    _target_: src.algorithms.avoidance.path.AxisChooser.AxisChooser
+    w_clearance: 1.0
+    w_anti_threat: 1.0
+    w_secondary_blocking: 0.5
+    sticky_hint_threshold: 0.7
+    secondary_block_cone_deg: 20.0
+    secondary_block_range_m: 10.0
+
+fitness:
+  _target_: src.algorithms.avoidance.fitness.WeightedSumFitness.WeightedSumFitness
+  w_safety: 50.0
+  w_energy: 0.5
+  w_jerk: 0.1
+  w_symmetry: 1.0
+  safe_clearance_m: 1.5
+  n_samples: 32
+
+optimizer:
+  _target_: src.algorithms.avoidance.optimizers.MealpyOptimizer.MealpyOptimizer
+  n_inner_waypoints: 5         # legacy field; SingleArcDeflection ignoruje
+  epoch: 10000                 # effectively unreachable; max_time binds
+  pop_size: 12                 # ujednolicone (Krok 2 fairness 2026-05-03)
+  min_compute_time_s: 0.05
+  rng: 42                      # reproducibility (Krok 3 fairness)
+  algorithm_factory:
+    _target_: mealpy.swarm_based.OOA.OriginalOOA
+    _partial_: true
+  algorithm_kwargs: {}            # OOA nie ma parametrów algo-specific (poza epoch/pop_size)
+
+# === Pola czytane przez SwarmFlightController i EvasionContextBuilder ===
+evasion_time_min: 1.2
+evasion_time_max: 3.0
+trigger_ttc: 3.5
+trigger_distance_base: 6.0
+trigger_distance_ttc_factor: 1.0
+critical_distance_base: 25.0
+critical_distance_ttc_factor: 1.5
+forward_cone_cos: 0.5
+margin_velocity_gain: 0.05
+floor_safe_margin: 1.0
+ceiling_safe_margin: 1.0
+rejoin_arc_distance_m: 8.0
+rejoin_flyby_safety_m: 3.0
+rejoin_switch_radius_m: 1.5
+blend_duration: 0.6
+no_plan_cooldown_s: 0.5

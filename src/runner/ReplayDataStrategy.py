@@ -7,6 +7,8 @@ from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.runner.ExperimentDataStrategy import ExperimentDataStrategy
 from typing import TYPE_CHECKING
 
+from src.utils.SeedRegistry import SeedRegistry
+
 if TYPE_CHECKING:
     from main import ExperimentRunner
 
@@ -91,7 +93,7 @@ class ReplayDataStrategy(ExperimentDataStrategy):
             
         return trajectories
 
-    def prepare_data(self, runner: "ExperimentRunner"):
+    def prepare_data(self, runner: "ExperimentRunner", seeds: SeedRegistry):
         print(f"[INFO] Odtwarzanie eksperymentu z archiwum: {self.results_path}")
         
         # 1. Rekonstrukcja WorldData (Granice Świata)

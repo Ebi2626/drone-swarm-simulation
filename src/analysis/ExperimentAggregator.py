@@ -145,13 +145,24 @@ class ExperimentAggregator:
         total_opt_wall = np.nan
         total_opt_cpu = np.nan
         optimization_success = False
-        
+        optimization_path = "unknown"
+
         if not timings.empty and "stage_name" in timings.columns:
             total_opt = timings[timings["stage_name"] == "total_optimization"]
             if not total_opt.empty:
                 total_opt_wall = float(total_opt["wall_time_s"].iloc[0])
                 total_opt_cpu = float(total_opt["cpu_time_s"].iloc[0])
                 optimization_success = bool(timings["success"].astype(str).eq("True").all())
+
+            # Ścieżka kodowa: fallback faza obecna ⇒ strategia poszła w gałąź awaryjną
+            stages = set(timings["stage_name"].astype(str))
+            if "fallback" in stages:
+                optimization_path = "fallback"
+            elif "decision_and_reconstruction" in stages:
+                optimization_path = "success"
+            else:
+                # Brak obu faz końcowych — strategia wybuchła przed nimi
+                optimization_path = "error"
 
         # --- Evasion events metrics ---
         # Obsługa różnych modeli algorytmów uniku w tym `avoidance="none"`
@@ -193,6 +204,20 @@ class ExperimentAggregator:
 
         lidar_metrics = self._extract_lidar_metrics(p_lidar)
 
+        # Motion check: PyBullet faktycznie poruszył dronami (próg 1m wyklucza
+        # drobne dryfy hover'a). Niezależne od optimization_success — strategia
+        # może skończyć "OK", a runtime symulacji być patologiczny (i odwrotnie:
+        # NSGA-III fallback zwraca prostą linię, którą PyBullet potrafi wykonać).
+        motion_observed = bool(total_path_length > 1.0)
+
+        # Pojedyncza flaga jakości danych do analizy. Priorytet: failed > no_motion > ok.
+        if not optimization_success:
+            data_quality_flag = "optimization_failed"
+        elif not motion_observed:
+            data_quality_flag = "no_motion"
+        else:
+            data_quality_flag = "ok"
+
         row = {
             **meta,
             "collision_count": int(len(collisions)),
@@ -200,6 +225,9 @@ class ExperimentAggregator:
             "optimization_wall_time_s": total_opt_wall,
             "optimization_cpu_time_s": total_opt_cpu,
             "optimization_success": optimization_success,
+            "optimization_path": optimization_path,
+            "motion_observed": motion_observed,
+            "data_quality_flag": data_quality_flag,
             "mission_end_time_s": mission_end_time,
             "drone_count": drone_count,
             "trajectory_samples": int(len(traj)),
@@ -238,7 +266,7 @@ class ExperimentAggregator:
 
         df = pd.DataFrame(rows)
         
-        for col in ["optimizer", "environment", "avoidance"]:
+        for col in ["optimizer", "environment", "avoidance", "optimization_path", "data_quality_flag"]:
             if col in df.columns:
                 df[col] = df[col].astype("category")
                 

@@ -24,7 +24,7 @@ def process_optimizers(optimizers_list: list, exp_id: str, configs_dir: Path) ->
     target_optimizer_dir = source_optimizer_dir / "tmp"
     target_optimizer_dir.mkdir(parents=True, exist_ok=True)
     
-    for opt in optimizers_list:
+    for idx, opt in enumerate(optimizers_list):
         if isinstance(opt, str):
             processed_names.append(opt)
         elif isinstance(opt, dict) and "name" in opt:
@@ -66,7 +66,7 @@ def process_optimizers(optimizers_list: list, exp_id: str, configs_dir: Path) ->
             proxy_content.update(merged_content)
             
             # KROK 4: Zapis pliku proxy do podkatalogu tmp
-            proxy_name = f"{exp_id}_{base_name}"
+            proxy_name = f"{exp_id}_{base_name}_{idx}"
             proxy_file = target_optimizer_dir / f"{proxy_name}.yaml"
             with open(proxy_file, "w", encoding="utf-8") as f:
                 f.write(f"# WYGENEROWANO AUTOMATYCZNIE - PROXY DLA {exp_id}\n")
@@ -125,8 +125,14 @@ hydra:
     dir: results/${{experiment_meta.id}}
     subdir: ${{hydra:runtime.choices.optimizer}}_${{hydra:runtime.choices.environment}}_${{hydra:runtime.choices.avoidance}}_seed${{seed}}  
   launcher:
+    # UWAGA: launcher Hydra-Joblib jest tutaj zachowany dla wstecznej
+    # kompatybilności (np. ad-hoc multirun przez `python main.py -m`).
+    # ALE pełny eksperyment idzie przez `experiments/run_subprocess.py`
+    # (uruchamiane przez `./run.sh`), bo Hydra-multirun + joblib akumuluje
+    # globalny stan PyBullet między uruchomieniami w tym samym procesie
+    # Python — patologia "drony stoją" (plan.md, Krok 5c, H1'').
     n_jobs: 6
-    backend: multiprocessing
+    backend: loky
     prefer: processes
   sweeper:
     params:
@@ -195,19 +201,69 @@ def main():
                  len(definition.get("parameters_grid", {}).get("environments", [])) * \
                  len(definition.get("parameters_grid", {}).get("avoidances", []))
 
-    optimizers   = ["msffoa", "ssa", "ooa", "nsga-3"]
-    environments = ["forest", "urban"]
-    avoidances   = ["astar", "none"]
-    seeds        = list(range(1, 101))
+    # --- Sweep params dla RunRegistry: generowane DOKŁADNIE z definicji
+    # eksperymentu YAML, nie z hardcoded list. Liczba wpisów PENDING musi się
+    # zgadzać z liczbą Hydra-multirun jobów, inaczej `mark_started/completed`
+    # (UPDATE w RunRegistry) trafią w nieistniejące wiersze i registry pozostanie
+    # niespójny z parquet-em. Patrz plan.md, Krok 6 — bug z 0 wpisami w
+    # results/exp_20260426_b9b56922_complex_test/registry.db.
+    grid = definition.get("parameters_grid", {})
+    runs = int(definition.get("runs_per_configuration", 1))
+
+    # Bazowe nazwy optymalizatorów (string lub dict-with-name) — spójne
+    # ze sposobem, w jaki main.py:_get_registry_job_key ekstraktuje krótką
+    # nazwę z `cfg.optimizer._target_`. Proxy override'y (`tmp/{exp_id}_X_N`)
+    # dzielą bazową nazwę i nie są rozróżniane przez registry — dla wariantów
+    # tego samego algorytmu z różnymi overrides obecnie współdzielimy wpis
+    # (znane ograniczenie do rozwiązania w przyszłym kroku).
+    base_optimizer_names: list[str] = []
+    for o in raw_optimizers:
+        if isinstance(o, str):
+            base_optimizer_names.append(o)
+        elif isinstance(o, dict) and "name" in o:
+            base_optimizer_names.append(o["name"])
+        else:
+            raise ValueError(f"Nieprawidłowa definicja optymalizatora: {o}")
+
+    unique_optimizers = list(dict.fromkeys(base_optimizer_names))
+    if len(unique_optimizers) != len(base_optimizer_names):
+        print(
+            f"⚠ Wykryto powtarzające się bazowe nazwy optymalizatorów: "
+            f"{base_optimizer_names} — registry użyje unikatów {unique_optimizers}. "
+            f"Warianty z overrides współdzielą wpisy."
+        )
+
+    env_names = list(grid.get("environments", []))
+    avoid_names = list(grid.get("avoidances", []))
+    seed_values = list(range(1, runs + 1))
 
     sweep_params = [
         {"optimizer": o, "environment": e, "avoidance": a, "seed": s}
-        for o, e, a, s in product(optimizers, environments, avoidances, seeds)
-    ]  # = dokładnie 1600 wpisów
+        for o, e, a, s in product(unique_optimizers, env_names, avoid_names, seed_values)
+    ]
+
+    if not sweep_params:
+        raise ValueError(
+            "Pusty sweep — `parameters_grid` w YAML nie definiuje żadnej "
+            "kombinacji (optimizer × environment × avoidance × seed)."
+        )
 
     registry = RunRegistry(f"results/{exp_id}/registry.db")
     registry.populate(sweep_params)
-    print(f"Registry initialized: {registry.get_summary()}")
+    summary = registry.get_summary()
+    print(
+        f"Registry initialized: {summary} "
+        f"({len(sweep_params)} entries planned)"
+    )
+
+    # Sanity check: po populate liczba PENDING musi się zgadzać z planem.
+    pending_in_db = summary.get("PENDING", 0)
+    if pending_in_db != len(sweep_params):
+        print(
+            f"⚠ Registry niespójny: PENDING={pending_in_db} ≠ "
+            f"sweep_params={len(sweep_params)}. Sprawdź czy baza nie zawiera "
+            f"starych wpisów z innego eksperymentu."
+        )
 
     print("✅ Pomyślnie wygenerowano plik konfiguracji!")
     print(f"ID eksperymentu: {exp_id}")

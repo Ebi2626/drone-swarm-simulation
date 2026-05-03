@@ -5,6 +5,7 @@ Wersja B-Spline Control Polygon - optymalizator ewaluuje węzły kontrolne krzyw
 co gwarantuje 100% bezpieczeństwo wygładzonej trajektorii.
 """
 
+import logging
 import os
 from typing import Any, Dict, Optional
 
@@ -14,9 +15,9 @@ from numpy.typing import NDArray
 # Pymoo imports
 from pymoo.core.callback import Callback
 from pymoo.core.problem import Problem
-from pymoo.core.termination import Termination
 from pymoo.algorithms.moo.nsga3 import NSGA3
 from pymoo.optimize import minimize
+from pymoo.termination import get_termination
 from pymoo.util.ref_dirs import get_reference_directions
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
@@ -37,23 +38,9 @@ from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.decision_maker
 )
 
 from src.environments.abstraction.generate_world_boundaries import WorldData
+from src.utils.SeedRegistry import SeedRegistry
 
-
-class MultiConditionTermination(Termination):
-    def __init__(self, n_max_gen, min_feasible_needed):
-        super().__init__()
-        self.n_max_gen = n_max_gen
-        self.min_feasible_needed = min_feasible_needed
-
-    def _update(self, algorithm):
-        n_gen = algorithm.n_iter
-        feasible_mask = algorithm.pop.get("feasible")
-        n_feasible = np.sum(feasible_mask) if feasible_mask is not None else 0
-
-        gen_progress = n_gen / self.n_max_gen
-        feasible_progress = n_feasible / self.min_feasible_needed if self.min_feasible_needed > 0 else 0
-        
-        return max(gen_progress, feasible_progress)
+logger = logging.getLogger(__name__)
 
 
 # --- Klasa Problemu Pymoo ---
@@ -105,8 +92,8 @@ class SwarmOptimizationProblem(Problem):
         xl_one_point[2] = eff_min_z
         xu_one_point[2] = eff_max_z
 
-        print(f"[Problem B-Spline] Zmienne: {n_var}, Granice X: {xl_one_point[0]:.1f} - {xu_one_point[0]:.1f}")
-        print(f"[Problem B-Spline] Granice Z: {xl_one_point[2]:.2f} - {xu_one_point[2]:.2f} "
+        logger.info(f"[Problem B-Spline] Zmienne: {n_var}, Granice X: {xl_one_point[0]:.1f} - {xu_one_point[0]:.1f}")
+        logger.info(f"[Problem B-Spline] Granice Z: {xl_one_point[2]:.2f} - {xu_one_point[2]:.2f} "
               f"(endpoint Z range: [{min_endpoint_z:.2f}, {max_endpoint_z:.2f}])")
 
         # Powielamy granice
@@ -169,9 +156,11 @@ def nsga3_swarm_strategy(
     number_of_waypoints: int, 
     drone_swarm_size: int, 
     algorithm_params: Optional[Dict[str, Any]] = None,
-    timing: Optional["TimingCollector"] = None 
+    timing: Optional["TimingCollector"] = None,
+    seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
     
+
     # --- Konfiguracja pomiaru czasu ---
     local_timing = False
     if timing is None:
@@ -196,15 +185,18 @@ def nsga3_swarm_strategy(
             eta_m = params.get("eta_m", 20)
             crossover_prob = params.get("crossover_prob", 0.9)
             mutation_prob = params.get("mutation_prob", 0.1)
-            min_ideal_solutions = params.get("min_ideal_solutions", 30)
-            
+
             n_inner = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
             decision_mode = params.get("decision_mode", "knee_point")
 
-            termination = MultiConditionTermination(
-                n_max_gen=n_gen, 
-                min_feasible_needed=min_ideal_solutions
-            )
+            # Jednolita pula obliczeniowa: NSGA-III wykonuje dokładnie `n_gen`
+            # generacji niezależnie od liczby feasible solutions, tak jak mealpy
+            # SSA/OOA i MSFFOA wykonują dokładnie `epoch`/`max_generations`.
+            # Dawniej `MultiConditionTermination` przerywała wcześniej, gdy
+            # znaleziono `min_ideal_solutions` feasible — to powodowało
+            # niesprawiedliwe porównanie metaheurystyk i `res.X is None`
+            # w pymoo (patrz plan.md, Krok 3).
+            termination = get_termination("n_gen", n_gen)
                         
             # 2. NSGA-III Setup
             n_partitions = calculate_n_partitions(pop_size, n_obj=3)
@@ -217,7 +209,7 @@ def nsga3_swarm_strategy(
                 output_dir=os.path.join(output_dir, "optimization_history")
             )
 
-            print(f"[NSGA-III B-Spline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Control Pts: {n_inner}")
+            logger.info(f"[NSGA-III B-Spline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Control Pts: {n_inner}")
 
             # 3. Inicjalizacja
             with _measure("initialization"):
@@ -226,7 +218,7 @@ def nsga3_swarm_strategy(
                     start_pos=start_positions,
                     target_pos=target_positions,
                     n_inner_points=n_inner,
-                    params=params
+                    params=params,
                 )
 
                 problem = SwarmOptimizationProblem(
@@ -253,6 +245,7 @@ def nsga3_swarm_strategy(
                     n_drones=drone_swarm_size,
                     noise_std=noise_std_xy,
                     noise_std_z=noise_std_z,
+                    rng=seeds.rng("sampling")
                 )
                 
                 algorithm = NSGA3(
@@ -272,7 +265,7 @@ def nsga3_swarm_strategy(
                         problem,
                         algorithm,
                         termination=termination,
-                        seed=1,
+                        seed=seeds.seed("optimizer"),
                         verbose=True,
                         save_history=True,
                         callback=callback,
@@ -306,15 +299,15 @@ def nsga3_swarm_strategy(
                         # Przekształcenie węzłów kontrolnych w ciągłą i gładką trajektorię
                         final_traj = generate_bspline_batch(best_control_points, num_samples=number_of_waypoints)
                         
-                        print(f"[NSGA-III] Wybrano rozwiązanie indeks: {best_idx}")
+                        logger.info(f"[NSGA-III] Wybrano rozwiązanie indeks: {best_idx}")
                         return final_traj[0]
                     except Exception as e:
-                        print(f"[NSGA-III] Błąd podczas wyboru rozwiązania: {e}")
+                        logger.warning(f"[NSGA-III] Błąd podczas wyboru rozwiązania: {e}")
                         raise LookupError("Results not found")
                 
             else:
-                with _measure("fallback"):
-                    print("[NSGA-III] Brak rozwiązań. Zwracam linię prostą.")
+                with _measure("fallback", success=False):
+                    logger.warning("[NSGA-III] Brak rozwiązań. Zwracam linię prostą.")
                     t_vals = np.linspace(0, 1, number_of_waypoints)
                     out = np.empty((drone_swarm_size, number_of_waypoints, 3))
 
@@ -336,4 +329,4 @@ def nsga3_swarm_strategy(
                 out_dir = HydraConfig.get().runtime.output_dir
                 timing.save_csv(os.path.join(out_dir, "optimization_timings.csv"))
             except Exception as e:
-                print(f"[NSGA-III] Nie udało się zapisać logów czasowych: {e}")
+                logger.warning(f"[NSGA-III] Nie udało się zapisać logów czasowych: {e}")

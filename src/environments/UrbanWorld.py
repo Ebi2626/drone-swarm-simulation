@@ -57,7 +57,7 @@ class UrbanWorld(SwarmBaseWorld):
     # ------------------------------------------------------------------ #
 
     def _create_building(self, obstacle: np.ndarray) -> None:
-        shade = np.random.uniform(0.6, 0.9)
+        shade = np.random.uniform(0.6, 0.9) # Zmienna losowa niekontorlowana seedem - to tylko kolor
         x, y, z = obstacle[0], obstacle[1], obstacle[2]
         length, width, height = obstacle[3], obstacle[4], obstacle[5]
         base_z = z + height / 2

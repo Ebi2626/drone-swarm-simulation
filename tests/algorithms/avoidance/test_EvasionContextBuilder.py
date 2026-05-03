@@ -7,11 +7,11 @@ from src.algorithms.avoidance.ThreatAnalyzer.ThreatAnalyzer import KinematicStat
 
 @pytest.fixture
 def base_spline_mock():
-    """Mock bazowego splinu dla symulacji środowiska B-Spline."""
+    """Mock bazowego splinu — flat API NumbaTrajectoryProfile (no nested .profile)."""
     mock_spline = MagicMock()
     mock_spline.arc_length = 100.0
-    mock_spline.profile.cruise_speed = 8.0
-    mock_spline.profile.max_accel = 2.0
+    mock_spline.cruise_speed = 8.0
+    mock_spline.max_accel = 2.0
     return mock_spline
 
 @pytest.fixture
@@ -59,10 +59,13 @@ def test_build_dynamic_search_space_includes_velocity_obstacle(mock_splev, drone
     
     # t_max = 3.0 sekundy; wyłączamy adaptacyjny bufor (gain=0) by test sprawdzał
     # czystą geometrię VO niezależnie od skalowania do |rel_vel| (Faza 2.5 planu).
+    # `lateral_max_offset_m=0` wyłącza nowy cap (Bug #2 Krok 3c) — ten test
+    # weryfikuje przed-capowy bbox VO; cap jest pokryty osobnym testem.
     builder = EvasionContextBuilder(
         t_min=1.0, t_max=3.0,
         floor_margin=0.0, ceiling_margin=0.0,
         margin_velocity_gain=0.0,
+        lateral_max_offset_m=0.0,
     )
 
     context = builder.build(
@@ -140,6 +143,115 @@ def test_evaluate_collision_risk(mock_splev, drone_state, base_spline_mock, env_
     
     # Powinno wynieść równe 5.0m
     assert risk_distance_safe == pytest.approx(5.0)
+
+@patch("src.algorithms.avoidance.EvasionContextBuilder.splev")
+def test_lateral_max_offset_m_caps_search_bbox(mock_splev, drone_state, base_spline_mock, env_bounds):
+    """Krok 3c (Bug #2): `lateral_max_offset_m` ogranicza lateralne rozszerzenie BBOX-u
+    przez VO/obs_future. Bez capa BBOX rośnie z `obs_pos + obs_vel * t_max`,
+    AStar wybiera waypointy odlegające o dziesiątki metrów → ostre zakrzywienia.
+    """
+    mock_splev.side_effect = [
+        np.array([20.0, 0.0, 5.0]),
+        np.array([1.0, 0.0, 0.0]),
+    ]
+
+    obs_state = KinematicState(
+        position=np.array([15.0, 0.0, 5.0]),
+        velocity=np.array([0.0, 10.0, 0.0]),  # przeszkoda leci wzdłuż Y
+        radius=0.5,
+    )
+    threat = ThreatAlert(
+        obstacle_state=obs_state,
+        distance=15.0,
+        time_to_collision=1.5,
+        relative_velocity=np.array([10.0, -10.0, 0.0]),
+    )
+
+    # Drone leci wzdłuż X (forward_xy ≈ [1,0,0] → lateral_xy ≈ [0,1,0]),
+    # więc cap powinien clamp'ować Y BBOX-u (axis dominujący lateralu = 1).
+    builder = EvasionContextBuilder(
+        t_min=1.0, t_max=3.0,
+        floor_margin=0.0, ceiling_margin=0.0,
+        margin_velocity_gain=0.0,
+        lateral_max_offset_m=5.0,
+    )
+
+    context = builder.build(
+        drone_id=1,
+        current_time=10.0,
+        drone_state=drone_state,
+        threat=threat,
+        base_spline=base_spline_mock,
+        base_arc_progress=5.0,
+        env_bounds=env_bounds,
+    )
+
+    # Drone Y = 0.0, cap 5.0 → BBOX Y nie może przekroczyć ±5.0 od drona.
+    # (Z drobnym marginesem +1m na re-inkluzję rejoin/drone — patrz `keep_pt`.)
+    assert context.search_space_max[1] <= 5.0 + 1e-6, (
+        f"cap nie zadziałał: bbox_max[1]={context.search_space_max[1]:.2f}"
+    )
+    assert context.search_space_min[1] >= -5.0 - 1e-6, (
+        f"cap nie zadziałał: bbox_min[1]={context.search_space_min[1]:.2f}"
+    )
+    # Forward (X) NIE jest cap'owany — rejoin point musi być osiągalny.
+    assert context.search_space_max[0] >= 20.0
+
+
+@patch("src.algorithms.avoidance.EvasionContextBuilder.splev")
+def test_build_with_real_numba_trajectory_profile(mock_splev, drone_state, env_bounds):
+    """Regresja (2026-04-29): builder.build() musi czytać `cruise_speed` z NumbaTrajectoryProfile
+    bezpośrednio (atrybut top-level), a NIE z nieistniejącego `.profile.cruise_speed`.
+
+    Pre-fix crashował z `AttributeError: 'NumbaTrajectoryProfile' object has no attribute 'profile'`
+    gdy LIDAR wykrył pierwszą dynamiczną przeszkodę (stack: main.py:318 → compute_actions
+    → _run_lidar_and_detect → _maybe_trigger_evasion → builder.build → linia 165).
+    """
+    from src.algorithms.abstraction.trajectory.strategies.shared.NumbaTrajectoryProfile import (
+        NumbaTrajectoryProfile,
+    )
+
+    mock_splev.side_effect = [
+        np.array([20.0, 0.0, 5.0]),
+        np.array([1.0, 0.0, 0.0]),
+    ]
+
+    real_profile = NumbaTrajectoryProfile(
+        waypoints=np.array([[0.0, 0.0, 5.0], [25.0, 0.0, 5.0]], dtype=np.float64),
+        cruise_speed=8.0,
+        max_accel=2.0,
+    )
+    # Builder pyta o `arc_length` w `_sample_base_at_arc` → mock by uniknąć splev fixturowania.
+    real_profile.arc_length = float(real_profile.total_distance)
+
+    obs_state = KinematicState(
+        position=np.array([15.0, 0.0, 5.0]),
+        velocity=np.array([0.0, 5.0, 0.0]),
+        radius=0.5,
+    )
+    threat = ThreatAlert(
+        obstacle_state=obs_state,
+        distance=15.0,
+        time_to_collision=2.0,
+        relative_velocity=np.array([10.0, -5.0, 0.0]),
+    )
+
+    builder = EvasionContextBuilder(t_min=1.0, t_max=3.0, margin_velocity_gain=0.0)
+
+    # Nie powinno crashować na AttributeError.
+    context = builder.build(
+        drone_id=0,
+        current_time=10.0,
+        drone_state=drone_state,
+        threat=threat,
+        base_spline=real_profile,
+        base_arc_progress=0.0,
+        env_bounds=env_bounds,
+    )
+
+    assert context is not None
+    assert context.search_space_max[0] >= 20.0
+
 
 @patch("src.algorithms.avoidance.EvasionContextBuilder.splev")
 def test_static_methods_without_spline_mock(mock_splev):

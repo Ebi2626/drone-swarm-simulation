@@ -9,7 +9,6 @@ algorithm_params:
   n_gen: 200
   n_inner_waypoints: 11
 
-  min_ideal_solutions: 100
   crossover_prob: 0.90
   mutation_prob: 0.4
   eta_c: 4 # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja

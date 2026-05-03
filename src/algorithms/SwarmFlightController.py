@@ -1,6 +1,5 @@
 import numpy as np
 from src.algorithms.abstraction.trajectory.strategies.shared.NumbaTrajectoryProfile import NumbaTrajectoryProfile
-from src.algorithms.BaseAlgorithm import BaseAlgorithm
 
 # POPRAWKA: Wszystkie zunifikowane struktury pobieramy z BaseAvoidance
 from src.algorithms.avoidance.EvasionContextBuilder import EvasionContextBuilder
@@ -13,7 +12,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 from .numba_optimizers import check_collisions_njit, calculate_repulsion_njit
 
-class TrajectoryFollowingAlgorithm(BaseAlgorithm):
+class SwarmFlightController():
     _debug_file = open("drone_debug.log", "w")
 
     MODE_TRACKING = 0
@@ -21,10 +20,12 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
     MODE_REJOIN_BLEND = 2  # Faza 3.2: mostek EVASION→TRACKING (mieszanie komend PID)
 
     def __init__(self, parent, num_drones, is_obstacle: bool, avoidance_algorithm=None, params=None):
-        super().__init__(parent, num_drones, params)
         self._trajectory_start_times = np.zeros(num_drones)
         self.is_obstacle = is_obstacle
         self.avoidance_algorithm = avoidance_algorithm
+        self.parent = parent
+        self.num_drones = num_drones
+        self.params = params or {}
 
         self.controllers = [
             DSLPIDControl(drone_model=DroneModel.CF2X)
@@ -46,15 +47,19 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         # Minimalne okno realizacji poprzedniego planu — nawet przy imminent
         # (ttc < cooldown/2) nie replanujemy częściej niż co `min_dt`. Bez tego
         # throttla w korytarzu z wieloma przeszkodami oracle skakał między
-        # celami co 20 ms, PID nie nadążał wykonać żadnego z kolejnych planów,
-        # dron stał na z≈2 m i wchodził w przeszkodę.
-        # Wartość 0.7 s ≈ 50% typowej długości planu (rejoin 8 m / 6 m/s ≈ 1.3 s):
-        # dron zdąży wykonać znaczącą część manewru (np. wznieść się dla axis=up)
-        # zanim kolejny A* ponownie zrestartuje trajektorię. W scenariuszach
-        # gdzie NIE oczekujemy nowych zagrożeń w trakcie trwającego uniku
-        # (np. deterministyczny swarm z ustaloną topologią), wyższy throttle
-        # jest bezpieczniejszy niż reaktywność.
-        self._imminent_replan_min_dt = float(self.params.get("imminent_replan_min_dt", 0.7))
+        # celami co 20 ms, PID nie nadążał wykonać żadnego z kolejnych planów.
+        # Wartość 1.5 s ≈ pełna długość typowego planu uniku po skróceniu
+        # `evasion_time_max` z 6→3 s (Bug #2 plan, Krok 3a). Plan ma realnie
+        # zdążyć skończyć (BLEND→TRACKING) zanim go wymienimy. Dla scenariuszy
+        # z dużą dynamiką zagrożeń tłumimy replan dodatkowym kryterium
+        # `_lateral_progress_min_m` (patrz `_maybe_trigger_evasion`).
+        self._imminent_replan_min_dt = float(self.params.get("imminent_replan_min_dt", 1.5))
+        # Próg lateralnego odjazdu drona od trasy bazowej — jeśli dron już
+        # zdążył odlecieć od bazy o ≥ ten próg [m] dzięki bieżącemu planowi,
+        # tłumimy `imminent` re-trigger (plan działa, nie zaorajmy go).
+        # Bypass: high_divergence (zagrożenie ewidentnie inne niż przewidywane)
+        # i new_obstacle (oracle wskazał inny obiekt) zawsze przepuszczają.
+        self._lateral_progress_min_m = float(self.params.get("lateral_progress_min_m", 1.0))
         self._last_threat_positions: list[np.ndarray | None] = [None] * num_drones
         self._last_threat_velocities: list[np.ndarray | None] = [None] * num_drones
         self._last_threat_times: list[float | None] = [None] * num_drones
@@ -67,6 +72,18 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         # co zapobiega flip-floppingowi up↔right↔left, gdy oracle przełącza cel
         # między przeszkodami w tym samym korytarzu. Resetowane przy końcu BLEND.
         self._last_preferred_axis: list[str | None] = [None] * num_drones
+        # Re-trigger cooldown po `compute_evasion_plan → None` (refactor 2026-05-02
+        # Single-Arc Deflection): bez tego drone re-triggeruje co tick (~10 ms),
+        # każdy trigger trwa do 1 s — symulacja staje się non-realtime. Cooldown
+        # daje drone'owi prosty oddech zanim spróbuje znowu. Czytamy z
+        # avoidance.params (yaml configs/avoidance/*.yaml `no_plan_cooldown_s`).
+        _av_params_cooldown = (
+            self.avoidance_algorithm.params if self.avoidance_algorithm is not None else {}
+        )
+        self._no_plan_cooldown_s = float(
+            _av_params_cooldown.get("no_plan_cooldown_s", 0.5)
+        )
+        self._no_plan_until: np.ndarray = np.zeros(num_drones, dtype=np.float64)
         self._rejoin_base_arcs = np.zeros(num_drones)
         self._rejoin_points: list[np.ndarray | None] = [None] * num_drones
         # Bazowy czas startu (po hover lub po rejoin) — używany do tracking
@@ -469,37 +486,55 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             return 0.0
         spline = self._base_trajectories[drone_id]
         flight_time = self._base_flight_time(drone_id, current_time)
-        dist, _ = spline.profile.get_state(flight_time)
-        return float(dist)
+        return self._arc_at_time(spline, flight_time)
+
+    @staticmethod
+    def _arc_at_time(spline: NumbaTrajectoryProfile, t: float) -> float:
+        # Analityczna pozycja po krzywej (skalar) wg trapezoidalnego profilu prędkości.
+        # NumbaTrajectoryProfile eksponuje get_state_at_time() zwracające (pos, vel) jako
+        # wektory 3D — tu potrzebujemy tylko skalarnego "arc" (dystans wzdłuż trasy).
+        if t <= 0.0:
+            return 0.0
+        if t >= spline.total_duration:
+            return float(spline.total_distance)
+        if t < spline.ta:
+            return float(0.5 * spline.max_accel * t * t)
+        if t < spline.ta + spline.tc:
+            return float(spline.sa + spline.v_peak * (t - spline.ta))
+        t_dec = t - spline.ta - spline.tc
+        return float(
+            spline.sa + spline.sc
+            + spline.v_peak * t_dec
+            - 0.5 * spline.max_accel * t_dec * t_dec
+        )
 
     @staticmethod
     def _invert_profile_arc_to_time(spline: NumbaTrajectoryProfile, target_arc: float) -> float:
-        profile = spline.profile
         if target_arc <= 0.0:
             return 0.0
-        if target_arc >= profile.total_distance:
-            return profile.total_duration
+        if target_arc >= spline.total_distance:
+            return float(spline.total_duration)
 
-        if target_arc <= profile.s_a:
-            if profile.max_accel > 1e-6:
-                return float(np.sqrt(2.0 * target_arc / profile.max_accel))
+        if target_arc <= spline.sa:
+            if spline.max_accel > 1e-6:
+                return float(np.sqrt(2.0 * target_arc / spline.max_accel))
             return 0.0
 
-        s_end_cruise = profile.s_a + profile.s_c
+        s_end_cruise = spline.sa + spline.sc
         if target_arc <= s_end_cruise:
-            if profile.v_peak > 1e-6:
-                return float(profile.t_a + (target_arc - profile.s_a) / profile.v_peak)
-            return profile.t_a
+            if spline.v_peak > 1e-6:
+                return float(spline.ta + (target_arc - spline.sa) / spline.v_peak)
+            return float(spline.ta)
 
         remaining = target_arc - s_end_cruise
-        a = profile.max_accel
-        v = profile.v_peak
+        a = spline.max_accel
+        v = spline.v_peak
         if a < 1e-6:
-            return profile.t_a + profile.t_c
+            return float(spline.ta + spline.tc)
         disc = v * v - 2.0 * a * remaining
         disc = max(0.0, disc)
         dt = (v - np.sqrt(disc)) / a
-        return float(profile.t_a + profile.t_c + dt)
+        return float(spline.ta + spline.tc + dt)
 
     # =========================================================================
     # Główna pętla
@@ -795,6 +830,7 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
                 threat=threat,
                 current_time=current_time,
                 env_bounds=self._resolve_env_xy_bounds(env, env_floor_z, env_ceiling_z),
+                all_drone_states=current_states,
             )
 
     def _maybe_trigger_evasion(
@@ -804,7 +840,37 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         threat: dict,
         current_time: float,
         env_bounds: tuple[np.ndarray, np.ndarray],
+        all_drone_states: list | None = None,
     ) -> None:
+        # No-plan cooldown (refactor 2026-05-02): drone w cooldown po niedawnym
+        # `compute_evasion_plan → None` — silent skip żeby nie spamować
+        # optymalizatora 100×/s tym samym infeasible problemem. Krok 5 fairness
+        # (2026-05-03): logujemy `event_type="cooldown_skip"` dla analizy w pracy
+        # — algorytmy z większą liczbą no_plan dostają więcej skipów (bias).
+        if (
+            self._flight_modes[drone_id] == self.MODE_TRACKING
+            and current_time < float(self._no_plan_until[drone_id])
+        ):
+            logger = getattr(self.parent, "logger", None)
+            if logger is not None and hasattr(logger, "log_evasion_event"):
+                try:
+                    logger.log_evasion_event(
+                        current_time=current_time,
+                        drone_id=drone_id,
+                        event_type="cooldown_skip",
+                        mode=int(self._flight_modes[drone_id]),
+                        ttc=float("nan"),
+                        dist_to_threat=float("nan"),
+                        threat_pos=np.asarray(threat["position"], dtype=np.float64),
+                        threat_vel=np.asarray(
+                            threat.get("velocity", np.zeros(3)), dtype=np.float64
+                        ),
+                        notes=f"cooldown until {float(self._no_plan_until[drone_id]):.3f}s",
+                    )
+                except Exception:
+                    pass  # log best-effort; nie blokujemy unikania
+            return
+
         current_pos = np.asarray(drone_state[0:3], dtype=np.float64)
         current_vel = np.asarray(drone_state[10:13], dtype=np.float64)
         obs_vel = threat.get("velocity", np.zeros(3, dtype=np.float64))
@@ -892,6 +958,20 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             imminent = np.isfinite(ttc) and ttc < (self._evasion_cooldown / 2.0)
             if not (high_divergence or imminent or new_obstacle):
                 return  # bieżący plan powinien obsłużyć to zagrożenie
+
+            # Lateral progress check: jeśli bieżący plan już odsunął drona od
+            # trasy bazowej o ≥ `_lateral_progress_min_m`, tłumimy replan na
+            # bazie samego `imminent` — plan działa, nie zaorajmy go w trakcie.
+            # Bypass: high_divergence (zagrożenie radykalnie inne niż przewidywane)
+            # i new_obstacle (oracle wskazał inny cel) zawsze przepuszczają.
+            if imminent and not (high_divergence or new_obstacle):
+                base_pos_now, _ = self._base_trajectories[drone_id].get_state_at_time(
+                    self._base_flight_time(drone_id, current_time)
+                )
+                lateral_disp = float(np.linalg.norm(current_pos - np.asarray(base_pos_now)))
+                if lateral_disp >= self._lateral_progress_min_m:
+                    return  # bieżący plan już efektywnie wymanewrowuje drona
+
             # Zawsze wymagamy minimum okna realizacji planu, niezależnie od
             # powodu replanowania. Bez tego throttla przy wielu przeszkodach
             # oracle skakał między celami i PID nie nadążał wykonać żadnego
@@ -944,12 +1024,15 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         t_min = float(self.avoidance_algorithm.params.get("evasion_time_min", 2.0))
         t_max = float(self.avoidance_algorithm.params.get("evasion_time_max", 4.0))
         # Faza 2.5: pad bbox adaptacyjny do |rel_vel|. Pobierany z configu A*
-        # by obie struktury (margin_multiplier w AStar i pad w Context) używały
+        # by obie struktury (pad w Context) używały
         # tej samej stałej — spójność buforów.
         margin_gain = float(self.avoidance_algorithm.params.get("margin_velocity_gain", 0.05))
         rejoin_arc_m = float(self.avoidance_algorithm.params.get("rejoin_arc_distance_m", 8.0))
         rejoin_flyby_safety_m = float(
             self.avoidance_algorithm.params.get("rejoin_flyby_safety_m", 3.0)
+        )
+        lateral_max_offset_m = float(
+            self.avoidance_algorithm.params.get("lateral_max_offset_m", 8.0)
         )
         builder = EvasionContextBuilder(
             t_min=t_min,
@@ -957,6 +1040,7 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             rejoin_arc_m=rejoin_arc_m,
             margin_velocity_gain=margin_gain,
             rejoin_flyby_safety_m=rejoin_flyby_safety_m,
+            lateral_max_offset_m=lateral_max_offset_m,
         )
         
         # Sticky axis: w trybie EVASION/BLEND przekazujemy oś z poprzedniego planu
@@ -968,6 +1052,60 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             else None
         )
 
+        # Sequential cooperative planning (2026-05-01): zbierz pozostałe drony
+        # (≠ drone_id) jako secondary_threats z DOKŁADNĄ TRAJEKTORIĄ (base spline
+        # w MODE_TRACKING, evasion spline w MODE_EVASION/REJOIN_BLEND). Bo pętla
+        # `_run_lidar_and_detect` przetwarza drony sekwencyjnie 0..N, drony
+        # planujące się POŹNIEJ w tym samym ticku widzą NOWO ZBUDOWANE evasion
+        # plany wcześniejszych dronów (sequential coordination prioritized
+        # planning a la Erdmann & Lozano-Pérez 1987, Van den Berg & Overmars 2005).
+        # Filtrujemy do max 30 m promienia (w 3s window dalsze i tak nie kolidują).
+        secondary_threats: list[ThreatAlert] = []
+        if all_drone_states is not None and len(all_drone_states) > 1:
+            primary_obs_pos = np.asarray(threat["position"], dtype=np.float64)
+            for j, st in enumerate(all_drone_states):
+                if j == drone_id:
+                    continue
+                other_pos = np.asarray(st[0:3], dtype=np.float64)
+                # Pomijamy drony bardzo blisko primary threat (są albo same primary,
+                # albo wyrównane z nim na lidarze i już uwzględnione).
+                if np.linalg.norm(other_pos - primary_obs_pos) < 1.5:
+                    continue
+                rel_d = float(np.linalg.norm(other_pos - current_pos))
+                if rel_d > 30.0:
+                    continue
+                other_vel = np.asarray(st[10:13], dtype=np.float64)
+
+                # Determine drone j's active trajectory + offset on it.
+                # Priorytet: evasion spline (jeśli aktywne) → base spline → linear.
+                j_traj: object | None = None
+                j_offset: float = 0.0
+                j_mode = self._flight_modes[j]
+                if (
+                    j_mode in (self.MODE_EVASION, self.MODE_REJOIN_BLEND)
+                    and self._evasion_trajectories[j] is not None
+                ):
+                    j_traj = self._evasion_trajectories[j]
+                    j_offset = float(current_time - self._evasion_start_times[j])
+                elif self._base_trajectories is not None:
+                    j_traj = self._base_trajectories[j]
+                    j_offset = float(current_time - self._tracking_start_times[j])
+
+                secondary_threats.append(
+                    ThreatAlert(
+                        obstacle_state=KinematicState(
+                            position=other_pos,
+                            velocity=other_vel,
+                            radius=self.collision_radius,
+                        ),
+                        distance=rel_d,
+                        time_to_collision=float("inf"),
+                        relative_velocity=current_vel - other_vel,
+                        trajectory=j_traj,
+                        trajectory_start_offset=j_offset,
+                    )
+                )
+
         context = builder.build(
             drone_id=drone_id,
             current_time=current_time,
@@ -977,11 +1115,15 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
             base_arc_progress=base_arc,
             env_bounds=env_bounds,
             preferred_axis_hint=axis_hint,
+            secondary_threats=secondary_threats,
         )
 
         plan = self.avoidance_algorithm.compute_evasion_plan(context)
 
         if plan is None:
+            # Cooldown: nie próbuj znowu przez `_no_plan_cooldown_s` sekund.
+            # Zapobiega re-trigger storm gdy geometria jest aktualnie infeasible.
+            self._no_plan_until[drone_id] = current_time + self._no_plan_cooldown_s
             print(f"[WARN] Plan uniku nie powstał dla drona {drone_id} — pozostajemy w TRACKING")
             if logger is not None and hasattr(logger, "log_evasion_event"):
                 logger.log_evasion_event(
@@ -993,7 +1135,7 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
                     dist_to_threat=float(dist),
                     threat_pos=np.asarray(threat["position"], dtype=np.float64),
                     threat_vel=np.asarray(obs_vel, dtype=np.float64),
-                    notes="compute_evasion_plan returned None",
+                    notes=f"compute_evasion_plan returned None; cooldown {self._no_plan_cooldown_s}s",
                 )
             return
 
@@ -1008,6 +1150,35 @@ class TrajectoryFollowingAlgorithm(BaseAlgorithm):
         self._last_threat_obs_idx[drone_id] = int(obs_idx_value) if obs_idx_value is not None else None
         self._last_preferred_axis[drone_id] = plan.preferred_axis
         self._flight_modes[drone_id] = self.MODE_EVASION
+
+        # === Diagnostyka: zrzut stanu trajektorii w momencie aktywacji uniku.
+        # Aktywne tylko gdy ENV var DRONE_DEBUG_DUMP_EVASION=1. NIE wpływa na produkcję.
+        try:
+            from src.utils.evasion_dump import dump_evasion_trigger, is_enabled as _dump_enabled
+            if _dump_enabled():
+                import os as _os
+                dump_evasion_trigger(
+                    output_dir=_os.getcwd(),
+                    drone_id=drone_id,
+                    current_time=current_time,
+                    base_flight_time=self._base_flight_time(drone_id, current_time),
+                    base_spline=base_spline,
+                    evasion_spline=plan.evasion_spline,
+                    drone_state=drone_kinematic,
+                    threat=threat,
+                    rejoin_point=plan.rejoin_point,
+                    rejoin_base_arc=plan.rejoin_base_arc,
+                    preferred_axis=plan.preferred_axis,
+                    search_bbox_min=context.search_space_min,
+                    search_bbox_max=context.search_space_max,
+                    astar_success=plan.astar_success,
+                    fallback_used=plan.fallback_used,
+                    planning_wall_time_s=plan.planning_wall_time_s,
+                    ttc=ttc,
+                    threat_distance=dist,
+                )
+        except Exception as _dump_exc:
+            print(f"[DEBUG] Evasion dump failed for drone {drone_id}: {_dump_exc}")
 
         if logger is not None and hasattr(logger, "log_evasion_event"):
             logger.log_evasion_event(

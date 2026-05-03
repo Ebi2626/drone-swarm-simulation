@@ -10,6 +10,7 @@ import numpy as np
 from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.environments.obstacles.ObstacleShape import ObstacleShape
+from src.utils.lidar_log_writer import LidarHDF5Writer
 
 _TIMING_HEADERS = [
     "run_id",
@@ -26,8 +27,27 @@ _TIMING_HEADERS = [
     "created_at_utc",
 ]
 
+_EVASION_HEADERS = [
+    "time",
+    "drone_id",
+    "event_type",
+    "mode",
+    "ttc",
+    "dist_to_threat",
+    "threat_x", "threat_y", "threat_z",
+    "threat_vx", "threat_vy", "threat_vz",
+    "rejoin_x", "rejoin_y", "rejoin_z",
+    "rejoin_arc",
+    "astar_success",
+    "fallback_used",
+    "pos_error_at_rejoin",
+    "vel_error_at_rejoin",
+    "planning_wall_time_s",
+    "notes",
+]
+
 class SimulationLogger:
-    def __init__(self, output_dir, log_freq, ctrl_freq, num_drones):
+    def __init__(self, output_dir, log_freq, ctrl_freq, num_drones, log_lidar_hits: bool):
         self.output_dir = output_dir
         self.log_step_interval = max(1, int(ctrl_freq / log_freq))
         self.num_drones = num_drones
@@ -35,10 +55,15 @@ class SimulationLogger:
         self.collision_buffer = []
         self.optimization_timing_buffer: List[Dict[str, Any]] = []
         self.crashed_drones = set()
+        self.log_lidar_hits = log_lidar_hits
         
         # Nowy bufor na logi z sensorów LiDAR
-        self.lidar_buffer = []
-        
+        self._lidar_writer = LidarHDF5Writer(output_dir)
+
+        # Bufor dla diagnostyki uniku (Faza 0 planu). Rekordy są słownikami,
+        # zapisywane jako CSV z _EVASION_HEADERS w save().
+        self.evasion_buffer: List[Dict[str, Any]] = []
+
         print("[LOGGER] Buffering in RAM. Writing to disk after completion.")
 
     def log_step(self, step_idx, current_time, all_states):
@@ -81,15 +106,69 @@ class SimulationLogger:
     def log_lidar_hit(self, current_time: float, drone_id: int, hit):
         """Zapisuje w buforze konkretne uderzenie promienia LiDARu."""
         # Ze względu na ogromną liczbę promieni, zaokrąglamy dla oszczędności pamięci
-        self.lidar_buffer.append((
-            round(current_time, 3),
-            drone_id,
-            hit.object_id,
-            round(hit.distance, 3),
-            round(hit.hit_position[0], 3),
-            round(hit.hit_position[1], 3),
-            round(hit.hit_position[2], 3)
-        ))
+        if(self.log_lidar_hits is True):
+            self._lidar_writer.put((
+                round(current_time, 3),
+                drone_id,
+                hit.object_id,
+                round(hit.distance, 3),
+                round(hit.hit_position[0], 3),
+                round(hit.hit_position[1], 3),
+                round(hit.hit_position[2], 3),
+            ))
+
+    def log_evasion_event(
+        self,
+        *,
+        current_time: float,
+        drone_id: int,
+        event_type: str,
+        mode: int = -1,
+        ttc: float = float("nan"),
+        dist_to_threat: float = float("nan"),
+        threat_pos: Optional[NDArray] = None,
+        threat_vel: Optional[NDArray] = None,
+        rejoin_point: Optional[NDArray] = None,
+        rejoin_arc: float = float("nan"),
+        astar_success: Optional[bool] = None,
+        fallback_used: Optional[bool] = None,
+        pos_error_at_rejoin: float = float("nan"),
+        vel_error_at_rejoin: float = float("nan"),
+        planning_wall_time_s: float = float("nan"),
+        notes: str = "",
+    ) -> None:
+        """
+        Rekord diagnostyczny fazy uniku — pozwala mierzyć opóźnienie triggera,
+        skuteczność A*, błędy pozycji/prędkości przy rejoin. Fields mogą być
+        NaN jeśli nieznane w danym zdarzeniu.
+        """
+        def _xyz(v: Optional[NDArray]) -> tuple:
+            if v is None:
+                return (float("nan"), float("nan"), float("nan"))
+            return (float(v[0]), float(v[1]), float(v[2]))
+
+        tx, ty, tz = _xyz(threat_pos)
+        tvx, tvy, tvz = _xyz(threat_vel)
+        rx, ry, rz = _xyz(rejoin_point)
+
+        self.evasion_buffer.append({
+            "time": round(current_time, 3),
+            "drone_id": drone_id,
+            "event_type": event_type,
+            "mode": mode,
+            "ttc": ttc,
+            "dist_to_threat": dist_to_threat,
+            "threat_x": tx, "threat_y": ty, "threat_z": tz,
+            "threat_vx": tvx, "threat_vy": tvy, "threat_vz": tvz,
+            "rejoin_x": rx, "rejoin_y": ry, "rejoin_z": rz,
+            "rejoin_arc": rejoin_arc,
+            "astar_success": astar_success if astar_success is not None else "",
+            "fallback_used": fallback_used if fallback_used is not None else "",
+            "pos_error_at_rejoin": pos_error_at_rejoin,
+            "vel_error_at_rejoin": vel_error_at_rejoin,
+            "planning_wall_time_s": planning_wall_time_s,
+            "notes": notes,
+        })
 
     def _trajectory_to_dataframe(self, trajectory: NDArray) -> pd.DataFrame:
         n_drones, n_waypoints, _ = trajectory.shape
@@ -191,17 +270,15 @@ class SimulationLogger:
                 writer.writerows(self.collision_buffer)
             print(f"[LOGGER] Collisions saved: collisions.csv ({len(self.collision_buffer)} events)")
             self.collision_buffer.clear()
-            
-        # --- ZAPIS DANYCH Z LIDARU ---
-        if self.lidar_buffer:
-            path = os.path.join(self.output_dir, "lidar_hits.csv")
-            headers = ["time", "drone_id", "object_id", "distance", "hit_x", "hit_y", "hit_z"]
+
+        if self.evasion_buffer:
+            path = os.path.join(self.output_dir, "evasion_events.csv")
             with open(path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(headers)
-                writer.writerows(self.lidar_buffer)
-            print(f"[LOGGER] Lidar hits saved: lidar_hits.csv ({len(self.lidar_buffer)} events)")
-            self.lidar_buffer.clear()
+                writer = csv.DictWriter(f, fieldnames=_EVASION_HEADERS)
+                writer.writeheader()
+                writer.writerows(self.evasion_buffer)
+            print(f"[LOGGER] Evasion events saved: evasion_events.csv ({len(self.evasion_buffer)} events)")
+            self.evasion_buffer.clear()
 
         if self.optimization_timing_buffer:
             path = os.path.join(self.output_dir, "optimization_timings.csv")

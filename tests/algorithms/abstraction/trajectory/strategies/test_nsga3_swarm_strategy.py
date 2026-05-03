@@ -2,12 +2,10 @@ import numpy as np
 from unittest.mock import patch, MagicMock
 import pytest
 
-from src.environments.obstacles.ObstacleShape import ObstacleShape
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
     nsga3_swarm_strategy,
     SwarmOptimizationProblem,
-    calculate_n_partitions,
-    MultiConditionTermination
+    calculate_n_partitions
 )
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy"

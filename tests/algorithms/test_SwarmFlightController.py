@@ -3,9 +3,9 @@ import numpy as np
 from unittest.mock import patch, MagicMock
 import importlib
 
-TARGET_MODULE = "src.algorithms.TrajectoryFollowingAlgorithm"
+TARGET_MODULE = "src.algorithms.SwarmFlightController"
 AlgorithmModule = importlib.import_module(TARGET_MODULE)
-TrajectoryFollowingAlgorithm = AlgorithmModule.TrajectoryFollowingAlgorithm
+SwarmFlightController = AlgorithmModule.SwarmFlightController
 
 # ==========================================
 # FIXTURES
@@ -50,7 +50,7 @@ def test_initialization(mock_parent):
         "cruise_speed": 10.0
     }
     
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False, params=params)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False, params=params)
 
     assert algo._ctrl_timestep == 1.0 / 100
     assert algo.hover_duration == 5.0
@@ -64,7 +64,7 @@ def test_initialization(mock_parent):
 
 def test_insert_midpoint_with_offset(mock_parent):
     """Weryfikuje poprawność matematyczną wstawiania wektora offsetu w środek najbliższego segmentu."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
+    algo = SwarmFlightController(mock_parent, num_drones=1, is_obstacle=False)
 
     waypoints = np.array([
         [0.0, 0.0, 0.0],
@@ -88,7 +88,7 @@ def test_insert_midpoint_with_offset(mock_parent):
 @patch(f"{TARGET_MODULE}.check_collisions_njit")
 def test_verify_trajectories_detects_collision(mock_check_collisions, mock_parent):
     """Weryfikacja integracji algorytmu z funkcją kolizji Numba JIT (check_collisions_njit)."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
     
     spline1, spline2 = MagicMock(), MagicMock()
     spline1.total_duration = 5.0
@@ -107,12 +107,12 @@ def test_verify_trajectories_detects_collision(mock_check_collisions, mock_paren
     np.testing.assert_array_equal(collision[2], [10.0, 0.0, 0.0])
     np.testing.assert_array_equal(collision[3], [10.5, 0.0, 0.0])
 
-@patch.object(TrajectoryFollowingAlgorithm, '_verify_trajectories')
-@patch.object(TrajectoryFollowingAlgorithm, '_visualize_trajectories')
+@patch.object(SwarmFlightController, '_verify_trajectories')
+@patch.object(SwarmFlightController, '_visualize_trajectories')
 @patch(f"{TARGET_MODULE}.NumbaTrajectoryProfile")
 def test_prepare_trajectories_repair_loop(MockProfile, mock_visualize, mock_verify, mock_parent):
     """Sprawdzenie pętli retry (napraw i spróbuj ponownie)."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
 
     fake_collision = (0, 1, np.array([1,1,1]), np.array([1,1,1]))
     mock_verify.side_effect = [fake_collision, None]
@@ -129,10 +129,10 @@ def test_prepare_trajectories_repair_loop(MockProfile, mock_visualize, mock_veri
 # TESTY AKCJI I STATUSU
 # ==========================================
 
-@patch.object(TrajectoryFollowingAlgorithm, '_prepare_trajectories')
+@patch.object(SwarmFlightController, '_prepare_trajectories')
 def test_compute_actions_hover_and_flight(mock_prepare, mock_parent):
     """Hover: przed czasem startu pytamy o t=0.0. Lot: po hover pytamy o poprawiony czas lotu."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=1, is_obstacle=False)
+    algo = SwarmFlightController(mock_parent, num_drones=1, is_obstacle=False)
     algo.hover_duration = 3.0
     
     mock_spline = MagicMock()
@@ -149,10 +149,10 @@ def test_compute_actions_hover_and_flight(mock_prepare, mock_parent):
     algo.compute_actions(states, current_time=4.0)
     mock_spline.get_state_at_time.assert_called_with(1.0)
 
-@patch.object(TrajectoryFollowingAlgorithm, '_prepare_trajectories')
+@patch.object(SwarmFlightController, '_prepare_trajectories')
 def test_all_finished(mock_prepare, mock_parent):
     """Ostateczne zatrzymanie wymaga osiągnięcia przez wszystkie drony strefy lądowania (ostatniego węzła)."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
     algo.finish_radius = 1.0
     
     mock_spline1 = MagicMock()
@@ -180,30 +180,30 @@ def test_all_finished(mock_prepare, mock_parent):
 
 def test_is_obstacle_flag_stored(mock_parent):
     """Izolacja flag obiektów aktywnych a pasywnych."""
-    algo_main = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
-    algo_obs = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo_main = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
+    algo_obs = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=True)
     assert algo_main.is_obstacle is False
     assert algo_obs.is_obstacle is True
 
 def test_init_lidars_skipped_for_obstacles(mock_parent):
     """Obiekty z is_obstacle=True omijają ładowanie czujnika LiDAR."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=True)
     algo.init_lidars(physics_client_id=99)
     assert algo._lidars is None
 
 @patch(f"{TARGET_MODULE}.LidarSensor")
 def test_init_lidars_created_for_main_drones(MockLidar, mock_parent):
     """Zwykłe roje ładują model lasera 3D."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
     algo.init_lidars(physics_client_id=99)
     assert MockLidar.call_count == 2
     assert algo._lidars is not None
 
-@patch.object(TrajectoryFollowingAlgorithm, '_visualize_trajectories')
+@patch.object(SwarmFlightController, '_visualize_trajectories')
 @patch(f"{TARGET_MODULE}.NumbaTrajectoryProfile")
 def test_obstacle_trajectories_are_flipped_versions_of_main(MockProfile, mock_visualize, mock_parent):
     """Odwrotne podążanie ścieżką w ramach symulacji ataku czołowego."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=True)
     algo._prepare_trajectories()
 
     expected_0 = np.flipud(mock_parent.drones_trajectories[0])
@@ -215,23 +215,74 @@ def test_obstacle_trajectories_are_flipped_versions_of_main(MockProfile, mock_vi
     np.testing.assert_array_equal(actual_0, expected_0)
     np.testing.assert_array_equal(actual_1, expected_1)
 
-@patch.object(TrajectoryFollowingAlgorithm, '_verify_trajectories')
-@patch.object(TrajectoryFollowingAlgorithm, '_visualize_trajectories')
+@patch.object(SwarmFlightController, '_verify_trajectories')
+@patch.object(SwarmFlightController, '_visualize_trajectories')
 @patch(f"{TARGET_MODULE}.NumbaTrajectoryProfile")
 def test_obstacles_skip_collision_verification(MockProfile, mock_visualize, mock_verify, mock_parent):
     """Zagrożenia omijają detekcję zderzeń międzydronowych w przygotowaniu lotu."""
-    algo = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=True)
     algo._prepare_trajectories()
     mock_verify.assert_not_called()
+
+# ==========================================
+# REGRESJA: NumbaTrajectoryProfile API (bug 2026-04-29)
+# ==========================================
+# Po refaktorze TrajectoryFollowingAlgorithm → SwarmFlightController + NumbaTrajectoryProfile
+# zanikł zagnieżdżony atrybut `.profile`; helper'y arc/time muszą sięgać po pola
+# trapezoidalnego profilu bezpośrednio (ta/tc/td/sa/sc/v_peak/max_accel/total_*).
+
+def _real_profile():
+    from src.algorithms.abstraction.trajectory.strategies.shared.NumbaTrajectoryProfile import (
+        NumbaTrajectoryProfile,
+    )
+    waypoints = np.array(
+        [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=np.float64
+    )
+    return NumbaTrajectoryProfile(waypoints=waypoints, cruise_speed=2.0, max_accel=1.0)
+
+
+def test_base_arc_progress_uses_numba_profile_attrs(mock_parent):
+    """Regresja: `_base_arc_progress` nie może wołać `.profile.get_state` (atrybut nie istnieje)."""
+    algo = SwarmFlightController(mock_parent, num_drones=1, is_obstacle=False)
+    profile = _real_profile()
+    algo._base_trajectories = [profile]
+    algo._tracking_start_times = np.array([0.0])
+
+    assert algo._base_arc_progress(0, current_time=0.0) == pytest.approx(0.0)
+    assert algo._base_arc_progress(0, current_time=10_000.0) == pytest.approx(
+        profile.total_distance
+    )
+
+    # W fazie cruise (po t_a, przed t_a+t_c) prędkość = v_peak, dystans rośnie liniowo.
+    t_mid_cruise = profile.ta + 0.5 * profile.tc
+    expected_mid = profile.sa + profile.v_peak * 0.5 * profile.tc
+    assert algo._base_arc_progress(0, current_time=t_mid_cruise) == pytest.approx(expected_mid)
+
+
+def test_invert_profile_arc_to_time_roundtrip():
+    """Regresja: `_invert_profile_arc_to_time` musi czytać `sa/sc/ta/tc/...` z NumbaTrajectoryProfile."""
+    profile = _real_profile()
+
+    assert SwarmFlightController._invert_profile_arc_to_time(profile, 0.0) == pytest.approx(0.0)
+    assert SwarmFlightController._invert_profile_arc_to_time(
+        profile, profile.total_distance
+    ) == pytest.approx(profile.total_duration)
+
+    for arc in (0.5 * profile.sa, profile.sa + 0.5 * profile.sc, profile.sa + profile.sc + 1e-3):
+        t = SwarmFlightController._invert_profile_arc_to_time(profile, arc)
+        # _arc_at_time(t) musi wrócić do tego samego arc (z numeryczną tolerancją).
+        recovered = SwarmFlightController._arc_at_time(profile, t)
+        assert recovered == pytest.approx(arc, abs=1e-6)
+
 
 def test_prepare_trajectories_raises_when_source_missing(mock_parent):
     """Brak trajektorii optymalizacji wywołuje krytyczny błąd przygotowania lotu."""
     mock_parent.drones_trajectories = None
 
-    algo_obs = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=True)
+    algo_obs = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=True)
     with pytest.raises(ValueError, match="Brak trajektorii"):
         algo_obs._prepare_trajectories()
 
-    algo_main = TrajectoryFollowingAlgorithm(mock_parent, num_drones=2, is_obstacle=False)
+    algo_main = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
     with pytest.raises(ValueError, match="Brak wyników optymalizacji"):
         algo_main._prepare_trajectories()

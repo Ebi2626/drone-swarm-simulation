@@ -8,7 +8,6 @@ Struktura **Hydra 1.3** z **hierarchią override'ów** dla eksperymentów. Umoż
 configs/
 ├── config.yaml                 # Bazowa
 ├── avoidance/                  # Strategie online
-│   ├── astar.yaml       # A* local
 │   ├── none.yaml        # No avoidance
 │   ├── msffoa.yaml
 │   ├── nsga-3.yaml
@@ -81,13 +80,25 @@ max_generations: 500
 number_of_swarms: 5
 ```
 
-## 🛡️ avoidance/ — Online strategie
+## 🛡️ avoidance/ — Online strategie (1 s budżet decyzyjny)
 
-| Strategia | YAML |
-|-----------|------|
-| **`none.yaml`** [file:39] | Brak |
-| **`astar.yaml`** [file:38] | 3D A* grid |
-| **`msffoa/nsga-3/ooa/ssa`** | Hybrydy z offline |
+Wszystkie 4 yamle z optymalizacją pochodzą z `_target_: GenericOptimizingAvoidance`,
+różnią się TYLKO sekcją `optimizer:` (Strategy Pattern Fazy 2).
+
+| YAML | Optimizer | Path repr | Fitness |
+|------|-----------|-----------|---------|
+| `none.yaml` | — (brak unik) | — | — |
+| `ssa.yaml` | `MealpyOptimizer(OriginalSSA)` | `BSplineYZGenes` | `WeightedSumFitness` |
+| `ooa.yaml` | `MealpyOptimizer(OriginalOOA)` | `BSplineYZGenes` | `WeightedSumFitness` |
+| `msffoa.yaml` | `MSFFOAOnlineOptimizer` (custom) | `BSplineYZGenes` | `WeightedSumFitness` |
+| `nsga-3.yaml` | `NSGA3OnlineOptimizer` (pymoo) | `BSplineYZGenes` | `WeightedSumFitness` (multi-obj) |
+
+**Wspólne pola** (czytane przez `SwarmFlightController` + `EvasionContextBuilder`):
+- `time_budget_s: 1.0` — twardy budżet decyzyjny (cooperative + SIGALRM)
+- `hard_kill_factor: 1.5` — multiplier dla outer SIGALRM circuit breaker
+- `trigger_ttc / trigger_distance_base / critical_distance_base` — progi wyzwolenia
+- `evasion_time_min/max` — okno czasu manewru uniku
+- `rejoin_arc_distance_m` — punkt powrotu na trajektorię bazową
 
 ## 🚀 Użycie CLI (grid search)
 
@@ -130,12 +141,16 @@ graph TD
     B --> C[environment=urban]
     C --> D[UrbanWorld<br/>27 BOX grid_jitter]
     B --> E[optimizer=msffoa]
-    E --> F[MSFOAStrategy<br/>pop=100]
-    B --> G[avoidance=astar]
-    G --> H[AStarAvoidance]
-    
+    E --> F[MSFOAStrategy offline<br/>pop=1000, gen=200]
+    B --> G[avoidance=ssa]
+    G --> H[GenericOptimizingAvoidance]
+    H --> H1[predictor: ConstantVelocityPredictor]
+    H --> H2[path_repr: BSplineYZGenes]
+    H --> H3[fitness: WeightedSumFitness]
+    H --> H4[optimizer: MealpyOptimizer<br/>algorithm_factory=OriginalSSA]
+
     D --> I[runner/Generation]
     F --> I
-    H --> J[PyBullet Sim]
+    H --> J[PyBullet Sim<br/>+ SwarmFlightController]
     I --> K[utils/SimulationLogger]
 ```

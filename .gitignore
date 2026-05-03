@@ -4,6 +4,9 @@ docs/
 configs/experiment_generated/
 configs/optimizer/tmp/
 
+# configs
+configs/
+
 # visualizations
 trajectory_preview_bspline.png
 trajectory_preview.png
@@ -13,6 +16,9 @@ trajectory_preview_obstacles.png
 CLAUDE.local.md
 plan.md
 .claude/
+
+# VSCode
+.vscode/
 
 # scientific utils
 literature/ 

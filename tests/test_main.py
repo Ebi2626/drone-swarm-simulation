@@ -172,25 +172,25 @@ class TestExperimentRunnerInit:
 
 class TestPrepareExperiment:
 
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_delegates_to_data_strategy(self, mock_tfa, runner, mock_strategy):
         runner.prepare_experiment()
         mock_strategy.prepare_data.assert_called_once_with(runner)
 
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_initializes_trajectory_controller(self, mock_tfa, runner):
         runner.prepare_experiment()
         mock_tfa.assert_called_once()
         assert runner.trajectory_controller is not None
 
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_no_logger_when_logging_disabled(self, mock_tfa, runner):
         runner.prepare_experiment()
         assert runner.logger is None
 
     @patch(f"{MODULE}.SimulationLogger")
     @patch(f"{MODULE}.HydraConfig")
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_creates_logger_when_enabled(self, mock_tfa, mock_hydra_cfg, mock_sim_logger, base_cfg, mock_strategy):
         base_cfg.logging.enabled = True
         mock_hydra_cfg.get.return_value.runtime.output_dir = "/tmp/test_output"
@@ -199,7 +199,7 @@ class TestPrepareExperiment:
         mock_sim_logger.assert_called_once()
 
     @patch(f"{MODULE}.SimulationLogger")
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_logger_uses_output_dir_from_config(self, mock_tfa, mock_sim_logger, base_cfg, mock_strategy):
         """Gdy logging.output_dir jest ustawiony w konfiguracji, logger powinien go użyć."""
         base_cfg.logging.enabled = True
@@ -210,21 +210,21 @@ class TestPrepareExperiment:
         assert mock_sim_logger.call_args.kwargs["output_dir"] == "/tmp/replay_output"
 
     @patch(f"{MODULE}.InputHandler")
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_no_input_handler_in_headless(self, mock_tfa, mock_ih, runner):
         runner.prepare_experiment()
         mock_ih.assert_not_called()
         assert runner.input_handler is None
 
     @patch(f"{MODULE}.InputHandler")
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_creates_input_handler_with_gui(self, mock_tfa, mock_ih, base_cfg, mock_strategy):
         base_cfg.simulation.gui = True
         r = ExperimentRunner(base_cfg, mock_strategy)
         r.prepare_experiment()
         mock_ih.assert_called_once_with(2)
 
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_single_controller_without_dynamic_obstacles(self, mock_tfa, runner):
         """Gdy flaga dynamic_obstacles wyłączona, tworzymy wyłącznie kontroler dronów głównych."""
         runner.prepare_experiment()
@@ -235,7 +235,7 @@ class TestPrepareExperiment:
         # Kontroler przeszkód pozostaje None
         assert runner.dynamic_obstacle_trajectory_controller is None
 
-    @patch(f"{MODULE}.TrajectoryFollowingAlgorithm")
+    @patch(f"{MODULE}.SwarmFlightController")
     def test_two_controllers_when_dynamic_obstacles_enabled(self, mock_tfa, base_cfg, mock_strategy):
         """Włączona flaga tworzy dwa osobne kontrolery: jeden dla dronów, drugi dla przeszkód."""
         base_cfg.simulation.dynamic_obstacles = True

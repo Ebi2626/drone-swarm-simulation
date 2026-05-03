@@ -68,7 +68,6 @@ def count_trajectories(
                         3 - coordinates x, y, z
     """
 
-    # TODO: implement methods to count time of optimization
     # TODO: implement methods to validate input
 
     trajectories = counting_protocol(

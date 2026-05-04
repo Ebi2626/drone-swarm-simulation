@@ -254,7 +254,7 @@ class TestExperimentRunner:
 
 
 # --- TESTY PUNKÓW WEJŚCIA (main_generate, main_replay) ---
-
+@patch("main.Path.mkdir")
 @patch("main.p.disconnect")
 @patch("main.p.isConnected", return_value=True)
 @patch("main.ExperimentRunner")
@@ -263,7 +263,7 @@ class TestExperimentRunner:
 @patch("main.seed_numba")
 def test_main_generate_new_job(
     mock_seed_numba, mock_bootstrap, mock_registry_class, mock_runner_class, 
-    mock_is_connected, mock_disconnect, dummy_cfg
+    mock_is_connected, mock_disconnect, mock_mkdir, dummy_cfg
 ):
     """Sprawdza, że dla nowego zadania `main_generate` rejestruje start i wykonuje run()."""
     mock_registry = MagicMock()
@@ -287,7 +287,7 @@ def test_main_generate_new_job(
     mock_registry.mark_completed.assert_called_once()
     mock_disconnect.assert_called_once()
 
-
+@patch("main.Path.mkdir")
 @patch("main.p.disconnect")
 @patch("main.p.isConnected", return_value=True)
 @patch("main.ExperimentRunner")
@@ -296,7 +296,7 @@ def test_main_generate_new_job(
 @patch("main.seed_numba")
 def test_main_generate_skip_job(
     mock_seed_numba, mock_bootstrap, mock_registry_class, mock_runner_class, 
-    mock_is_connected, mock_disconnect, dummy_cfg
+    mock_is_connected, mock_disconnect, mock_mkdir, dummy_cfg
 ):
     """Sprawdza, że jeśli `should_run` = False, eksperyment jest pomijany."""
     mock_registry = MagicMock()

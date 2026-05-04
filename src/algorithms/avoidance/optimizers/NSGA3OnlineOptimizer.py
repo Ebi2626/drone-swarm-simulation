@@ -68,6 +68,10 @@ class _BudgetCallback:
         # Capture best-so-far na koniec każdej gen (przed budget check).
         self.best_X: NDArray[np.float64] | None = None
         self.best_F: NDArray[np.float64] | None = None
+        # Convergence trace (Krok 3.3b plan.md): per-gen najlepsze fitness
+        # filtered po sentinel threshold (1e8) — gdy populacja jest infeasible
+        # zapisujemy `inf` (analiza może filtrować).
+        self.convergence_trace: list[float] = []
 
     def __call__(self, algorithm) -> None:
         self.generations_seen += 1
@@ -80,6 +84,12 @@ class _BudgetCallback:
                 if X is not None and F is not None and len(F) > 0:
                     self.best_X = np.atleast_2d(np.asarray(X, dtype=np.float64))
                     self.best_F = np.atleast_2d(np.asarray(F, dtype=np.float64))
+                    # Per-gen best feasible fitness do trace'u.
+                    f_col = np.atleast_2d(self.best_F)[:, 0]
+                    feas = f_col[f_col < 1e8]
+                    self.convergence_trace.append(
+                        float(feas.min()) if feas.size > 0 else float("inf")
+                    )
         except Exception:
             pass  # snapshot best-effort; nie blokuje searchu
         self.budget.check_or_raise()
@@ -275,6 +285,7 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
                     "generations_completed": generations,
                     "wallclock_s": elapsed,
                     "reason": "ok",
+                    "convergence_trace": list(callback.convergence_trace),
                 },
             )
 
@@ -318,6 +329,7 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
                                     "generations_completed": generations,
                                     "wallclock_s": elapsed,
                                     "reason": "budget_exceeded_returned_best_so_far",
+                                    "convergence_trace": list(callback.convergence_trace),
                                 },
                             )
             except Exception as recover_err:

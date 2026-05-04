@@ -6,9 +6,8 @@ _convert_: "all"
 algorithm_params:
   cruise_speed: 6.0
   pop_size: 1000
-  epochs: 200
+  epochs: 2
   n_inner_waypoints: 11
-  seed: 42
 
   # --- Wagi celów (skalaryzacja MOO → SOO) ---
   # Pełny wzór fitness obliczany w TrajectorySOOAdapter.__call__:

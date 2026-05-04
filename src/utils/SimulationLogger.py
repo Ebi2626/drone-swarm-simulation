@@ -11,6 +11,20 @@ from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 from src.utils.lidar_log_writer import LidarHDF5Writer
+from src.utils.optimization_metrics import (
+    OUTCOME_PENDING,
+    ConvergenceSample,
+    OnlineOptimizationRecord,
+    convergence_sample_headers,
+    online_record_headers,
+    record_to_dict,
+)
+
+# PK match tolerance dla update_online_optimization_outcome — float trigger_time
+# zachowuje binarną reprezentację tylko wtedy gdy ten sam string→float konwert.
+# Praktycznie tu może wpaść zaokrąglenie do 3 cyfr w timer'ze SwarmFlightController
+# vs surowy float w `compute_evasion_plan`. 1e-6 to bezpieczna granica (1 µs).
+_PK_FLOAT_TOL_S = 1e-6
 
 _TIMING_HEADERS = [
     "run_id",
@@ -47,8 +61,12 @@ _EVASION_HEADERS = [
 ]
 
 class SimulationLogger:
-    def __init__(self, output_dir, log_freq, ctrl_freq, num_drones, log_lidar_hits: bool):
+    def __init__(self, output_dir, log_freq, ctrl_freq, num_drones, log_lidar_hits: bool = False):
         self.output_dir = output_dir
+        # `run_id` używane w online_optimization.csv / convergence_traces.csv —
+        # default = basename katalogu (zwykle Hydra timestamp). Może być nadpisane
+        # przez integrator (`logger.run_id = "..."`).
+        self.run_id = os.path.basename(os.path.normpath(str(output_dir)))
         self.log_step_interval = max(1, int(ctrl_freq / log_freq))
         self.num_drones = num_drones
         self.trajectory_buffer = []
@@ -56,13 +74,18 @@ class SimulationLogger:
         self.optimization_timing_buffer: List[Dict[str, Any]] = []
         self.crashed_drones = set()
         self.log_lidar_hits = log_lidar_hits
-        
+
         # Nowy bufor na logi z sensorów LiDAR
         self._lidar_writer = LidarHDF5Writer(output_dir)
 
         # Bufor dla diagnostyki uniku (Faza 0 planu). Rekordy są słownikami,
         # zapisywane jako CSV z _EVASION_HEADERS w save().
         self.evasion_buffer: List[Dict[str, Any]] = []
+
+        # Bufory metryk online optymalizacji (Krok 3.2 plan.md). Każdy wiersz
+        # jest dictem zgodnym ze schema dataclass'ów z `optimization_metrics`.
+        self.online_optimization_buffer: List[Dict[str, Any]] = []
+        self.convergence_traces_buffer: List[Dict[str, Any]] = []
 
         print("[LOGGER] Buffering in RAM. Writing to disk after completion.")
 
@@ -169,6 +192,79 @@ class SimulationLogger:
             "planning_wall_time_s": planning_wall_time_s,
             "notes": notes,
         })
+
+    def log_online_optimization_trigger(
+        self, record: OnlineOptimizationRecord
+    ) -> None:
+        """Zapisuje per-trigger summary metryki optymalizacji online.
+
+        Outcome (grupa D) zostaje na sentinelu `pending` aż do BLEND_END /
+        kolizji — wtedy `update_online_optimization_outcome` znajdzie wpis po
+        PK `(drone_id, trigger_time)` i wypełni grupę D in-place.
+        """
+        self.online_optimization_buffer.append(record_to_dict(record))
+
+    def update_online_optimization_outcome(
+        self,
+        *,
+        drone_id: int,
+        trigger_time: float,
+        outcome: str,
+        pos_err_at_rejoin_m: float = float("nan"),
+        vel_err_at_rejoin_mps: float = float("nan"),
+        time_to_rejoin_s: float = float("nan"),
+    ) -> None:
+        """Wypełnia grupę D dla rekordu z `(drone_id, trigger_time)`.
+
+        Match po PK z toleranicją `_PK_FLOAT_TOL_S` (1e-6 s) — zaokrąglenie
+        timestampu w SwarmFlightController nie powinno gubić matchu.
+
+        Jeśli rekord nie znaleziony — drukujemy warning (race condition lub
+        outcome dla triggerowania, które dało plan=None) i kontynuujemy.
+        """
+        for rec in reversed(self.online_optimization_buffer):
+            if rec["drone_id"] != drone_id:
+                continue
+            if abs(float(rec["trigger_time"]) - float(trigger_time)) > _PK_FLOAT_TOL_S:
+                continue
+            if rec["outcome"] != OUTCOME_PENDING:
+                # Już wypełnione (np. drugi callback) — nie nadpisuj.
+                return
+            rec["outcome"] = outcome
+            rec["pos_err_at_rejoin_m"] = pos_err_at_rejoin_m
+            rec["vel_err_at_rejoin_mps"] = vel_err_at_rejoin_mps
+            rec["time_to_rejoin_s"] = time_to_rejoin_s
+            return
+        print(
+            f"[LOGGER] update_online_optimization_outcome: brak match dla "
+            f"drone_id={drone_id}, trigger_time={trigger_time:.6f}s "
+            f"(outcome={outcome}). Możliwy race lub outcome dla planu=None."
+        )
+
+    def log_convergence_trace(
+        self,
+        *,
+        run_id: str,
+        drone_id: int,
+        trigger_time: float,
+        algorithm: str,
+        trace: List[float],
+    ) -> None:
+        """Append N rekordów long-format dla 1 trigger'a (1 wiersz / generacja).
+
+        Pusty trace (np. optimizer wyleciał z BudgetExceeded zanim cokolwiek
+        wyewaluował) → zero rekordów; outer caller nie musi rozróżniać.
+        """
+        for gen, fit in enumerate(trace):
+            sample = ConvergenceSample(
+                run_id=run_id,
+                drone_id=drone_id,
+                trigger_time=float(trigger_time),
+                algorithm=algorithm,
+                generation=int(gen),
+                best_fitness=float(fit),
+            )
+            self.convergence_traces_buffer.append(record_to_dict(sample))
 
     def _trajectory_to_dataframe(self, trajectory: NDArray) -> pd.DataFrame:
         n_drones, n_waypoints, _ = trajectory.shape
@@ -288,3 +384,27 @@ class SimulationLogger:
                 writer.writerows(self.optimization_timing_buffer)
             print(f"[LOGGER] Optimization timings saved: optimization_timings.csv")
             self.optimization_timing_buffer.clear()
+
+        if self.online_optimization_buffer:
+            path = os.path.join(self.output_dir, "online_optimization.csv")
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=online_record_headers())
+                writer.writeheader()
+                writer.writerows(self.online_optimization_buffer)
+            print(
+                f"[LOGGER] Online optimization saved: online_optimization.csv "
+                f"({len(self.online_optimization_buffer)} triggers)"
+            )
+            self.online_optimization_buffer.clear()
+
+        if self.convergence_traces_buffer:
+            path = os.path.join(self.output_dir, "convergence_traces.csv")
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=convergence_sample_headers())
+                writer.writeheader()
+                writer.writerows(self.convergence_traces_buffer)
+            print(
+                f"[LOGGER] Convergence traces saved: convergence_traces.csv "
+                f"({len(self.convergence_traces_buffer)} samples)"
+            )
+            self.convergence_traces_buffer.clear()

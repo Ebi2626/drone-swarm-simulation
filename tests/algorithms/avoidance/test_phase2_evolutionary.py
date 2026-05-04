@@ -510,6 +510,12 @@ def test_full_stack_evolutionary_avoidance_e2e(head_on_context) -> None:
         ),
         time_budget_s=2.0,
     )
-    plan = avoidance.compute_evasion_plan(head_on_context)
+    plan, record = avoidance.compute_evasion_plan(head_on_context)
     if plan is not None:
         assert plan.evasion_spline is not None
+    # Common-contract (Krok 3.3 plan.md): rekord ZAWSZE zwracany — niezależnie
+    # od tego czy plan się powiódł.
+    assert record is not None
+    assert record.drone_id == head_on_context.drone_id
+    assert record.trigger_time == head_on_context.current_time
+    assert record.algorithm  # niepusty algorithm name

@@ -220,8 +220,22 @@ class MealpyOptimizer(IPathOptimizer):
             # `wallclock_s`, `algorithm`, `reason` muszą być w każdym
             # `OptimizationResult.extra` z 4 optymalizatorów.
             elapsed = time.perf_counter() - t_start
-            n_eval = int(getattr(algo.history, "list_global_best_fit", [None]).__len__())
-            n_eval = n_eval * int(self.pop_size) if n_eval > 0 else 0
+
+            # Convergence trace (Krok 3.3b plan.md): mealpy zachowuje best-so-far
+            # per generację w `algo.history.list_global_best_fit`. Jest to lista
+            # `mealpy.utils.target.Target` lub bezpośrednio float'ów — robust
+            # extraction (Target.fitness lub plain float).
+            trace_raw = getattr(algo.history, "list_global_best_fit", []) or []
+            convergence_trace: list[float] = []
+            for entry in trace_raw:
+                fit_val = getattr(entry, "fitness", entry)
+                try:
+                    convergence_trace.append(float(fit_val))
+                except (TypeError, ValueError):
+                    continue
+
+            n_gen = len(convergence_trace)
+            n_eval = n_gen * int(self.pop_size)
             return OptimizationResult(
                 waypoints=np.asarray(best_spline.waypoints, dtype=np.float64),
                 elapsed_s=elapsed,
@@ -230,9 +244,10 @@ class MealpyOptimizer(IPathOptimizer):
                     "algorithm": type(algo).__name__,
                     "best_fitness": float(best_fitness),
                     "evaluations_completed": n_eval,
-                    "generations_completed": n_eval // int(self.pop_size) if n_eval > 0 else 0,
+                    "generations_completed": n_gen,
                     "wallclock_s": elapsed,
                     "reason": "ok",
+                    "convergence_trace": convergence_trace,
                 },
             )
 

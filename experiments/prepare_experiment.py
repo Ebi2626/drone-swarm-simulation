@@ -125,13 +125,13 @@ hydra:
     dir: results/${{experiment_meta.id}}
     subdir: ${{hydra:runtime.choices.optimizer}}_${{hydra:runtime.choices.environment}}_${{hydra:runtime.choices.avoidance}}_seed${{seed}}  
   launcher:
-    # UWAGA: launcher Hydra-Joblib jest tutaj zachowany dla wstecznej
-    # kompatybilności (np. ad-hoc multirun przez `python main.py -m`).
-    # ALE pełny eksperyment idzie przez `experiments/run_subprocess.py`
-    # (uruchamiane przez `./run.sh`), bo Hydra-multirun + joblib akumuluje
-    # globalny stan PyBullet między uruchomieniami w tym samym procesie
-    # Python — patologia "drony stoją" (plan.md, Krok 5c, H1'').
     n_jobs: 6
+    # backend `loky` (zamiast `multiprocessing`) używa fork-and-exec
+    # (czysty Python interpreter per-worker), co eliminuje współdzielenie
+    # globalnego stanu C++ PyBullet między workerami. Patologia "drony stoją
+    # w PyBullet mimo poprawnie wygenerowanej trajektorii" (plan.md, Krok 2,
+    # H1 potwierdzona reprodukcją n_jobs=1) była efektem fork-share state z
+    # `backend: multiprocessing`.
     backend: loky
     prefer: processes
   sweeper:

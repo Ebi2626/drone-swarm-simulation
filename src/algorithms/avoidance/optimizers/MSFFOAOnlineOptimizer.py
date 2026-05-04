@@ -135,6 +135,10 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             global_best_fit = float(swarm_best_fit[global_best_idx])
             global_best_pos = swarm_best_pos[global_best_idx].copy()
 
+            # Convergence trace: po każdej generacji append'ujemy global_best_fit
+            # (Krok 3.3b plan.md). Index 0 = stan po inicjalizacji (pre-loop).
+            convergence_trace: list[float] = [global_best_fit]
+
             # Threshold dynamiczny — separuje fazę globalną od lokalnej.
             threshold = max(1e-3, global_best_fit * self.threshold_ratio)
 
@@ -203,6 +207,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     global_best_pos = swarm_best_pos[cur_global_idx].copy()
 
                 generations_completed = gen + 1
+                convergence_trace.append(global_best_fit)
 
             # === Wynik ===========================================================
             # Filtr sentinel-cost (regression fix 2026-05-02): jeśli global_best_fit
@@ -247,6 +252,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     "generations_completed": int(generations_completed),
                     "wallclock_s": elapsed,
                     "reason": "ok",
+                    "convergence_trace": list(convergence_trace),
                     # MSFFOA-specific (extra-extra, optional):
                     "n_swarms": self.G,
                 },
@@ -280,6 +286,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                                 "generations_completed": int(generations_completed),
                                 "wallclock_s": elapsed,
                                 "reason": "budget_exceeded_returned_best_so_far",
+                                "convergence_trace": list(convergence_trace),
                                 "n_swarms": self.G,
                             },
                         )

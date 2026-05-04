@@ -86,6 +86,14 @@ class SwarmFlightController():
         self._no_plan_until: np.ndarray = np.zeros(num_drones, dtype=np.float64)
         self._rejoin_base_arcs = np.zeros(num_drones)
         self._rejoin_points: list[np.ndarray | None] = [None] * num_drones
+
+        # PK do `update_online_optimization_outcome` (Krok 3.4 plan.md). Per-drone
+        # ostatni `trigger_time` z udanym plan_built — czyścimy gdy outcome został
+        # zarejestrowany (BLEND_END lub collision). Brak (None) = brak otwartego
+        # rekordu = collision/rejoin nic nie aktualizuje. Współpracuje z
+        # `consume_pending_evasion_trigger_time()` — main.py używa go w
+        # `_process_collisions` żeby zamknąć rekord po kolizji.
+        self._pending_evasion_trigger_times: list[float | None] = [None] * num_drones
         # Bazowy czas startu (po hover lub po rejoin) — używany do tracking
         self._tracking_start_times = np.zeros(num_drones)
 
@@ -648,6 +656,75 @@ class SwarmFlightController():
         ])
         return float(candidates[int(np.argmin(errors))])
 
+    # =========================================================================
+    # Online optimization outcome lifecycle (Krok 3.4 plan.md)
+    # =========================================================================
+
+    def consume_pending_evasion_trigger_time(self, drone_id: int) -> float | None:
+        """Zwraca + czyści `trigger_time` ostatniego otwartego rekordu uniku.
+
+        Wywoływane przez main.py po wykryciu kolizji — pozwala zamknąć rekord
+        z `outcome=collided_*`. Jeśli drone nie ma otwartego rekordu (np. rozbił
+        się w MODE_TRACKING bez uniku) zwraca None i caller pomija update.
+        """
+        if 0 <= drone_id < self.num_drones:
+            t = self._pending_evasion_trigger_times[drone_id]
+            self._pending_evasion_trigger_times[drone_id] = None
+            return t
+        return None
+
+    def _finalize_evasion_outcome_rejoin(
+        self, drone_id: int, current_time: float
+    ) -> None:
+        """Aktualizuje rekord uniku do `rejoined_ok` na koniec MODE_REJOIN_BLEND.
+
+        Mierzy `pos_err`/`vel_err` względem stanu base_spline w `t_ref` (analogicznie
+        do `_start_rejoin_blend`); `time_to_rejoin_s` = current_time − trigger_time.
+        Brak otwartego rekordu (None) → silent no-op.
+        """
+        trigger_time = self._pending_evasion_trigger_times[drone_id]
+        if trigger_time is None:
+            return
+        self._pending_evasion_trigger_times[drone_id] = None
+
+        logger = getattr(self.parent, "logger", None)
+        if logger is None or not hasattr(logger, "update_online_optimization_outcome"):
+            return
+
+        # Best-effort pomiar pos_err/vel_err przy faktycznym końcu BLEND.
+        pos_err = float("nan")
+        vel_err = float("nan")
+        try:
+            base_spline = self._base_trajectories[drone_id]
+            if base_spline is not None:
+                t_ref = current_time - float(self._tracking_start_times[drone_id])
+                drone_pos, drone_vel = self._read_drone_state(drone_id)
+                target_pos, target_vel = base_spline.get_state_at_time(t_ref)
+                pos_err = float(np.linalg.norm(drone_pos - target_pos))
+                vel_err = float(np.linalg.norm(drone_vel - target_vel))
+        except Exception:
+            pass  # pomiar best-effort; outcome i tak idzie z tym co mamy
+
+        from src.utils.optimization_metrics import OUTCOME_REJOINED_OK
+        logger.update_online_optimization_outcome(
+            drone_id=drone_id,
+            trigger_time=float(trigger_time),
+            outcome=OUTCOME_REJOINED_OK,
+            pos_err_at_rejoin_m=pos_err,
+            vel_err_at_rejoin_mps=vel_err,
+            time_to_rejoin_s=float(current_time - trigger_time),
+        )
+
+    def _read_drone_state(self, drone_id: int) -> tuple[np.ndarray, np.ndarray]:
+        """Odczyt aktualnej pozycji/prędkości drona (best-effort)."""
+        try:
+            states = self.parent.environemnt._getDroneStateVector(drone_id)
+            pos = np.asarray(states[0:3], dtype=np.float64)
+            vel = np.asarray(states[10:13], dtype=np.float64)
+            return pos, vel
+        except Exception:
+            return np.full(3, np.nan), np.full(3, np.nan)
+
     def _start_rejoin_blend(
         self,
         drone_id: int,
@@ -709,6 +786,7 @@ class SwarmFlightController():
 
         # Koniec okna lub brak evasion_spline (awaryjnie) — finalizacja BLEND.
         if ev_spline is None or dt_blend >= self._blend_duration:
+            self._finalize_evasion_outcome_rejoin(drone_id, current_time)
             self._flight_modes[drone_id] = self.MODE_TRACKING
             self._evasion_trajectories[drone_id] = None
             self._rejoin_points[drone_id] = None
@@ -1118,13 +1196,44 @@ class SwarmFlightController():
             secondary_threats=secondary_threats,
         )
 
-        plan = self.avoidance_algorithm.compute_evasion_plan(context)
+        # Common-contract: avoidance.compute_evasion_plan zawsze ZWRACA tuple
+        # `(plan, record)`. Record wypełnia identyfikację + grupy A+B (outcome
+        # zostaje na sentinelu `pending` — uzupełnia _finalize_evasion_outcome
+        # przy BLEND_END / kolizji).
+        plan, optimization_record = self.avoidance_algorithm.compute_evasion_plan(context)
+
+        # Wstrzykujemy run_id z loggera (avoidance go nie zna). Pusty string OK.
+        if logger is not None:
+            optimization_record.run_id = getattr(logger, "run_id", "") or ""
+
+        if logger is not None and hasattr(logger, "log_online_optimization_trigger"):
+            logger.log_online_optimization_trigger(optimization_record)
+            trace = list(getattr(self.avoidance_algorithm, "last_convergence_trace", []) or [])
+            if trace and hasattr(logger, "log_convergence_trace"):
+                logger.log_convergence_trace(
+                    run_id=optimization_record.run_id,
+                    drone_id=drone_id,
+                    trigger_time=float(current_time),
+                    algorithm=str(optimization_record.algorithm),
+                    trace=trace,
+                )
 
         if plan is None:
             # Cooldown: nie próbuj znowu przez `_no_plan_cooldown_s` sekund.
             # Zapobiega re-trigger storm gdy geometria jest aktualnie infeasible.
             self._no_plan_until[drone_id] = current_time + self._no_plan_cooldown_s
             print(f"[WARN] Plan uniku nie powstał dla drona {drone_id} — pozostajemy w TRACKING")
+            # Plan=None: rekord ma `outcome=pending` ale nigdy nie zostanie
+            # zamknięty (drone wraca do TRACKING bez BLEND, bez kolizji wynikającej
+            # z tego planu). Zamykamy od razu jako `never_rejoined` — żeby analiza
+            # nie traktowała tych przypadków jak rzeczywistych collision/rejoin.
+            if logger is not None and hasattr(logger, "update_online_optimization_outcome"):
+                from src.utils.optimization_metrics import OUTCOME_NEVER_REJOINED
+                logger.update_online_optimization_outcome(
+                    drone_id=drone_id,
+                    trigger_time=float(current_time),
+                    outcome=OUTCOME_NEVER_REJOINED,
+                )
             if logger is not None and hasattr(logger, "log_evasion_event"):
                 logger.log_evasion_event(
                     current_time=current_time,
@@ -1141,6 +1250,12 @@ class SwarmFlightController():
 
         self._evasion_trajectories[drone_id] = plan.evasion_spline
         self._evasion_start_times[drone_id] = current_time
+        # Trigger time PK do późniejszego `update_online_optimization_outcome`
+        # (BLEND_END → rejoined_ok, collision → collided_*). Nadpisujemy ewentualny
+        # poprzedni pending — replan w trakcie uniku (sticky axis) zamyka stary
+        # rekord otwierając nowy. To OK: stary już dostał `pending` i jeśli
+        # nigdy się nie zamknie pozostanie w pending (analiza filtruje).
+        self._pending_evasion_trigger_times[drone_id] = float(current_time)
         self._rejoin_base_arcs[drone_id] = plan.rejoin_base_arc
         self._rejoin_points[drone_id] = np.asarray(plan.rejoin_point, dtype=np.float64)
         self._last_threat_positions[drone_id] = np.array(threat["position"], dtype=np.float64)

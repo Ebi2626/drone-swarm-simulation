@@ -230,11 +230,51 @@ class ExperimentRunner:
                 continue
             if self.logger:
                 self.logger.log_collision(sim_time, d_id, o_id)
+                # Krok 3.4 plan.md: zamknij ewentualny otwarty rekord uniku
+                # outcome'em `collided_*` (klasyfikacja po `env.get_body_role`).
+                self._update_evasion_collision_outcome(d_id, o_id)
             if d_id in self.active_drones:
                 self.active_drones.remove(d_id)
                 print(
                     f"[INFO] Dron {d_id} uległ kolizji w czasie {sim_time:.2f}s (krok {current_step})."
                 )
+
+    def _update_evasion_collision_outcome(self, drone_id: int, other_body_id: int) -> None:
+        """Maps PyBullet body id → outcome string i wywołuje update na loggerze.
+
+        Brak otwartego pending-rekordu (drone rozbił się w MODE_TRACKING bez
+        uniku) → silent no-op via `consume_pending_evasion_trigger_time`.
+        """
+        controller = self.trajectory_controller
+        if controller is None or not hasattr(
+            controller, "consume_pending_evasion_trigger_time"
+        ):
+            return
+        trigger_time = controller.consume_pending_evasion_trigger_time(drone_id)
+        if trigger_time is None:
+            return
+
+        from src.utils.optimization_metrics import (
+            OUTCOME_COLLIDED_DRONE,
+            OUTCOME_COLLIDED_GROUND,
+            OUTCOME_COLLIDED_OBSTACLE,
+        )
+        try:
+            role = self.environemnt.get_body_role(int(other_body_id))
+        except Exception:
+            role = "static_obstacle"
+        if role == "ground" or role == "ceiling":
+            outcome = OUTCOME_COLLIDED_GROUND
+        elif role in ("drone", "dynamic_obstacle"):
+            outcome = OUTCOME_COLLIDED_DRONE
+        else:
+            outcome = OUTCOME_COLLIDED_OBSTACLE
+
+        self.logger.update_online_optimization_outcome(
+            drone_id=drone_id,
+            trigger_time=float(trigger_time),
+            outcome=outcome,
+        )
 
     def _process_arrivals(self, drone_states: list, sim_time: float):
         """Sprawdza czy drony głównego roju dotarły do celu."""

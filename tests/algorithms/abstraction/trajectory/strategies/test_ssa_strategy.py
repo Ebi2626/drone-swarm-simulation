@@ -8,6 +8,7 @@ from src.algorithms.abstraction.trajectory.strategies.ssa_strategy import (
     LoggedOriginalSSA,
     ssa_swarm_strategy,
 )
+from src.utils.SeedRegistry import SeedRegistry
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.ssa_strategy"
 
@@ -48,6 +49,10 @@ def mock_evaluator():
     evaluator.evaluate.side_effect = side_effect
     return evaluator
 
+@pytest.fixture
+def mock_master_seed():
+    seeds = SeedRegistry(master_seed=int(42))
+    return seeds
 
 # ===========================================================================
 # TESTY: SSAProblemAdapter
@@ -284,11 +289,11 @@ class TestSSASwarmStrategy:
 
         assert np.all(result[0, :, 2] >= 0.5)
 
-    def test_mealpy_called_correctly_with_biological_params(self, mock_world_data, basic_positions, patch_deps):
+    def test_mealpy_called_correctly_with_biological_params(self, mock_world_data, basic_positions, patch_deps, mock_master_seed):
         """Weryfikuje czy biologiczne parametry ST, PD, SD algorytmu Sparrow Search wchodzą do Mealpy."""
         starts, targets = basic_positions
         custom_params = {
-            "pop_size": 12, "n_gen": 5, "n_workers": 2, "seed": 42,
+            "pop_size": 12, "n_gen": 5, "n_workers": 2, "seeds": mock_master_seed,
             "st": 0.9, "pd_ratio": 0.3, "sd_ratio": 0.15
         }
 
@@ -308,6 +313,7 @@ class TestSSASwarmStrategy:
                 number_of_waypoints=20,
                 drone_swarm_size=2,
                 algorithm_params=custom_params,
+                seeds=mock_master_seed
             )
 
             call_args, call_kwargs = MockSSA.call_args

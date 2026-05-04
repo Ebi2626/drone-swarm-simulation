@@ -47,7 +47,7 @@ def base_params():
             [90.0, 100.0, 5.0],
         ]),
         "max_generations": 15,
-        "seed": 42,
+        "rng": np.random.default_rng(12345),
     }
 
 
@@ -218,16 +218,23 @@ def test_swarm_best_fit_is_monotonic_non_increasing(base_params):
 
 
 def test_seed_reproducibility(base_params):
-    """Ten sam seed → ten sam wynik finalny (deterministyczność)."""
+    """Ten sam seed (przekazany jako instancja generatora rng) → ten sam wynik finalny (deterministyczność)."""
     base_params["max_generations"] = 10
+    
+    # Skopiowanie parametrów, by nie modyfikować globalnego stanu dla innych testów
+    params_a = base_params.copy()
+    params_b = base_params.copy()
+    
+    # Nadpisanie domyślnego rng zdefiniowanego w base_params
+    params_a["rng"] = np.random.default_rng(42)
+    params_b["rng"] = np.random.default_rng(42)
 
-    _, fit_a = MSFFOAOptimizer(**base_params, fitness_function=dummy_fitness).optimize()
-    _, fit_b = MSFFOAOptimizer(**base_params, fitness_function=dummy_fitness).optimize()
+    _, fit_a = MSFFOAOptimizer(**params_a, fitness_function=dummy_fitness).optimize()
+    _, fit_b = MSFFOAOptimizer(**params_b, fitness_function=dummy_fitness).optimize()
 
     assert fit_a == pytest.approx(fit_b, rel=1e-12), (
         f"Reprodukcyjność seeda zerwana: {fit_a} vs {fit_b}"
     )
-
 
 # ---------------------------------------------------------------------------
 # Walidacje paper-strict (constraints z literature/MSFFOA.md)

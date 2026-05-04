@@ -9,6 +9,7 @@ from src.algorithms.abstraction.trajectory.strategies.ooa_strategy import (
     osprey_swarm_strategy,
     LoggedOriginalOOA
 )
+from src.utils.SeedRegistry import SeedRegistry
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.ooa_strategy"
 
@@ -50,6 +51,10 @@ def mock_evaluator():
     evaluator.evaluate.side_effect = side_effect
     return evaluator
 
+@pytest.fixture
+def mock_master_seed():
+    seeds = SeedRegistry(master_seed=int(42))
+    return seeds
 
 # ===========================================================================
 # TESTY: OOAProblemAdapter
@@ -263,7 +268,7 @@ class TestOspreySwarmStrategy:
         np.testing.assert_array_almost_equal(result[0, 0, :2], starts[0, :2])
         np.testing.assert_array_almost_equal(result[0, -1, :2], targets[0, :2])
 
-    def test_mealpy_called_correctly(self, mock_world_data, basic_positions, patch_deps):
+    def test_mealpy_called_correctly(self, mock_world_data, basic_positions, patch_deps, mock_master_seed):
         """Weryfikuje, czy Mealpy jest parametryzowany zgodnie z konfiguracją wejściową algorytmu z logowaniem danych."""
         starts, targets = basic_positions
         custom_params = {"pop_size": 12, "n_gen": 5, "n_workers": 2, "seed": 42, "n_inner_waypoints": 3}
@@ -284,6 +289,7 @@ class TestOspreySwarmStrategy:
                 number_of_waypoints=20,
                 drone_swarm_size=2,
                 algorithm_params=custom_params,
+                seeds=mock_master_seed
             )
 
             call_args, call_kwargs = MockOOA.call_args
@@ -293,6 +299,6 @@ class TestOspreySwarmStrategy:
             solve_kwargs = mock_model_instance.solve.call_args.kwargs
             assert solve_kwargs["mode"] == "thread"
             assert solve_kwargs["n_workers"] == 2
-            assert solve_kwargs["seed"] == 42
+            assert solve_kwargs["seed"] == 3276785861 # master-seed 42
             assert "problem" in solve_kwargs
             assert "starting_solutions" in solve_kwargs

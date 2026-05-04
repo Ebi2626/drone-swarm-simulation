@@ -62,17 +62,36 @@ def fake_obstacles_data():
     return ObstaclesData(data=data, shape_type=ObstacleShape.BOX)
 
 
+@pytest.fixture
+def mock_master_seed():
+    """Mock dla SeedRegistry zwracający przewidywalne generatory losowości."""
+    mock_registry = MagicMock()
+    mock_registry.master_seed = 42
+    
+    # Przechowujemy generatory dla weryfikacji tożsamości obiektów w asercjach
+    _generators = {}
+    
+    def mock_rng(namespace: str):
+        if namespace not in _generators:
+            _generators[namespace] = np.random.default_rng(42)
+        return _generators[namespace]
+        
+    mock_registry.rng.side_effect = mock_rng
+    return mock_registry
+
+
 # --- Testy głównego przepływu ---
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_prepare_data_full_flow(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
-    """Sprawdza pełny przepływ: granice -> przeszkody -> optymalizator -> przypisanie."""
+    """Sprawdza pełny przepływ: granice -> przeszkody -> optymalizator -> walidacja -> przypisanie."""
     mock_gen_world.return_value = fake_world_data
     mock_gen_obstacles.return_value = fake_obstacles_data
     mock_get_strategy.return_value = MagicMock()
@@ -81,7 +100,7 @@ def test_prepare_data_full_flow(
     mock_counting_strategy = MagicMock(return_value=fake_trajectories)
     mock_instantiate.return_value = mock_counting_strategy
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     # 1. Granice świata
     mock_gen_world.assert_called_once_with(
@@ -96,18 +115,26 @@ def test_prepare_data_full_flow(
     # 3. Optymalizator
     mock_instantiate.assert_called_once_with(mock_runner.cfg.optimizer)
     mock_counting_strategy.assert_called_once()
+    
+    # 4. Walidacja
+    mock_validate.assert_called_once_with(
+        fake_trajectories,
+        mock_runner.start_positions,
+        label="Optimizer"  # W mock_runner '_target_' to 'some.Optimizer'
+    )
 
-    # 4. Trajektorie przypisane do runnera
+    # 5. Trajektorie przypisane do runnera
     np.testing.assert_array_equal(mock_runner.drones_trajectories, fake_trajectories)
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_world_boundaries_params_forwarded(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, mock_master_seed
 ):
     """Sprawdza czy parametry granic świata są poprawnie przekazywane z runnera."""
     mock_gen_world.return_value = fake_world_data
@@ -120,20 +147,21 @@ def test_world_boundaries_params_forwarded(
     mock_runner.ground_position = 1.5
     mock_runner.safe_radius = 10.0
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     mock_gen_world.assert_called_once_with(
         width=42.0, length=84.0, height=21.0, ground_height=1.5
     )
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_obstacles_params_forwarded(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
     """Sprawdza czy parametry przeszkód są poprawnie przekazywane do generate_obstacles."""
     mock_gen_world.return_value = fake_world_data
@@ -142,7 +170,7 @@ def test_obstacles_params_forwarded(
     mock_get_strategy.return_value = mock_placement_fn
     mock_instantiate.return_value = MagicMock(return_value=np.zeros((2, 7, 3)))
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     mock_get_strategy.assert_called_once_with("strategy_random_uniform")
     mock_gen_obstacles.assert_called_once_with(
@@ -157,17 +185,19 @@ def test_obstacles_params_forwarded(
         },
         start_positions=mock_runner.start_positions,
         target_positions=mock_runner.end_positions,
-        safe_radius=mock_runner.safe_radius
+        safe_radius=mock_runner.safe_radius,
+        rng=mock_master_seed.rng("environment")  # Dodany nowy parametr rng
     )
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_optimizer_receives_correct_args(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
     """Sprawdza, czy algorytm optymalizacyjny jest wywoływany z poprawnymi argumentami."""
     mock_gen_world.return_value = fake_world_data
@@ -176,9 +206,8 @@ def test_optimizer_receives_correct_args(
     mock_counting_strategy = MagicMock(return_value=np.zeros((2, 7, 3)))
     mock_instantiate.return_value = mock_counting_strategy
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
-    # functools.partial wywołuje counting_strategy z tymi parametrami, a potem ()
     _, kwargs = mock_counting_strategy.call_args
     assert np.array_equal(kwargs["start_positions"], mock_runner.start_positions)
     assert np.array_equal(kwargs["target_positions"], mock_runner.end_positions)
@@ -186,34 +215,37 @@ def test_optimizer_receives_correct_args(
     assert kwargs["world_data"] == fake_world_data
     assert kwargs["number_of_waypoints"] == 5
     assert kwargs["drone_swarm_size"] == 2
+    assert kwargs["seeds"] is mock_master_seed  # Sprawdzenie nowego parametru
 
 
 # --- Przypadki brzegowe ---
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 def test_no_obstacles_when_placement_strategy_is_none(
-    mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data,
+    mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, mock_master_seed
 ):
     """Gdy placement_strategy_name jest None, przeszkody NIE powinny być generowane."""
     mock_gen_world.return_value = fake_world_data
     mock_instantiate.return_value = MagicMock(return_value=np.zeros((2, 7, 3)))
     mock_runner.placement_strategy_name = None
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     mock_gen_obstacles.assert_not_called()
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_logger_called_when_present(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
     """Sprawdza, że logger archiwizuje trajektorie, świat i przeszkody."""
     mock_gen_world.return_value = fake_world_data
@@ -224,20 +256,21 @@ def test_logger_called_when_present(
     mock_logger = MagicMock()
     mock_runner.logger = mock_logger
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     mock_logger.log_chosen_trajectories.assert_called_once_with(fake_trajectories)
     mock_logger.log_world_dimensions.assert_called_once_with(fake_world_data)
     mock_logger.log_obstacles.assert_called_once_with(fake_obstacles_data)
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_logger_not_called_when_none(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
     """Sprawdza, że brak loggera nie powoduje błędów."""
     mock_gen_world.return_value = fake_world_data
@@ -246,16 +279,17 @@ def test_logger_not_called_when_none(
     mock_runner.logger = None
 
     # Nie powinno wyrzucić wyjątku
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_single_drone(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
     """Sprawdza poprawne działanie dla roju złożonego z jednego drona."""
     mock_gen_world.return_value = fake_world_data
@@ -269,25 +303,23 @@ def test_single_drone(
     mock_counting_strategy = MagicMock(return_value=fake_traj)
     mock_instantiate.return_value = mock_counting_strategy
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     _, kwargs = mock_counting_strategy.call_args
     assert kwargs["drone_swarm_size"] == 1
     np.testing.assert_array_equal(mock_runner.drones_trajectories, fake_traj)
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_world_data_assigned_before_obstacles(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
-    """
-    Sprawdza, że world_data jest przypisane do runnera PRZED wygenerowaniem przeszkód,
-    ponieważ generate_obstacles korzysta z runner.world_data jako pierwszego argumentu.
-    """
+    """Sprawdza, że world_data jest przypisane do runnera PRZED wygenerowaniem przeszkód."""
     call_order = []
 
     def track_gen_world(*args, **kwargs):
@@ -296,28 +328,26 @@ def test_world_data_assigned_before_obstacles(
 
     def track_gen_obstacles(*args, **kwargs):
         call_order.append("gen_obstacles")
-        # W tym momencie runner.world_data powinno już istnieć
-        assert mock_runner.world_data is not None, (
-            "world_data musi być przypisane przed wygenerowaniem przeszkód"
-        )
+        assert mock_runner.world_data is not None, "world_data musi być przypisane przed przeszkodami"
         return fake_obstacles_data
 
     mock_gen_world.side_effect = track_gen_world
     mock_gen_obstacles.side_effect = track_gen_obstacles
     mock_instantiate.return_value = MagicMock(return_value=np.zeros((2, 7, 3)))
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     assert call_order == ["gen_world", "gen_obstacles"]
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_zero_obstacles(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, mock_master_seed
 ):
     """Sprawdza zachowanie przy zerowej liczbie przeszkód (ale z aktywną strategią)."""
     mock_gen_world.return_value = fake_world_data
@@ -330,7 +360,7 @@ def test_zero_obstacles(
 
     mock_runner.obstacles_number = 0
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     assert mock_runner.obstacles_data == empty_obstacles
 
@@ -341,24 +371,23 @@ def test_is_subclass_of_experiment_data_strategy():
     assert issubclass(GenerationDataStrategy, ExperimentDataStrategy)
 
 
+@patch(f"{MODULE}.validate_trajectories")
 @patch(f"{MODULE}.instantiate")
 @patch(f"{MODULE}.generate_obstacles")
 @patch(f"{MODULE}.generate_world_boundaries")
 @patch(f"{MODULE}.get_placement_strategy")
 def test_obstacles_data_used_by_optimizer(
-    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate,
-    strategy, mock_runner, fake_world_data, fake_obstacles_data,
+    mock_get_strategy, mock_gen_world, mock_gen_obstacles, mock_instantiate, mock_validate,
+    strategy, mock_runner, fake_world_data, fake_obstacles_data, mock_master_seed
 ):
-    """
-    Sprawdza, że dane przeszkód wygenerowane w kroku 2 trafiają do optymalizatora w kroku 3.
-    """
+    """Sprawdza, że dane przeszkód wygenerowane w kroku 2 trafiają do optymalizatora w kroku 3."""
     mock_gen_world.return_value = fake_world_data
     mock_gen_obstacles.return_value = fake_obstacles_data
 
     mock_counting_strategy = MagicMock(return_value=np.zeros((2, 7, 3)))
     mock_instantiate.return_value = mock_counting_strategy
 
-    strategy.prepare_data(mock_runner)
+    strategy.prepare_data(mock_runner, mock_master_seed)
 
     _, kwargs = mock_counting_strategy.call_args
     assert kwargs["obstacles_data"] is fake_obstacles_data

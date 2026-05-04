@@ -136,6 +136,23 @@ def mock_runner():
     return runner
 
 
+@pytest.fixture
+def mock_master_seed():
+    """Mock dla SeedRegistry zwracający przewidywalne generatory losowości."""
+    mock_registry = MagicMock()
+    mock_registry.master_seed = 42
+    
+    _generators = {}
+    
+    def mock_rng(namespace: str):
+        if namespace not in _generators:
+            _generators[namespace] = np.random.default_rng(42)
+        return _generators[namespace]
+        
+    mock_registry.rng.side_effect = mock_rng
+    return mock_registry
+
+
 # --- Testy _map_to_world_data ---
 
 class TestMapToWorldData:
@@ -337,33 +354,33 @@ class TestMapToTrajectories:
 # --- Testy prepare_data (pelny przeplyw) ---
 
 class TestPrepareData:
-    def test_full_flow_box(self, tmp_path, mock_runner):
+    def test_full_flow_box(self, tmp_path, mock_runner, mock_master_seed):
         _make_all_csvs(tmp_path, shape_type="BOX")
         strategy = ReplayDataStrategy(tmp_path)
 
-        strategy.prepare_data(mock_runner)
+        strategy.prepare_data(mock_runner, mock_master_seed)
 
         assert isinstance(mock_runner.world_data, WorldData)
         assert isinstance(mock_runner.obstacles_data, ObstaclesData)
         assert mock_runner.drones_trajectories.shape == (2, 3, 3)
 
-    def test_full_flow_cylinder(self, tmp_path, mock_runner):
+    def test_full_flow_cylinder(self, tmp_path, mock_runner, mock_master_seed):
         _make_all_csvs(tmp_path, shape_type="CYLINDER")
         mock_runner.cfg = OmegaConf.create({
             "environment": {"params": {"shape_type": "CYLINDER"}},
         })
         strategy = ReplayDataStrategy(tmp_path)
 
-        strategy.prepare_data(mock_runner)
+        strategy.prepare_data(mock_runner, mock_master_seed)
 
         assert mock_runner.obstacles_data.shape_type == ObstacleShape.CYLINDER
 
-    def test_start_positions_from_first_waypoint(self, tmp_path, mock_runner):
+    def test_start_positions_from_first_waypoint(self, tmp_path, mock_runner, mock_master_seed):
         """Pozycje startowe powinny byc wyciagniete z pierwszego waypointu trajektorii."""
         _make_all_csvs(tmp_path)
         strategy = ReplayDataStrategy(tmp_path)
 
-        strategy.prepare_data(mock_runner)
+        strategy.prepare_data(mock_runner, mock_master_seed)
 
         # Dron 0: waypoint 0 -> [0.0, 0.0, 1.0]
         # Dron 1: waypoint 0 -> [1.0, 1.0, 1.0]
@@ -371,12 +388,12 @@ class TestPrepareData:
             mock_runner.start_positions, [[0.0, 0.0, 1.0], [1.0, 1.0, 1.0]]
         )
 
-    def test_end_positions_from_last_waypoint(self, tmp_path, mock_runner):
+    def test_end_positions_from_last_waypoint(self, tmp_path, mock_runner, mock_master_seed):
         """Pozycje koncowe powinny byc wyciagniete z ostatniego waypointu trajektorii."""
         _make_all_csvs(tmp_path)
         strategy = ReplayDataStrategy(tmp_path)
 
-        strategy.prepare_data(mock_runner)
+        strategy.prepare_data(mock_runner, mock_master_seed)
 
         # Dron 0: waypoint 2 -> [10.0, 10.0, 3.0]
         # Dron 1: waypoint 2 -> [11.0, 11.0, 3.0]
@@ -384,14 +401,14 @@ class TestPrepareData:
             mock_runner.end_positions, [[10.0, 10.0, 3.0], [11.0, 11.0, 3.0]]
         )
 
-    def test_missing_world_csv_raises(self, tmp_path, mock_runner):
+    def test_missing_world_csv_raises(self, tmp_path, mock_runner, mock_master_seed):
         """Brak pliku world_boundaries.csv powinien rzucic wyjatek."""
         strategy = ReplayDataStrategy(tmp_path)
 
         with pytest.raises(FileNotFoundError):
-            strategy.prepare_data(mock_runner)
+            strategy.prepare_data(mock_runner, mock_master_seed)
 
-    def test_missing_obstacles_csv_raises(self, tmp_path, mock_runner):
+    def test_missing_obstacles_csv_raises(self, tmp_path, mock_runner, mock_master_seed):
         """Brak pliku generated_obstacles.csv powinien rzucic wyjatek po wczytaniu swiata."""
         # Tworzymy tylko world CSV
         world_df = pd.DataFrame(
@@ -408,9 +425,9 @@ class TestPrepareData:
         strategy = ReplayDataStrategy(tmp_path)
 
         with pytest.raises(FileNotFoundError):
-            strategy.prepare_data(mock_runner)
+            strategy.prepare_data(mock_runner, mock_master_seed)
 
-    def test_missing_trajectories_csv_raises(self, tmp_path, mock_runner):
+    def test_missing_trajectories_csv_raises(self, tmp_path, mock_runner, mock_master_seed):
         """Brak pliku counted_trajectories.csv powinien rzucic wyjatek."""
         # Tworzymy world + obstacles, ale bez trajektorii
         world_df = pd.DataFrame(
@@ -431,9 +448,9 @@ class TestPrepareData:
         strategy = ReplayDataStrategy(tmp_path)
 
         with pytest.raises(FileNotFoundError):
-            strategy.prepare_data(mock_runner)
+            strategy.prepare_data(mock_runner, mock_master_seed)
 
-    def test_default_shape_type_when_missing_in_config(self, tmp_path):
+    def test_default_shape_type_when_missing_in_config(self, tmp_path, mock_master_seed):
         """Gdy shape_type brakuje w konfiguracji, uzywany jest domyslny CYLINDER."""
         _make_all_csvs(tmp_path, shape_type="CYLINDER")
         runner = MagicMock()
@@ -442,7 +459,7 @@ class TestPrepareData:
         })
 
         strategy = ReplayDataStrategy(tmp_path)
-        strategy.prepare_data(runner)
+        strategy.prepare_data(runner, mock_master_seed)
 
         assert runner.obstacles_data.shape_type == ObstacleShape.CYLINDER
 

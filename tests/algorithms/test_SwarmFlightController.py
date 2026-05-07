@@ -59,6 +59,73 @@ def test_initialization(mock_parent):
     assert len(algo.controllers) == 2
 
 # ==========================================
+# TESTY GEOMETRII
+# ==========================================
+
+def test_insert_midpoint_with_offset(mock_parent):
+    """Weryfikuje poprawność matematyczną wstawiania wektora offsetu w środek najbliższego segmentu."""
+    algo = SwarmFlightController(mock_parent, num_drones=1, is_obstacle=False)
+
+    waypoints = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0]
+    ])
+
+    target_pos = np.array([1.5, 0.0, 0.0])
+    offset = np.array([0.0, 1.0, 0.0]) 
+    
+    new_wp = algo._insert_midpoint_with_offset(waypoints, target_pos, offset)
+    
+    assert len(new_wp) == 4
+    expected_midpoint = np.array([1.0, 1.0, 0.0])
+    np.testing.assert_allclose(new_wp[1], expected_midpoint)
+    
+# ==========================================
+# TESTY ORKIESTRACJI TRAJEKTORII (KOLIZJE / NAPRAWA)
+# ==========================================
+
+@patch(f"{TARGET_MODULE}.check_collisions_njit")
+def test_verify_trajectories_detects_collision(mock_check_collisions, mock_parent):
+    """Weryfikacja integracji algorytmu z funkcją kolizji Numba JIT (check_collisions_njit)."""
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
+    
+    spline1, spline2 = MagicMock(), MagicMock()
+    spline1.total_duration = 5.0
+    spline2.total_duration = 5.0
+    spline1.get_state_at_time.return_value = (np.array([10.0, 0.0, 0.0]), np.zeros(3))
+    spline2.get_state_at_time.return_value = (np.array([10.5, 0.0, 0.0]), np.zeros(3))
+    
+    # Symulacja: kolizja drona 0 i 1 w ticku nr 25
+    mock_check_collisions.return_value = (0, 1, 25)
+    
+    collision = algo._verify_trajectories([spline1, spline2])
+    
+    assert collision is not None
+    assert collision[0] == 0
+    assert collision[1] == 1
+    np.testing.assert_array_equal(collision[2], [10.0, 0.0, 0.0])
+    np.testing.assert_array_equal(collision[3], [10.5, 0.0, 0.0])
+
+@patch.object(SwarmFlightController, '_verify_trajectories')
+@patch.object(SwarmFlightController, '_visualize_trajectories')
+@patch(f"{TARGET_MODULE}.NumbaTrajectoryProfile")
+def test_prepare_trajectories_repair_loop(MockProfile, mock_visualize, mock_verify, mock_parent):
+    """Sprawdzenie pętli retry (napraw i spróbuj ponownie)."""
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=False)
+
+    fake_collision = (0, 1, np.array([1,1,1]), np.array([1,1,1]))
+    mock_verify.side_effect = [fake_collision, None]
+    
+    with patch.object(algo, '_repair_waypoints', wraps=algo._repair_waypoints) as spy_repair:
+        splines = algo._prepare_trajectories()
+        
+        assert mock_verify.call_count == 2
+        assert spy_repair.call_count == 1
+        assert len(splines) == 2
+        mock_visualize.assert_called_once()
+
+# ==========================================
 # TESTY AKCJI I STATUSU
 # ==========================================
 
@@ -147,6 +214,15 @@ def test_obstacle_trajectories_are_flipped_versions_of_main(MockProfile, mock_vi
 
     np.testing.assert_array_equal(actual_0, expected_0)
     np.testing.assert_array_equal(actual_1, expected_1)
+
+@patch.object(SwarmFlightController, '_verify_trajectories')
+@patch.object(SwarmFlightController, '_visualize_trajectories')
+@patch(f"{TARGET_MODULE}.NumbaTrajectoryProfile")
+def test_obstacles_skip_collision_verification(MockProfile, mock_visualize, mock_verify, mock_parent):
+    """Zagrożenia omijają detekcję zderzeń międzydronowych w przygotowaniu lotu."""
+    algo = SwarmFlightController(mock_parent, num_drones=2, is_obstacle=True)
+    algo._prepare_trajectories()
+    mock_verify.assert_not_called()
 
 # ==========================================
 # REGRESJA: NumbaTrajectoryProfile API (bug 2026-04-29)

@@ -1,4 +1,5 @@
 # src/analysis/db/populate_database.py
+import logging
 from pathlib import Path
 import sqlite3
 import csv
@@ -7,9 +8,16 @@ from src.analysis.db.populate_trajectory_metrics import populate_trajectory_metr
 from src.analysis.db.populate_uav_metrics import populate_uav_metrics
 from src.analysis.db.populate_run_metrics import populate_run_metrics
 from src.analysis.db.populate_iteration_metrics import populate_iteration_metrics
+from src.analysis.db.populate_online_metrics import populate_online_metrics
+from src.analysis.db.populate_online_safety_metrics import populate_online_safety_metrics
+from src.analysis.db.populate_offline_objectives import populate_offline_objectives
+from src.analysis.db.populate_moo_quality import populate_moo_quality
+
+from src.analysis.db.utils import _to_float, _to_float_nullable, _to_int, _to_int_bool, _to_int_bool_nullable, _to_int_nullable, _to_str_nullable, list_run_directories, parse_run_dir_name
+from src.utils.per_gen_metrics import FEASIBILITY_EPS
 
 
-from .utils import list_run_directories, parse_run_dir_name
+logger = logging.getLogger(__name__)
 
 
 def populate_database(experiment_dir: str | Path) -> Path:
@@ -24,21 +32,18 @@ def populate_database(experiment_dir: str | Path) -> Path:
             run_meta = parse_run_dir_name(run_dir.name)
             run_id = run_dir.name
 
+            # Wstawiamy/aktualizujemy wpis w `runs` z status='discovered'
+            # ZANIM zaczniemy ładować dane. Jeśli któryś z populatorów rzuci
+            # wyjątkiem, przerwiemy i zapiszemy aggregation_status='failed'
+            # z aggregation_error w except poniżej.
             conn.execute(
                 """
                 INSERT INTO runs (
-                    run_id,
-                    run_dir_name,
-                    source_path,
-                    optimizer_algo,
-                    avoidance_algo,
-                    environment,
-                    seed,
-                    algorithm_pair,
-                    aggregation_status,
-                    aggregated_at
+                    run_id, run_dir_name, source_path, optimizer_algo,
+                    avoidance_algo, environment, seed, algorithm_pair,
+                    aggregation_status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'aggregated', CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered')
                 ON CONFLICT(run_id) DO UPDATE SET
                     run_dir_name = excluded.run_dir_name,
                     source_path = excluded.source_path,
@@ -47,47 +52,109 @@ def populate_database(experiment_dir: str | Path) -> Path:
                     environment = excluded.environment,
                     seed = excluded.seed,
                     algorithm_pair = excluded.algorithm_pair,
-                    aggregation_status = 'aggregated',
-                    aggregated_at = CURRENT_TIMESTAMP
+                    aggregation_status = 'discovered',
+                    aggregation_error = NULL
                 """,
                 (
-                    run_id,
-                    run_dir.name,
-                    str(run_dir),
-                    run_meta["optimizer"],
-                    run_meta["avoidance"],
-                    run_meta["environment"],
-                    run_meta["seed"],
+                    run_id, run_dir.name, str(run_dir),
+                    run_meta["optimizer"], run_meta["avoidance"],
+                    run_meta["environment"], run_meta["seed"],
                     run_meta["algorithm_pair"],
                 ),
             )
 
-            _register_run_files(conn, run_id, run_dir)
+            try:
+                _register_run_files(conn, run_id, run_dir)
 
-            # 1. Dane źródłowe
-            _load_optimization_timings(conn, run_id, run_dir / "optimization_timings.csv")
-            _load_collisions(conn, run_id, run_dir / "collisions.csv")
-            _load_evasion_events(conn, run_id, run_dir / "evasion_events.csv")
-            _load_world_boundaries(conn, run_id, run_dir / "world_boundaries.csv")
-            _load_generated_obstacles(conn, run_id, run_dir / "generated_obstacles.csv")
-            _load_counted_trajectories(conn, run_id, run_dir / "counted_trajectories.csv")
-            _load_trajectories(conn, run_id, run_dir / "trajectories.csv")
-            _load_optimization_history(conn, run_id, run_dir / "optimization_history/optimization_history.h5")
+                # 1. Dane źródłowe
+                _load_optimization_timings(conn, run_id, run_dir / "optimization_timings.csv")
+                _load_collisions(conn, run_id, run_dir / "collisions.csv")
+                _load_evasion_events(conn, run_id, run_dir / "evasion_events.csv")
+                _load_world_boundaries(conn, run_id, run_dir / "world_boundaries.csv")
+                _load_generated_obstacles(conn, run_id, run_dir / "generated_obstacles.csv")
+                _load_counted_trajectories(conn, run_id, run_dir / "counted_trajectories.csv")
+                _load_trajectories(conn, run_id, run_dir / "trajectories.csv")
+                _load_optimization_history(conn, run_id, run_dir / "optimization_history/optimization_history.h5")
+                populate_online_metrics(conn, run_id, run_dir)
 
-            # 2. Tabele pochodne
-            populate_trajectory_metrics(conn, run_id)
-            populate_iteration_metrics(conn, run_id)
-            populate_uav_metrics(conn, run_id)
+                populate_moo_quality(
+                    conn, run_id,
+                    run_dir / "optimization_history" / "optimization_history.h5",
+                    reference_set=None,
+                )
 
-            # 3. Agregat końcowy
-            populate_run_metrics(conn, run_id)
+                # 2. Tabele pochodne
+                populate_trajectory_metrics(conn, run_id)
+                populate_iteration_metrics(conn, run_id)
+                populate_uav_metrics(conn, run_id)
+                populate_online_safety_metrics(conn, run_id)
+
+                # 3. Agregat końcowy
+                populate_run_metrics(conn, run_id)
+
+                # 4. F-vector z h5 — UPDATE final_objective + total_threat_cost
+                # + total_turn_penalty + total_coordination_cost + final_*.
+                populate_offline_objectives(
+                    conn, run_id,
+                    run_dir / "optimization_history" / "optimization_history.h5",
+                )
+
+                # Sukces — oznacz jako 'aggregated' z aggregated_at.
+                conn.execute(
+                    """UPDATE runs SET
+                        aggregation_status = 'aggregated',
+                        aggregated_at = CURRENT_TIMESTAMP,
+                        aggregation_error = NULL
+                       WHERE run_id = ?""",
+                    (run_id,),
+                )
+            except Exception as e:
+                err_msg = f"{type(e).__name__}: {e}"
+                logger.error(
+                    f"populate_database: błąd agregacji run_id={run_id!r}: {err_msg}",
+                    exc_info=True,
+                )
+                conn.execute(
+                    """UPDATE runs SET
+                        aggregation_status = 'failed',
+                        aggregation_error = ?
+                       WHERE run_id = ?""",
+                    (err_msg[:1000], run_id),  # truncate na 1KB żeby nie spuchnąć DB
+                )
+                # Kontynuujemy z kolejnymi runami — pojedynczy fail nie blokuje
+                # całej agregacji (status w runs pozwala później zidentyfikować
+                # i ewentualnie ponownie uruchomić).
 
         conn.commit()
 
     return db_path
 
 
+def _count_csv_rows(path: Path) -> int | None:
+    """Zlicza wiersze danych w CSV (n_lines − 1 dla nagłówka). Zwraca None
+    gdy plik nie istnieje albo jest pusty."""
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            n = sum(1 for _ in f)
+        return max(0, n - 1)  # minus header
+    except Exception:
+        return None
+
+
 def _register_run_files(conn: sqlite3.Connection, run_id: str, run_dir: Path) -> None:
+    """Rejestruje pliki źródłowe runu w `run_files`.
+
+    Wypełnia 8 z 8 kolumn (po refaktorze 2026-05-07 — usunięte `checksum`
+    i `extra_json`):
+    - `relative_path`, `file_format`, `exists_flag`, `size_bytes` —
+      podstawowe metadata systemu plików
+    - `row_count` — liczba wierszy danych dla CSV (NULL dla h5/log)
+    - `modified_at` — ISO 8601 timestamp z `stat().st_mtime`
+    """
+    from datetime import datetime, timezone
+
     file_map = {
         "collisions_csv": "collisions.csv",
         "counted_trajectories_csv": "counted_trajectories.csv",
@@ -99,24 +166,36 @@ def _register_run_files(conn: sqlite3.Connection, run_id: str, run_dir: Path) ->
         "optimization_timings_csv": "optimization_timings.csv",
         "trajectories_csv": "trajectories.csv",
         "world_boundaries_csv": "world_boundaries.csv",
+        "online_optimization_csv": "online_optimization.csv",
+        "convergence_traces_csv": "convergence_traces.csv",
     }
 
     for role, relative_path in file_map.items():
         full_path = run_dir / relative_path
+        exists = full_path.exists()
+        file_ext = full_path.suffix.lstrip(".") or None
+
+        size_bytes = full_path.stat().st_size if exists else None
+        modified_at = (
+            datetime.fromtimestamp(full_path.stat().st_mtime, tz=timezone.utc)
+            .isoformat(timespec="seconds")
+            if exists else None
+        )
+        # row_count tylko dla CSV (h5 ma własną granularność datasetów,
+        # log ma niespecyficzną semantykę linii).
+        row_count = _count_csv_rows(full_path) if file_ext == "csv" else None
+
         conn.execute(
             """
             INSERT OR REPLACE INTO run_files (
-                run_id, file_role, relative_path, file_format, exists_flag, size_bytes
+                run_id, file_role, relative_path, file_format, exists_flag,
+                size_bytes, row_count, modified_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                run_id,
-                role,
-                relative_path,
-                full_path.suffix.lstrip(".") or None,
-                int(full_path.exists()),
-                full_path.stat().st_size if full_path.exists() else None,
+                run_id, role, relative_path, file_ext, int(exists),
+                size_bytes, row_count, modified_at,
             ),
         )
 
@@ -239,6 +318,23 @@ def _load_collisions(conn: sqlite3.Connection, run_id: str, csv_path: Path) -> N
 
 
 def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) -> None:
+    """Ładuje `evasion_events.csv` do tabeli `evasion_events`.
+
+    Zmiany 2026-05-07:
+    - `astar_success` (kolumna w CSV i schema DB) **usunięta** — algorytm A*
+      wycofany; pole było zawsze `NOT fallback_used` (semantycznie redundantne).
+    - Nowa kolumna `ttc_source` ('oracle_discrete' | 'continuous') —
+      jednoznacznie określa źródło `ttc` (oracle dyskretyzowane z lookahead
+      vs naive `dist/closing_speed`).
+    - Nowa kolumna `preferred_axis` ('right'|'left'|'up'|'down'|NULL) —
+      wyodrębniona z poprzedniego bug-prone `notes="axis=..."` patternu.
+      Notacja kierunkowa zgodna z `AxisChooser._choose`. NULL gdy oś nie
+      określona (avoidance nie wstawił `axis_chosen` do extra dict).
+
+    Backward-compat: stare CSV (sprzed 2026-05-07) z kolumną `astar_success`
+    wciąż się ładuje — nadmiarowa kolumna jest po prostu ignorowana. Brak
+    `ttc_source` / `preferred_axis` w starych CSV → NULL w DB.
+    """
     if not csv_path.exists():
         return
 
@@ -254,7 +350,7 @@ def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) 
             "threat_x", "threat_y", "threat_z",
             "threat_vx", "threat_vy", "threat_vz",
             "rejoin_x", "rejoin_y", "rejoin_z", "rejoin_arc",
-            "astar_success", "fallback_used",
+            "fallback_used",
             "pos_error_at_rejoin", "vel_error_at_rejoin",
             "planning_wall_time_s", "notes",
         }
@@ -279,6 +375,30 @@ def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) 
             if not event_type:
                 raise ValueError(f"{csv_path}:{line_no}: puste event_type")
 
+            # `preferred_axis`: nowsze CSV mają jako osobną kolumnę. Starsze
+            # — wyciągamy z `notes` (`"axis=right"` pattern). "unknown" → NULL.
+            # Notacja kierunkowa: 'right'/'left'/'up'/'down' zgodnie z
+            # `AxisChooser._choose`.
+            preferred_axis = _to_str_nullable(row.get("preferred_axis"))
+            notes_str = _to_str_nullable(row.get("notes"))
+            valid_axes = ("right", "left", "up", "down")
+            if not preferred_axis and notes_str and notes_str.startswith("axis="):
+                axis_candidate = notes_str[len("axis="):].strip()
+                if axis_candidate in valid_axes:
+                    preferred_axis = axis_candidate
+                # "unknown" / inne → preferred_axis = None
+            if preferred_axis not in valid_axes:
+                preferred_axis = None
+            # Jeśli notes zawierało wyłącznie "axis=..." i wyekstraktowaliśmy
+            # axis (lub było "axis=unknown"), wyczyść notes — nie ma już
+            # informacyjnej wartości.
+            if notes_str and notes_str.startswith("axis="):
+                notes_str = None
+
+            ttc_source = _to_str_nullable(row.get("ttc_source"))
+            if ttc_source not in ("oracle_discrete", "continuous"):
+                ttc_source = None
+
             rows.append(
                 (
                     run_id,
@@ -288,6 +408,7 @@ def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) 
                     event_type,
                     mode,
                     _to_float_nullable(row.get("ttc")),
+                    ttc_source,
                     _to_float_nullable(row.get("dist_to_threat")),
                     _to_float_nullable(row.get("threat_x")),
                     _to_float_nullable(row.get("threat_y")),
@@ -299,12 +420,12 @@ def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) 
                     _to_float_nullable(row.get("rejoin_y")),
                     _to_float_nullable(row.get("rejoin_z")),
                     _to_float_nullable(row.get("rejoin_arc")),
-                    _to_int_bool_nullable(row.get("astar_success")),
+                    preferred_axis,
                     _to_int_bool_nullable(row.get("fallback_used")),
                     _to_float_nullable(row.get("pos_error_at_rejoin")),
                     _to_float_nullable(row.get("vel_error_at_rejoin")),
                     _to_float_nullable(row.get("planning_wall_time_s")),
-                    _to_str_nullable(row.get("notes")),
+                    notes_str,
                 )
             )
 
@@ -318,6 +439,7 @@ def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) 
             event_type,
             mode,
             ttc,
+            ttc_source,
             dist_to_threat,
             threat_x,
             threat_y,
@@ -329,14 +451,14 @@ def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) 
             rejoin_y,
             rejoin_z,
             rejoin_arc,
-            astar_success,
+            preferred_axis,
             fallback_used,
             pos_error_at_rejoin,
             vel_error_at_rejoin,
             planning_wall_time_s,
             notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -402,6 +524,18 @@ def _load_world_boundaries(conn: sqlite3.Connection, run_id: str, csv_path: Path
 
 
 def _load_generated_obstacles(conn: sqlite3.Connection, run_id: str, csv_path: Path) -> None:
+    """Ładuje `generated_obstacles.csv` do tabeli `generated_obstacles`.
+
+    Refaktor 2026-05-07: rozdzielona semantyka per shape_type.
+    - Cylinder (forest): zapisujemy `shape_type='cylinder'`, `radius`,
+      `height`; `length=NULL, width=NULL`.
+    - Box (urban): zapisujemy `shape_type='box'`, `length`, `width`,
+      `height`; `radius=NULL`.
+
+    Nie ma już kolumny `unused_dim`. Backward-compat dla starych CSV
+    cylindra (z `unused_dim` jako 6. kolumną) — populator po prostu jej
+    nie czyta.
+    """
     if not csv_path.exists():
         return
 
@@ -442,7 +576,6 @@ def _load_generated_obstacles(conn: sqlite3.Connection, run_id: str, csv_path: P
             if obstacle_mode == "cylinder":
                 radius = _to_float_nullable(row.get("radius"))
                 height = _to_float_nullable(row.get("height"))
-                unused_dim = _to_float_nullable(row.get("unused_dim"))
 
                 if radius is None or height is None:
                     raise ValueError(
@@ -454,12 +587,12 @@ def _load_generated_obstacles(conn: sqlite3.Connection, run_id: str, csv_path: P
                     (
                         run_id,
                         line_no - 2,
-                        x,
-                        y,
-                        z,
+                        x, y, z,
+                        "cylinder",
                         radius,
+                        None,    # length
+                        None,    # width
                         height,
-                        unused_dim,
                     )
                 )
 
@@ -479,12 +612,12 @@ def _load_generated_obstacles(conn: sqlite3.Connection, run_id: str, csv_path: P
                     (
                         run_id,
                         line_no - 2,
-                        x,
-                        y,
-                        z,
-                        length,   # zapis kompatybilny: radius <- length
-                        height,   # height <- height
-                        width,    # unused_dim <- width
+                        x, y, z,
+                        "box",
+                        None,    # radius
+                        length,
+                        width,
+                        height,
                     )
                 )
 
@@ -497,16 +630,12 @@ def _load_generated_obstacles(conn: sqlite3.Connection, run_id: str, csv_path: P
         conn.executemany(
             """
             INSERT INTO generated_obstacles (
-                run_id,
-                obstacle_index,
-                x,
-                y,
-                z,
-                radius,
-                height,
-                unused_dim
+                run_id, obstacle_index,
+                x, y, z,
+                shape_type,
+                radius, length, width, height
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -771,7 +900,10 @@ def _load_optimization_history(conn: sqlite3.Connection, run_id: str, h5_path: P
             cv_total = _total_cv(cv)
 
             if feasible_mask is None and cv_total is not None:
-                feasible_mask = cv_total <= 0.0
+                # Spójna tolerancja z `per_gen_metrics.FEASIBILITY_EPS` —
+                # `≤ 0.0` traktowałoby CV=1e-12 (floating-point szum) jako
+                # infeasible, mimo że `per_gen_metrics_from_FG` ją zaliczyła.
+                feasible_mask = cv_total <= FEASIBILITY_EPS
 
             if feasible_mask is not None:
                 feasible_solutions = int(np.count_nonzero(feasible_mask))
@@ -843,75 +975,3 @@ def _load_optimization_history(conn: sqlite3.Connection, run_id: str, h5_path: P
                 """,
                 rows,
             )
-
-
-def _to_int(value):
-    return None if value in (None, "") else int(value)
-
-
-def _to_float(value):
-    return None if value in (None, "") else float(value)
-
-def _to_bool(value):
-    if value is None:
-        return None
-
-    value = str(value).strip().lower()
-    if value in {"true", "1", "yes", "y"}:
-        return True
-    if value in {"false", "0", "no", "n"}:
-        return False
-    return None
-
-def _to_int_bool(value):
-    if value is None:
-        return None
-
-    value = str(value).strip().lower()
-    if value in {"true", "1", "yes", "y"}:
-        return 1
-    if value in {"false", "0", "no", "n"}:
-        return 0
-    return None
-
-def _to_str_nullable(value):
-    if value is None:
-        return None
-    value = str(value).strip()
-    if value == "" or value.lower() == "nan":
-        return None
-    return value
-
-def _to_int_nullable(value):
-    value = _to_str_nullable(value)
-    return None if value is None else int(value)
-
-def _to_float_nullable(value):
-    value = _to_str_nullable(value)
-    return None if value is None else float(value)
-
-def _to_int_bool_nullable(value):
-    value = _to_str_nullable(value)
-    if value is None:
-        return None
-    if value.lower() in {"true", "1", "yes", "y"}:
-        return 1
-    if value.lower() in {"false", "0", "no", "n"}:
-        return 0
-    return None
-
-def _to_int_nullable(value):
-    if value is None:
-        return None
-    value = str(value).strip()
-    if value == "" or value.lower() == "nan":
-        return None
-    return int(value)
-
-def _to_float_nullable(value):
-    if value is None:
-        return None
-    value = str(value).strip()
-    if value == "" or value.lower() == "nan":
-        return None
-    return float(value)

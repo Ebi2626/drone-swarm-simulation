@@ -138,6 +138,10 @@ class MealpyOptimizer(IPathOptimizer):
         self.rng = rng
         self.algorithm_kwargs = dict(algorithm_kwargs or {})
 
+    @property
+    def population_size(self) -> int:
+        return self.pop_size
+
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
         t_start = time.perf_counter()
 
@@ -171,10 +175,23 @@ class MealpyOptimizer(IPathOptimizer):
                 "max_time": max(self.min_compute_time_s, budget.remaining),
             }
 
+            # Ceteris paribus: jeśli `GenericOptimizingAvoidance` pre-wygenerował
+            # populację, przekazujemy ją do mealpy jako `starting_solutions`.
+            # Mealpy wymaga listy 1D arrays o kształcie (pop_size, n_dims).
+            starting_solutions = None
+            if (
+                problem.initial_population is not None
+                and problem.initial_population.shape[0] == self.pop_size
+            ):
+                starting_solutions = [
+                    np.clip(sol, lb, ub) for sol in problem.initial_population
+                ]
+
             best_agent = algo.solve(
                 problem=mealpy_problem,
                 termination=termination,
                 seed=self.rng,
+                starting_solutions=starting_solutions,
             )
 
             best_x = np.asarray(best_agent.solution, dtype=np.float64)

@@ -172,17 +172,8 @@ def populate_uav_metrics(conn: sqlite3.Connection, run_id: str) -> None:
                 run_id,
                 uav_id,
                 success,
-                None,                 # final_objective
                 path_length_2d,
                 path_length_3d,
-                None,                 # energy_cost
-                None,                 # smoothness_cost
-                None,                 # threat_cost
-                None,                 # altitude_cost
-                None,                 # terrain_penalty
-                None,                 # turn_penalty
-                None,                 # climb_penalty
-                None,                 # collision_penalty
                 collision_count,
                 evasion_event_count,
                 extra_json,
@@ -203,22 +194,13 @@ def populate_uav_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             run_id,
             uav_id,
             success,
-            final_objective,
             path_length_2d,
             path_length_3d,
-            energy_cost,
-            smoothness_cost,
-            threat_cost,
-            altitude_cost,
-            terrain_penalty,
-            turn_penalty,
-            climb_penalty,
-            collision_penalty,
             collision_count,
             evasion_event_count,
             extra_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows_to_insert,
     )

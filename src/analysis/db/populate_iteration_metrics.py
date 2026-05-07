@@ -40,6 +40,12 @@ def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             "nondominated_ratio": None,
             "hypervolume": None,
             "igd_plus": None,
+            "gd": None,
+            "spread": None,
+            "spacing": None,
+            "r2_indicator": None,
+            "front_size": None,
+            "hypervolume_normalized": None,
             "extra": {},
         }
 
@@ -137,6 +143,36 @@ def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             handled = True
 
         # =========================================================
+        # MOO quality indicators (populate_moo_quality, 2026-05-06)
+        # =========================================================
+        elif metric_name == "gd":
+            entry["gd"] = metric_value
+            handled = True
+
+        elif metric_name == "spread":
+            entry["spread"] = metric_value
+            handled = True
+
+        elif metric_name == "spacing":
+            entry["spacing"] = metric_value
+            handled = True
+
+        elif metric_name == "r2_indicator":
+            entry["r2_indicator"] = metric_value
+            handled = True
+
+        # =========================================================
+        # Diagnostyki MOO (Kamień 2 — 2026-05-07)
+        # =========================================================
+        elif metric_name == "front_size":
+            entry["front_size"] = int(metric_value)
+            handled = True
+
+        elif metric_name == "hypervolume_normalized":
+            entry["hypervolume_normalized"] = metric_value
+            handled = True
+
+        # =========================================================
         # Fallback: zachowaj wszystko, czego nie mapujemy jawnie
         # =========================================================
         if not handled:
@@ -197,6 +233,12 @@ def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
                 entry["nondominated_ratio"],
                 entry["hypervolume"],
                 entry["igd_plus"],
+                entry["gd"],
+                entry["spread"],
+                entry["spacing"],
+                entry["r2_indicator"],
+                entry["front_size"],
+                entry["hypervolume_normalized"],
                 extra_json,
             )
         )
@@ -224,9 +266,15 @@ def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             nondominated_ratio,
             hypervolume,
             igd_plus,
+            gd,
+            spread,
+            spacing,
+            r2_indicator,
+            front_size,
+            hypervolume_normalized,
             extra_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows_to_insert,
     )

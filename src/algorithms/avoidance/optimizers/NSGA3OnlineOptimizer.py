@@ -186,6 +186,10 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
         self.min_compute_time_s = float(min_compute_time_s)
         self.rng = rng
 
+    @property
+    def population_size(self) -> int:
+        return self.pop_size
+
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
         t_start = time.perf_counter()
 
@@ -207,10 +211,24 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
             # ale obj space jest 1-D więc niching nie wpływa na selekcję.
             ref_dirs = get_reference_directions("das-dennis", 1, n_partitions=1)
 
-            algorithm = NSGA3(
+            # Ceteris paribus: jeśli `GenericOptimizingAvoidance` pre-wygenerował
+            # populację, przekazujemy ją jako `sampling` do pymoo. Pymoo akceptuje
+            # numpy array (pop_size, n_var) i używa go AS-IS bez perturbacji.
+            # UWAGA: pymoo traktuje jawne `sampling=None` jako nadpisanie defaultu
+            # (FloatRandomSampling), dlatego budujemy kwargs warunkowo.
+            nsga3_kwargs: dict = dict(
                 ref_dirs=ref_dirs,
                 pop_size=self.pop_size,
             )
+            if (
+                problem.initial_population is not None
+                and problem.initial_population.shape[0] == self.pop_size
+            ):
+                nsga3_kwargs["sampling"] = np.clip(
+                    problem.initial_population, lb, ub
+                )
+
+            algorithm = NSGA3(**nsga3_kwargs)
             callback = _BudgetCallback(budget)
 
             res = minimize(

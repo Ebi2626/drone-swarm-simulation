@@ -39,8 +39,16 @@ def mock_master_seed():
     return seeds
 
 def test_calculate_n_partitions():
+    """
+    Das-Dennis: H = C(n_obj+p-1, p). Funkcja szuka p ∈ [1, 49] minimalizującego
+    |H - pop_size|, z early-break gdy H już przekroczyło pop_size.
+
+    Production: NSGA-III dla 5 obj (zgodnie z `VectorizedEvaluator`):
+      pop_size=100, n_obj=5 → p=5: C(9,5)=126, |126-100|=26 najmniejsze.
+      pop_size=100, n_obj=3 → p=13: C(15,13)=105, |105-100|=5 najmniejsze.
+    """
     assert calculate_n_partitions(100, 3) == 13
-    assert calculate_n_partitions(100, 2) == 12
+    assert calculate_n_partitions(100, 5) == 5
 
 
 def test_swarm_optimization_problem_bounds(mock_world_data):

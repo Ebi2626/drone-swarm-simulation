@@ -1,142 +1,194 @@
-# src/runner/ — Strategie uruchomieniowe eksperymentów
+# src/runner/ — Strategie uruchomieniowe eksperymentow
 
-Katalog zawiera **Strategy Pattern** dla różnych trybów uruchamiania symulatora roju dronów. Implementują abstrakcyjny interfejs `ExperimentDataStrategy` z metodą `prepare_data(runner: ExperimentRunner)`. Przełączane przez CLI/Hydra.
+Katalog zawiera **Strategy Pattern** dla roznych trybow uruchamiania symulatora
+roju dronow. Implementuja abstrakcyjny interfejs `ExperimentDataStrategy`
+z metoda `prepare_data(runner, seeds)`. Przelaczane przez CLI/Hydra.
 
-**Główne tryby:**
-- **Generowanie nowych eksperymentów** (domyślne)
+**Glowne tryby:**
+- **Generowanie nowych eksperymentow** (domyslne)
 - **Odtwarzanie z archiwum** (`--replay /path/to/results`)
 
-## 🏗️ Architektura
+## Architektura
 
 ```
 src/runner/
-├── ExperimentDataStrategy.py     # ABC interfejs 
-├── GenerationDataStrategy.py     # Nowy eksperyment 
-└── ReplayDataStrategy.py         # Replay z CSV
+├── ExperimentDataStrategy.py     # ABC interfejs
+├── GenerationDataStrategy.py     # Nowy eksperyment (offline optimization)
+└── ReplayDataStrategy.py         # Replay z CSV (deserializacja)
 ```
 
-**Interfejs bazowy** (`ExperimentDataStrategy`):
+## ExperimentDataStrategy — Interfejs bazowy
+
 ```python
 from abc import ABC, abstractmethod
-from main import ExperimentRunner
+from typing import TYPE_CHECKING
+from src.utils.SeedRegistry import SeedRegistry
+
+if TYPE_CHECKING:
+    from main import ExperimentRunner
 
 class ExperimentDataStrategy(ABC):
     @abstractmethod
-    def prepare_data(self, runner: ExperimentRunner):
+    def prepare_data(self, runner: "ExperimentRunner", seeds: SeedRegistry):
         pass
 ```
 
-## 🎯 GenerationDataStrategy — Nowy eksperyment
+`SeedRegistry` zapewnia deterministyczne PRNG per-subsystem (np.
+`seeds.rng("environment")` dla obstacle placement, `seeds` przekazywane
+do counting_strategy). Import `ExperimentRunner` za `TYPE_CHECKING` guardiem
+eliminuje cykliczna zaleznosc z `main.py`.
 
-**Tryb domyślny**: Generuje środowisko + optymalizuje trajektorie offline.
+## GenerationDataStrategy — Nowy eksperyment
 
-**Pipeline** (4 etapy):
-1. **`generate_world_boundaries()`** — tunele misji (track_width×length×height)
-2. **`generate_obstacles()`** — predefiniowana liczba przeszkód (`strategy_grid_jitter` / `random_uniform`)
-3. **Uruchom algorytm** (`counting_strategy` z `algorithms/`)
-4. **Archiwizacja** (CSV: world_boundaries, generated_obstacles, counted_trajectories)
+Tryb domyslny: generuje srodowisko + optymalizuje trajektorie offline.
+
+### Pipeline (5 etapow)
+
+```
+1. generate_world_boundaries(width, length, height, ground_height)
+      → runner.world_data: WorldData
+
+2. generate_obstacles(world_data, n_obstacles, shape_type, placement_strategy,
+                      size_params, start_positions, target_positions,
+                      safe_radius, rng=seeds.rng("environment"))
+      → runner.obstacles_data: ObstaclesData
+      [warunkowy — tylko gdy runner.placement_strategy_name is not None]
+
+3. instantiate(runner.cfg.optimizer) → counting_strategy
+   functools.partial(counting_strategy, ..., seeds=seeds)
+      → runner.drones_trajectories: ndarray (N_drones, N_wp, 3)
+
+4. validate_trajectories(drones_trajectories, start_positions, label=opt_label)
+      Sanity-check: drony stojace w starcie, zdegenerowane trajektorie.
+      Loguje WARNING do stdout PRZED uruchomieniem PyBullet.
+
+5. Archiwizacja (jezeli runner.logger is not None):
+      logger.log_chosen_trajectories(drones_trajectories)
+      logger.log_world_dimensions(world_data)
+      logger.log_obstacles(obstacles_data)
+```
+
+### Kluczowe importy / zaleznosci
+
+| Import | Zrodlo | Rola |
+|--------|--------|------|
+| `generate_world_boundaries` | `src.environments.abstraction` | Tunele misji |
+| `generate_obstacles` | `src.environments.abstraction` | Predefiniowana liczba przeszkod |
+| `get_placement_strategy` | `configs.environment.strategies` | `strategy_grid_jitter` / `random_uniform` |
+| `validate_trajectories` | `src.utils.trajectory_validator` | Post-optimization sanity check |
+| `hydra.utils.instantiate` | Hydra | DI counting_strategy z YAML |
+
+Uwaga: `generate_world_boundaries`, `generate_obstacles` etc. to **funkcje
+importowane**, nie metody klasy — cala logika zyje w `prepare_data()`.
+
+## ReplayDataStrategy — Odtwarzanie eksperymentu
+
+Aktywacja: `--replay /path/to/results`
+
+### Konstruktor
 
 ```python
-# Logi wykonania
-INFO: "Generowanie nowego środowiska i optymalizacja trajektorii (Offline Path-Planning)"
-TITLE: "1. Generowanie granic świata..."
-TITLE: "2. Generowanie przeszkód..."
-"Uruchamianie obliczeń algorytmu metaheurystycznego..."
-TITLE: "4. Archiwizacja stanu początkowego"
+def __init__(self, results_path: str):
+    self.results_path = Path(results_path)
 ```
 
-**Integracja**: `hydra.utils.instantiate(runner.cfg.optimizer)`, `get_placement_strategy()`.
+### Deserializacja CSV -> struktury Python
 
-## 🔄 ReplayDataStrategy — Odtwarzanie eksperymentu
-
-**Aktywacja**: `--replay /path/to/results`
-
-**Deserializacja CSV** → struktury Python:
 ```
 results/
-├── world_boundaries.csv      # WorldData (X,Y,Z → min/max/center/bounds)
+├── world_boundaries.csv      # WorldData (X,Y,Z -> min/max/center/bounds)
 ├── generated_obstacles.csv   # ObstaclesData (typ: CYLINDER/BOX)
 └── counted_trajectories.csv  # Tensor [num_drones, num_waypoints, 3]
 ```
 
-**Mapowanie**:
-| CSV → Obiekt | Format | Walidacja |
-|--------------|--------|-----------|
-| `world_boundaries.csv` | `Axis: X/Y/Z → Min/Max/Center/Dimension` | Pandas → NumPy → `WorldData` |
-| `obstacles.csv` | `x,y,z,radius/width,length,height` | Dynamiczne kolumny/prostopadłościany (CYLINDER/BOX) |
-| `trajectories.csv` | `drone_id, waypoint_id, x,y,z` | Sortowane → Tensor `[N_drones, N_wp, 3]` |
+### Metody prywatne (prefiks `_`)
 
+| Metoda | Input | Output | Uwagi |
+|--------|-------|--------|-------|
+| `_map_to_world_data(df)` | DataFrame (Axis, Min/Max/Center/Dimension) | `WorldData` | Sortowanie po Axis=[X,Y,Z], bounds=(3,2) |
+| `_map_to_obstacles_data(df, shape_type_str)` | DataFrame + "CYLINDER"/"BOX" | `ObstaclesData` | CYLINDER: 5 kol -> pad z 0.0 do 6 kol (kanoniczny format) |
+| `_map_to_trajectories(df)` | DataFrame (drone_id, waypoint_id, x, y, z) | `ndarray (N,W,3)` | Sortowanie per drone_id -> waypoint_id |
 
-## 🔄 Diagram Strategy Pattern + Runner
+### Pipeline `prepare_data`
+
+```
+1. world_boundaries.csv → _map_to_world_data → runner.world_data
+2. generated_obstacles.csv → _map_to_obstacles_data → runner.obstacles_data
+3. counted_trajectories.csv → _map_to_trajectories → runner.drones_trajectories
+4. Injection pozycji startowych/koncowych z tensora:
+     runner.start_positions = drones_trajectories[:, 0, :]
+     runner.end_positions   = drones_trajectories[:, -1, :]
+   (odcina symulacje od losowych wartosci z YAML — 100% determinizm replay)
+```
+
+### Cylinder padding (CYLINDER → 6-kolumnowy format)
+
+`ObstaclesData.data` ma kanoniczna postac `(N, 6)`. CSV dla lasu (CYLINDER)
+zapisuje 5 kolumn (`x, y, z, radius, height` — `SimulationLogger` pomija
+`unused_dim`). Deserializacja dopelnia szosta kolumne zerami:
+
+```python
+if shape_type == ObstacleShape.CYLINDER and data_matrix.shape[1] == 5:
+    pad = np.zeros((data_matrix.shape[0], 1), dtype=np.float64)
+    data_matrix = np.hstack([data_matrix, pad])
+```
+
+## Diagram Strategy Pattern + Runner
 
 ```mermaid
 classDiagram
-    class ExperimentDataStrategyABC {
+    class ExperimentDataStrategy_ABC {
         <<interface>>
-        +prepare_data(runner)
+        +prepare_data(runner, seeds: SeedRegistry)*
     }
-    
+
     class GenerationDataStrategy {
-        +generate_world_boundaries()
-        +generate_obstacles()
-        +run_optimizer()
-        +log_data()
+        +prepare_data(runner, seeds)
+        -calls: generate_world_boundaries()
+        -calls: generate_obstacles(rng=seeds.rng)
+        -calls: instantiate(cfg.optimizer)
+        -calls: validate_trajectories()
+        -calls: logger.log_*()
     }
-    
+
     class ReplayDataStrategy {
-        +map_to_world_data(df)
-        +map_to_obstacles_data(df, shape_type)
-        +map_to_trajectories(df)
+        -results_path: Path
+        +prepare_data(runner, seeds)
+        -_map_to_world_data(df) WorldData
+        -_map_to_obstacles_data(df, shape_type) ObstaclesData
+        -_map_to_trajectories(df) ndarray
     }
-    
+
     class ExperimentRunner {
-        +world_data
-        +obstacles_data  
-        +drone_trajectories
-        +cfg (Hydra)
-        +CLI: --replay path
+        +world_data: WorldData
+        +obstacles_data: ObstaclesData
+        +drones_trajectories: ndarray
+        +start_positions: ndarray
+        +end_positions: ndarray
+        +logger: SimulationLogger
+        +cfg: DictConfig
     }
-    
-    ExperimentDataStrategyABC <|-- GenerationDataStrategy
-    ExperimentDataStrategyABC <|-- ReplayDataStrategy
-    ExperimentRunner ..|> ExperimentDataStrategyABC : strategy.prepare_data()
+
+    ExperimentDataStrategy_ABC <|-- GenerationDataStrategy
+    ExperimentDataStrategy_ABC <|-- ReplayDataStrategy
+    ExperimentRunner ..> ExperimentDataStrategy_ABC : strategy.prepare_data()
 ```
 
-## 🚀 Użycie CLI/Hydra
+## Uzycie CLI/Hydra
 
 ```bash
-# Nowy eksperyment (domyślny)
+# Nowy eksperyment (domyslny)
 python main.py environment=urban optimizer=msffoa num_drones=5
 
-# Replay 
+# Replay
 python main.py --replay ./results/2026-04-21_12-30-urban_msffoa/
 ```
 
-
-## 🧪 Przykładowy workflow eksperymentu
+## Przykladowy workflow eksperymentu
 
 ```
-1. GenerationDataStrategy → CSV archiwum
-2. ReplayDataStrategy → Załadowanie + symulacja online (śledzenie + avoidance)
-3. Logi + wizualizacje (matplotlib/plotly)
-4. Porównanie algorytmów (NSGA-III vs MSFOA)
+1. GenerationDataStrategy → CSV archiwum (world, obstacles, trajectories)
+2. ReplayDataStrategy → Zaladowanie + symulacja online (sledzenie + avoidance)
+3. Analiza: ETL → SQLite → metryki (src/analysis/)
+4. Porownanie algorytmow (NSGA-III vs MSFOA vs SSA vs OOA)
 ```
-
-## 📊 Zalety designu
-
-✅ **Reużywalność**: Jedna struktura danych dla wszystkich trybów  
-✅ **Deterministyczne replay**: 100% odtwarzalność eksperymentów  
-✅ **Modularność**: Łatwe dodawanie strategii (np. `ParallelStrategy`)  
-✅ **Debugging**: Archiwizacja pośrednich stanów optymalizacji
-✅ **Skalowalność**: Obsługa różnych kształtów/strategii placement  
-
-## 🛠️ Status rozwoju
-
-✅ Pełna implementacja ABC + 2 strategie  
-✅ Solidna deserializacja (CYLINDER/BOX)  
-✅ Integracja z `environments/` i `algorithms/`  
-⏳ Batch processing wielu replay  
-⏳ Cloud storage (S3/MinIO) dla archiwów  
-
-**Autor**: Edwin — Praca magisterska (walidacja algorytmów inspirowanych biologicznie dla roju UAV)  
-**Wersja**: 1.0 (Kwiecień 2026)

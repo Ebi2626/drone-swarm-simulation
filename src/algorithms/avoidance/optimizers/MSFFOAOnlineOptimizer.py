@@ -97,7 +97,10 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
         self.step_local_frac = float(step_local_frac)
         self.min_compute_time_s = float(min_compute_time_s)
         self.rng = rng
-        
+
+    @property
+    def population_size(self) -> int:
+        return self.pop_size
 
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
         t_start = time.perf_counter()
@@ -119,8 +122,16 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             K = int(path_repr.gene_dim(ctx))
             assert lb.shape == (K,) and ub.shape == (K,), "gene_bounds shape mismatch"
 
-            # === Inicjalizacja populacji w jednolitym rozkładzie U(lb, ub) ============
-            pop = lb[None, :] + rng.uniform(0.0, 1.0, size=(self.pop_size, K)) * (ub - lb)[None, :]
+            # === Inicjalizacja populacji (ceteris paribus) ==========================
+            # Jeśli `GenericOptimizingAvoidance` wygenerował wspólną populację,
+            # używamy jej bezpośrednio. Fallback: wewnętrzna U(lb, ub).
+            if (
+                problem.initial_population is not None
+                and problem.initial_population.shape == (self.pop_size, K)
+            ):
+                pop = np.clip(problem.initial_population, lb, ub)
+            else:
+                pop = lb[None, :] + rng.uniform(0.0, 1.0, size=(self.pop_size, K)) * (ub - lb)[None, :]
             fits = self._eval_batch(pop, problem)
 
             # Reshape na (G, P, K) dla operacji per-swarm.

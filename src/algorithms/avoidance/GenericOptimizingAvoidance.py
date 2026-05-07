@@ -60,6 +60,7 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         optimizer: IPathOptimizer,
         time_budget_s: float = 1.0,
         hard_kill_factor: float = 1.5,
+        sampling_seed: int | None = None,
         name: str = "Generic Optimizing Avoidance",
         **kwargs,
     ) -> None:
@@ -75,6 +76,12 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         self.optimizer = optimizer
         self.time_budget_s = float(time_budget_s)
         self.hard_kill_factor = float(hard_kill_factor)
+        # RNG dla pre-generacji populacji ceteris paribus. Wspólny Generator
+        # gwarantuje identyczną sekwencję U(lb, ub) niezależnie od backendu
+        # PRNG w mealpy (PCG64) / pymoo (MT19937) / custom MSFOA (PCG64).
+        # Stan RNG awansuje między kolejnymi trigger'ami, więc każdy trigger
+        # dostaje inną (ale deterministyczną) populację.
+        self._sampling_rng = np.random.default_rng(sampling_seed)
         # Run-id wstrzykiwane przez integrator (SwarmFlightController). Default
         # pusty — common-contract dopuszcza, integrator MOŻE zostawić "" jeśli
         # nie ma centralnego rejestru runów. `analyze_online_optimization.py`
@@ -89,11 +96,29 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         # podstawi swój trace przez `result.extra["convergence_trace"]`.
         self.last_convergence_trace = []
 
+        # Pre-generacja populacji ceteris paribus: jeśli optimizer deklaruje
+        # population_size > 0, generujemy U(lb, ub) ze wspólnego RNG ZANIM
+        # budżet czasu ruszy — koszt ~1 µs dla (20, 2).
+        initial_pop = None
+        pop_size = getattr(self.optimizer, "population_size", 0)
+        if pop_size > 0:
+            try:
+                lb, ub = self.path_representation.gene_bounds(context)
+                K = self.path_representation.gene_dim(context)
+                initial_pop = (
+                    lb[None, :]
+                    + self._sampling_rng.uniform(0.0, 1.0, size=(pop_size, K))
+                    * (ub - lb)[None, :]
+                )
+            except NotImplementedError:
+                pass  # path_repr nie wspiera genów (np. legacy BSplineSmoother)
+
         problem = PathProblem(
             context=context,
             predictor=self.predictor,
             fitness=self.fitness,
             path_repr=self.path_representation,
+            initial_population=initial_pop,
         )
         budget = TimeBudget.start_now(self.time_budget_s)
         hard_seconds = self.time_budget_s * self.hard_kill_factor
@@ -167,7 +192,6 @@ class GenericOptimizingAvoidance(BaseAvoidance):
             rejoin_point=context.rejoin_point,
             rejoin_base_arc=context.rejoin_base_arc,
             preferred_axis=axis_chosen if axis_chosen is not None else "unknown",
-            astar_success=not bool(result.extra.get("fallback_used", False)),
             fallback_used=bool(result.extra.get("fallback_used", False)),
             planning_wall_time_s=float(wall_total),
         )
@@ -220,7 +244,15 @@ class GenericOptimizingAvoidance(BaseAvoidance):
 
         if plan is not None:
             spline = plan.evasion_spline
-            chosen_axis = str(plan.preferred_axis)
+            # `plan.preferred_axis` zwracane przez `AxisChooser._choose`:
+            # {'right','left','up','down'}. Normalizujemy magic string
+            # "unknown" → "" (puste = NULL po stronie ETL/CSV) — pojawia się
+            # gdy avoidance nie wstawił `axis_chosen` do `OptimizationResult.extra`.
+            chosen_axis = (
+                str(plan.preferred_axis)
+                if plan.preferred_axis in ("right", "left", "up", "down")
+                else ""
+            )
             try:
                 wpts = np.asarray(spline.waypoints, dtype=float).tolist()
                 plan_waypoints_json = json.dumps(wpts)

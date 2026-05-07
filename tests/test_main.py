@@ -210,7 +210,7 @@ class TestExperimentRunner:
         np.testing.assert_array_equal(kwargs["initial_xyzs"], [[0, 0, 1]])
         np.testing.assert_array_equal(kwargs["end_xyzs"], [[10, 10, 1]])
 
-        assert runner.environemnt is mock_env
+        assert runner.environment is mock_env
 
     @patch("main.SwarmFlightController")
     @patch("main.ExperimentRunner.initialize_world")
@@ -221,10 +221,10 @@ class TestExperimentRunner:
     ):
         """Prosty przebieg run() w trybie headless, aby sprawdzić czy pętla się wykonuje bez crasha."""
         runner = ExperimentRunner(dummy_cfg, DummyDataStrategy(), seeds=mock_master_seed)
-        runner.environemnt = MagicMock()
+        runner.environment = MagicMock()
         
         # Symulacja stanu dronów (tylko 1 dron)
-        runner.environemnt._getDroneStateVector.return_value = [0.0, 0.0, 1.0] * 7  # sztuczny stan drona
+        runner.environment._getDroneStateVector.return_value = [0.0, 0.0, 1.0] * 7  # sztuczny stan drona
         
         mock_controller = MagicMock()
         mock_controller.compute_actions.return_value = np.array([[1.0, 1.0, 1.0, 1.0]])
@@ -250,7 +250,7 @@ class TestExperimentRunner:
 
         mock_init_world.assert_called_once()
         mock_controller.init_lidars.assert_called_once()
-        runner.environemnt.step.assert_called()
+        runner.environment.step.assert_called()
 
 
 # --- TESTY PUNKÓW WEJŚCIA (main_generate, main_replay) ---

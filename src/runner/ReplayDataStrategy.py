@@ -51,8 +51,9 @@ class ReplayDataStrategy(ExperimentDataStrategy):
         shape_type = ObstacleShape[shape_type_str.upper()] 
         
         if shape_type == ObstacleShape.CYLINDER:
-            # Model leśny: [x, y, z, radius, height, unused_dim]
-            expected_columns = ['x', 'y', 'z', 'radius', 'height', 'unused_dim']
+            # Model leśny: CSV ma 5 kolumn (`SimulationLogger` drop'uje `unused_dim`),
+            # ale `ObstaclesData.data` kanonicznie shape=(N, 6) z 0.0 jako 6. kol.
+            expected_columns = ['x', 'y', 'z', 'radius', 'height']
         elif shape_type == ObstacleShape.BOX:
             # Model zurbanizowany: [x, y, z, length, width, height]
             expected_columns = ['x', 'y', 'z', 'length', 'width', 'height']
@@ -66,9 +67,14 @@ class ReplayDataStrategy(ExperimentDataStrategy):
         if missing_cols:
             raise KeyError(f"Brakuje następujących kolumn w archiwalnym pliku przeszkód: {missing_cols}")
             
-        # Wyciągnięcie i rzutowanie wartości prosto do postaci tensora (N, 6)
+        # Wyciągnięcie i rzutowanie wartości prosto do postaci tensora.
+        # Cylinder: 5 kolumn → pad z 0.0 do 6 kolumn (kanoniczna postać
+        # `ObstaclesData.data` to (N, 6)). Box: już 6 kolumn.
         data_matrix = df[expected_columns].to_numpy(dtype=np.float64)
-        
+        if shape_type == ObstacleShape.CYLINDER and data_matrix.shape[1] == 5:
+            pad = np.zeros((data_matrix.shape[0], 1), dtype=np.float64)
+            data_matrix = np.hstack([data_matrix, pad])
+
         return ObstaclesData(data=data_matrix, shape_type=shape_type)
 
     def _map_to_trajectories(self, df: pd.DataFrame) -> np.ndarray:

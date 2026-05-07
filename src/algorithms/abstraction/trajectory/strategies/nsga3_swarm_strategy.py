@@ -6,6 +6,7 @@ co gwarantuje 100% bezpieczeństwo wygładzonej trajektorii.
 """
 
 import logging
+import math
 import os
 from typing import Any, Dict, Optional
 
@@ -100,7 +101,7 @@ class SwarmOptimizationProblem(Problem):
         xl = np.tile(xl_one_point, n_drones * n_inner_points)
         xu = np.tile(xu_one_point, n_drones * n_inner_points)
 
-        super().__init__(n_var=n_var, n_obj=3, n_ieq_constr=3, xl=xl, xu=xu)
+        super().__init__(n_var=n_var, n_obj=5, n_ieq_constr=3, xl=xl, xu=xu)
 
     def _evaluate(self, x: NDArray, out: Dict[str, Any], *args, **kwargs) -> None:
         pop_size = x.shape[0]
@@ -122,28 +123,98 @@ class SwarmOptimizationProblem(Problem):
 # --- Helper: Dynamiczne partycje ---
 
 class _HistoryCallback(Callback):
-    """Pymoo callback — loguje stan populacji po każdej generacji."""
+    """Pymoo callback — loguje stan populacji po każdej generacji.
 
-    def __init__(self, writer: OptimizationHistoryWriter):
+    Wysyła do `OptimizationHistoryWriter` pełny zestaw per-gen metryk
+    (objectives, decisions, feasibility, CV, elapsed_s, eval_count) zgodny
+    z konwencją używaną przez SOO strategie (SSA/OOA/MSFFOA) — jednolite
+    dane wejściowe dla ETL `_load_optimization_history`.
+    """
+
+    def __init__(self, writer: OptimizationHistoryWriter,
+                 problem: Optional["SwarmOptimizationProblem"] = None) -> None:
         super().__init__()
+        import time
         self._writer = writer
+        self._problem = problem
+        # Initialize at construction so first `notify` zwraca prawdziwy
+        # czas pierwszej generacji (od zbudowania callbacka do końca gen 1)
+        # zamiast 0. Inaczej `total_elapsed = sum(elapsed_s)` zaniża czas
+        # o jeden gen — krytyczne dla małych n_gen.
+        self._gen_t0: float = time.monotonic()
 
     def notify(self, algorithm):
+        import time
+
         pop = algorithm.pop
         objectives = pop.get("F")
         decisions = pop.get("X")
-        if objectives is not None and decisions is not None:
-            self._writer.put_generation_data({
-                "objectives_matrix": objectives.copy(),
-                "decisions_matrix": decisions.copy(),
-            })
+        if objectives is None or decisions is None:
+            return
 
-def calculate_n_partitions(pop_size: int, n_obj: int = 3) -> int:
-    if n_obj != 3: 
-        return 12 
-    p = int(np.sqrt(2 * pop_size))
-    return max(2, p - 1)
+        # G z populacji pymoo. Nasz `SwarmOptimizationProblem(n_ieq_constr=3)`
+        # zawsze ma "G" w Population — `pop.get("G")` zwraca array (n_pop, 3).
+        # Gdyby problem był bez ograniczeń, pymoo nie ma "G" w Population
+        # i `.get` zwraca array Noneów; obsługa fallbackiem przez try/except.
+        try:
+            constraints = pop.get("G")
+            if constraints is None or (
+                hasattr(constraints, "dtype") and constraints.dtype == object
+            ):
+                constraints = None
+        except Exception:
+            constraints = None
 
+        # Wallclock per gen — `_gen_t0` zainicjalizowane w `__init__`
+        # gwarantuje że pierwsza generacja ma niezerowy elapsed_s.
+        now = time.monotonic()
+        elapsed = now - self._gen_t0
+        self._gen_t0 = now
+
+        # NFE: jeśli mamy referencję do problemu z evaluatorem,
+        # użyj `evaluator.individuals_evaluated` (true NFE).
+        # Fallback: `algorithm.evaluator.n_eval` (pymoo native).
+        n_eval = 0
+        if self._problem is not None and hasattr(self._problem, "evaluator"):
+            ev = self._problem.evaluator
+            if hasattr(ev, "individuals_evaluated"):
+                n_eval = int(ev.individuals_evaluated)
+        if n_eval == 0:
+            n_eval = int(getattr(getattr(algorithm, "evaluator", None), "n_eval", 0))
+
+        from src.utils.per_gen_metrics import per_gen_metrics_from_FG
+
+        self._writer.put_generation_data(
+            per_gen_metrics_from_FG(
+                objectives=objectives.copy(),
+                constraints=constraints.copy() if constraints is not None else None,
+                decisions=decisions.copy(),
+                elapsed_s=elapsed,
+                eval_count_cumulative=n_eval,
+            )
+        )
+def calculate_n_partitions(pop_size: int, n_obj: int) -> int:
+    """
+    Wylicza optymalną liczbę partycji (p) dla metody Das-Dennis,
+    aby liczba punktów referencyjnych (H) była jak najbliższa pop_size.
+    """
+    best_p = 1
+    min_diff = float('inf')
+    
+    for p in range(1, 50):
+        # Wzór na liczbę punktów referencyjnych
+        H = math.comb(n_obj + p - 1, p)
+        
+        diff = abs(H - pop_size)
+        if diff < min_diff:
+            min_diff = diff
+            best_p = p
+        elif H > pop_size:
+            # Ponieważ H rośnie monotonicznie wraz z p, 
+            # jeśli przekroczyliśmy pop_size i różnica rośnie, to mamy optimum.
+            break
+            
+    return max(1, best_p)
 
 # --- Główna Funkcja Strategii ---
 
@@ -199,8 +270,8 @@ def nsga3_swarm_strategy(
             termination = get_termination("n_gen", n_gen)
                         
             # 2. NSGA-III Setup
-            n_partitions = calculate_n_partitions(pop_size, n_obj=3)
-            ref_dirs = get_reference_directions("das-dennis", 3, n_partitions=n_partitions)
+            n_partitions = calculate_n_partitions(pop_size, n_obj=5)
+            ref_dirs = get_reference_directions("das-dennis", 5, n_partitions=n_partitions)
             actual_pop_size = ref_dirs.shape[0]
             
             from hydra.core.hydra_config import HydraConfig
@@ -259,7 +330,7 @@ def nsga3_swarm_strategy(
             
             # 4. Optymalizacja
             with _measure("optimization"):
-                callback = _HistoryCallback(writer)
+                callback = _HistoryCallback(writer, problem=problem)
                 try:
                     res = minimize(
                         problem,

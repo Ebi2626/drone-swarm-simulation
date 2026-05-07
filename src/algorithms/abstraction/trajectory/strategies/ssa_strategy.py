@@ -30,6 +30,7 @@ from hydra.core.hydra_config import HydraConfig
 from mealpy import FloatVar
 from mealpy import Problem as MealpyProblem
 from mealpy.swarm_based.SSA import OriginalSSA
+from mealpy.utils.target import Target
 
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
@@ -121,6 +122,19 @@ class SSAProblemAdapter(MealpyProblem):
         self.evaluator.evaluate(inner, out)
         return np.asarray(out["F"], dtype=np.float64)
 
+    def evaluate_full(self, population: NDArray[np.float64]) -> Dict[str, np.ndarray]:
+        """Zwraca {'F', 'G'} dla populacji — wykorzystywane przez logger
+        do liczenia per-gen feasibility / CV. Zachowuje się tak jak
+        `evaluate_objectives`, ale dodatkowo eksponuje constraint vector G.
+        """
+        inner = self._decode_inner(population)
+        out: Dict[str, Any] = {}
+        self.evaluator.evaluate(inner, out)
+        return {
+            "F": np.asarray(out["F"], dtype=np.float64),
+            "G": np.asarray(out["G"], dtype=np.float64) if "G" in out else None,
+        }
+
     def obj_func(self, x: np.ndarray) -> float:
         x_safe = np.clip(np.nan_to_num(x, nan=self._ub), self._lb, self._ub)
         return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
@@ -131,6 +145,28 @@ class SSAProblemAdapter(MealpyProblem):
 # ---------------------------------------------------------------------------
 
 class LoggedOriginalSSA(OriginalSSA):
+    """SSA z logowaniem per-gen + batchowaniem ewaluacji.
+
+    Zmiany wydajnościowe (2026-05-07):
+    1. Nadpisanie `update_target_for_population` przekierowuje ewaluację
+       populacji `pop_new` z mealpy'owej pętli `for agent: get_target(...)`
+       (1 wywołanie `obj_func` na osobnika → 1 ewaluacja batch=1) na pojedynczy
+       batch przez `SSAProblemAdapter.evaluate_population`. Dla pop_size=1000
+       to redukuje 1000 wywołań Pythona/setupów NumPy do 1 per faza,
+       amortyzując narzut funkcji + boundary Numba na całą populację.
+    2. F/G każdego osobnika z batcha są przyklejane do `agent.target._F_row`
+       i `agent.target._G_row`. To eliminuje konieczność re-ewaluacji
+       `self.pop` w `evolve(...)` przy logowaniu per-gen — F/G zostają
+       przekazane z faktycznej ewaluacji optymalizacyjnej (nie dodatkowej).
+    3. Ścieżka jednoosobnikowa (`get_target`) także przykleja _F_row/_G_row,
+       co pokrywa początkową populację przy `before_initialization` zanim
+       evolve zacznie chodzić.
+
+    Niezmienione: konstruktor, `solve(...)`, sygnatury i semantyka publicznych
+    pól — testy (`test_ssa_strategy.py`) operują na `SSAProblemAdapter` i
+    fakcie, że `LoggedOriginalSSA` jest klasą — to się nie zmienia.
+    """
+
     def __init__(
         self,
         *args: Any,
@@ -142,8 +178,111 @@ class LoggedOriginalSSA(OriginalSSA):
         self._history_writer = history_writer
         self._history_problem = history_problem
 
+    # ------------------------------------------------------------------
+    # Wewnętrzny helper: zaczepia F/G na targetach z batcha.
+    # ------------------------------------------------------------------
+
+    def _attach_FG_to_agents(self, pop: List[Any], F: Optional[np.ndarray],
+                             G: Optional[np.ndarray]) -> None:
+        """Przyklejamy F/G do `agent._F_row/_G_row` (NIE do target).
+
+        Powód: `mealpy.utils.target.Target.copy()` nie kopiuje custom
+        atrybutów, więc gdy SSA woła `agent.copy()` w fazie 2 (`pop2 = [
+        agent.copy() for agent in self.pop[self.n2:]]`), F_row na targecie
+        znika. `Agent.copy()` natomiast iteruje `vars(self).items()` i kopiuje
+        wszystkie atrybuty oprócz `target/solution/id/kwargs` — więc
+        `agent._F_row` przetrwa kopiowanie.
+        """
+        if F is None and G is None:
+            return
+        for idx, agent in enumerate(pop):
+            if F is not None and idx < F.shape[0]:
+                try:
+                    agent._F_row = F[idx].copy()
+                except Exception:
+                    pass
+            if G is not None and idx < G.shape[0]:
+                try:
+                    agent._G_row = G[idx].copy()
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Override 1: ewaluacja całej populacji w 1 batchu.
+    # ------------------------------------------------------------------
+
+    def update_target_for_population(self, pop: List[Any] = None) -> List[Any]:  # type: ignore[override]
+        # Fallback do mealpy'owej implementacji jeśli brak adaptera lub adapter
+        # nie wspiera batcha (np. mock w testach jednostkowych).
+        if (self._history_problem is None
+                or not hasattr(self._history_problem, "evaluate_population")):
+            return super().update_target_for_population(pop)
+        try:
+            pos_matrix = np.vstack([
+                np.asarray(agent.solution, dtype=np.float64) for agent in pop
+            ])
+            pos_matrix = self._history_problem.amend_position(pos_matrix)
+        except Exception:
+            return super().update_target_for_population(pop)
+
+        try:
+            fitness_vec = self._history_problem.evaluate_population(pos_matrix)
+            fitness_vec = np.asarray(fitness_vec, dtype=np.float64).reshape(-1)
+        except Exception:
+            return super().update_target_for_population(pop)
+
+        # Capture F/G z TrajectorySOOAdapter (uzupełnia je jako side-effect
+        # w `__call__`). Defensywnie — w testach to MagicMock, nie ndarray.
+        scalar_adapter = getattr(self._history_problem, "scalar_adapter", None)
+        F_full = getattr(scalar_adapter, "last_objectives", None) if scalar_adapter is not None else None
+        G_full = getattr(scalar_adapter, "last_constraints", None) if scalar_adapter is not None else None
+        F_arr = np.asarray(F_full, dtype=np.float64) if isinstance(F_full, np.ndarray) else None
+        G_arr = np.asarray(G_full, dtype=np.float64) if isinstance(G_full, np.ndarray) else None
+
+        for idx, agent in enumerate(pop):
+            agent.target = Target(objectives=float(fitness_vec[idx]))
+        self._attach_FG_to_agents(pop, F_arr, G_arr)
+        self.nfe_counter += len(pop)
+        return pop
+
+    # ------------------------------------------------------------------
+    # Override 2: ścieżka pojedynczego osobnika (initial pop, fallbacki).
+    # Po policzeniu Targetu doczytujemy F/G z cache scalar_adaptera (shape
+    # (1, M)) i przykleja je do `target._F_row/_G_row`.
+    # ------------------------------------------------------------------
+
+    def generate_agent(self, solution: np.ndarray = None) -> Any:  # type: ignore[override]
+        """Po standardowym `generate_agent` doczepia F/G z cache scalar_adapter
+        bezpośrednio do `agent._F_row/_G_row` (przetrwa `agent.copy()`).
+
+        Pokrywa: ścieżkę inicjalizacji populacji w `before_initialization`
+        (per-agent przez `generate_agent(starting_solution)`) i ewentualne
+        wywołania `generate_agent` poza naszym batchem.
+        """
+        agent = super().generate_agent(solution)
+        scalar_adapter = getattr(self._history_problem, "scalar_adapter", None) if self._history_problem is not None else None
+        if scalar_adapter is None:
+            return agent
+        F_full = getattr(scalar_adapter, "last_objectives", None)
+        G_full = getattr(scalar_adapter, "last_constraints", None)
+        if isinstance(F_full, np.ndarray) and F_full.ndim == 2 and F_full.shape[0] == 1:
+            try:
+                agent._F_row = F_full[0].copy()
+            except Exception:
+                pass
+        if isinstance(G_full, np.ndarray) and G_full.ndim == 2 and G_full.shape[0] == 1:
+            try:
+                agent._G_row = G_full[0].copy()
+            except Exception:
+                pass
+        return agent
+
     def evolve(self, epoch: int) -> None:
+        import time
+
+        gen_t0 = time.monotonic()
         super().evolve(epoch)
+        gen_elapsed = time.monotonic() - gen_t0
 
         if self._history_writer is None or self._history_problem is None:
             return
@@ -155,13 +294,39 @@ class LoggedOriginalSSA(OriginalSSA):
                     for agent in self.pop
                 ]
             )
-            objectives = self._history_problem.evaluate_objectives(decisions)
+            n_eval = int(self._history_problem.evaluator.individuals_evaluated)
+
+            # Preferowana ścieżka: F/G zacache'owane na targetach przez
+            # update_target_for_population / get_target. Brak re-ewaluacji.
+            F_rows: List[np.ndarray] = []
+            G_rows: List[np.ndarray] = []
+            for agent in self.pop:
+                f_row = getattr(agent, "_F_row", None)
+                g_row = getattr(agent, "_G_row", None)
+                if isinstance(f_row, np.ndarray):
+                    F_rows.append(f_row)
+                if isinstance(g_row, np.ndarray):
+                    G_rows.append(g_row)
+
+            if len(F_rows) == len(self.pop):
+                F = np.vstack(F_rows)
+                G = np.vstack(G_rows) if len(G_rows) == len(self.pop) else None
+            else:
+                # Fallback (np. testy z mockami) — re-eval pełnej populacji.
+                full = self._history_problem.evaluate_full(decisions)
+                F = full["F"]
+                G = full.get("G")
+
+            from src.utils.per_gen_metrics import per_gen_metrics_from_FG
 
             self._history_writer.put_generation_data(
-                {
-                    "objectives_matrix": objectives,
-                    "decisions_matrix": decisions,
-                }
+                per_gen_metrics_from_FG(
+                    objectives=F,
+                    constraints=G,
+                    decisions=decisions,
+                    elapsed_s=gen_elapsed,
+                    eval_count_cumulative=n_eval,
+                )
             )
         except Exception as e:
             logger.warning(f"[SSA] Warning: history logging failed at epoch {epoch}: {e}")

@@ -72,9 +72,11 @@ def _register_artifacts(cleanup: dict, exp_id: str) -> None:
     cleanup["config_files"].append(
         PROJECT_ROOT / "configs" / "experiment_generated" / f"{exp_id}.yaml"
     )
-    proxy_dir = PROJECT_ROOT / "configs" / "optimizer" / "tmp"
+    # Proxy pliki: `configs/optimizer/_proxy_<exp_id>_*.yaml` (flat, bez slasha
+    # — zob. `_write_proxy_yaml` w `prepare_experiment.py`).
+    proxy_dir = PROJECT_ROOT / "configs" / "optimizer"
     if proxy_dir.exists():
-        for p in proxy_dir.glob(f"{exp_id}_*.yaml"):
+        for p in proxy_dir.glob(f"_proxy_{exp_id}_*.yaml"):
             cleanup["config_files"].append(p)
 
 
@@ -131,6 +133,116 @@ def test_prepare_experiment_populates_registry(
         f"diff: brakuje {expected_combos - actual_combos}, "
         f"nadmiarowe {actual_combos - expected_combos}"
     )
+
+
+def test_static_overrides_from_parameters_grid(tmp_path: Path) -> None:
+    """`parameters_grid.<non-sweep>` (np. `simulation`) powinno wylądować
+    na top-level manifestu jako static override (deep-merge przez Hydra).
+
+    Regression: do 2026-05-06 `prepare_experiment.generate_yaml_content`
+    czytało static overrides tylko z top-level klucza `static_overrides`,
+    a definicje w repo (`per_env_test.yaml`, `complex_test.yaml`) używają
+    konwencji `parameters_grid.simulation`. Efekt: blok był silnie
+    upuszczany.
+    """
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from experiments.prepare_experiment import (  # noqa: E402
+        _collect_static_overrides,
+        generate_yaml_content,
+    )
+
+    definition = {
+        "name": "test_static",
+        "runs_per_configuration": 1,
+        "parameters_grid": {
+            "optimizers": ["msffoa"],
+            "environments": ["forest"],
+            "avoidances": ["none"],
+            "simulation": {"dynamic_obstacles": True, "gui": False},
+            "logging": {"enabled": False},
+        },
+        "static_overrides": {"seed": 7},  # ma wygrać nad grid w razie kolizji
+    }
+
+    overrides = _collect_static_overrides(definition)
+    assert overrides == {
+        "simulation": {"dynamic_obstacles": True, "gui": False},
+        "logging": {"enabled": False},
+        "seed": 7,
+    }
+
+    fake_jm = [{"optimizer": "msffoa", "environment": "forest", "base_name": "msffoa"}]
+    content = generate_yaml_content("exp_test", definition, fake_jm)
+    parsed = yaml.safe_load(content)
+    # Static overrides siedzą na top-level, nie wewnątrz `hydra:`.
+    assert parsed["simulation"] == {"dynamic_obstacles": True, "gui": False}
+    assert parsed["logging"] == {"enabled": False}
+    assert parsed["seed"] == 7
+    # Sweep wymiary nie wchodzą w static.
+    assert "optimizers" not in parsed
+    assert "environments" not in parsed
+    assert "avoidances" not in parsed
+
+
+def test_proxy_optimizer_refs_have_no_slash(tmp_path: Path) -> None:
+    """Proxy YAML-e (z `overrides` lub `env_overrides`) muszą produkować
+    optimizer-ref BEZ slasha — inaczej Hydra-multirun w `sweep.subdir`
+    template `${hydra:runtime.choices.optimizer}_..._seed${seed}` rozbija
+    wyniki na `results/<exp>/<prefix>/<rest>/`, a ETL
+    (`list_run_directories` iterdir top-level) nie wykrywa zagnieżdżonych
+    runów.
+
+    Regression: do 2026-05-06 proxy lądowały w `configs/optimizer/tmp/`,
+    a `optimizer` w `job_matrix` był `tmp/<proxy_name>` → `/` w referencji.
+    """
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from experiments.prepare_experiment import (  # noqa: E402
+        PROXY_PREFIX,
+        expand_optimizers_for_environments,
+    )
+
+    optimizers = [
+        # Bez overrides — flat ref (bare base_name).
+        "msffoa",
+        # base_overrides only — base proxy.
+        {"name": "ssa", "overrides": {"algorithm_params": {"epochs": 80}}},
+        # env_overrides — per-env proxy.
+        {"name": "msffoa", "env_overrides": {
+            "forest": {"algorithm_params": {"pop_size": 200}},
+        }},
+    ]
+    environments = ["forest", "urban"]
+
+    # Tymczasowy `configs/optimizer/` z minimalnymi base files żeby _write_proxy_yaml
+    # miał co czytać.
+    tmp_configs = tmp_path / "configs"
+    opt_dir = tmp_configs / "optimizer"
+    opt_dir.mkdir(parents=True)
+    for name in ("msffoa", "ssa"):
+        (opt_dir / f"{name}.yaml").write_text(
+            "_target_: src.algorithms.dummy.Dummy\nalgorithm_params:\n  pop_size: 50\n"
+        )
+
+    job_matrix, base_names = expand_optimizers_for_environments(
+        optimizers, environments, "exp_test_xxx", tmp_configs,
+    )
+
+    for entry in job_matrix:
+        assert "/" not in entry["optimizer"], (
+            f"optimizer ref `{entry['optimizer']}` zawiera slash — "
+            f"powodowałoby zagnieżdżenie w results/<exp>/.../"
+        )
+
+    # Dodatkowo: proxy które trzeba było wygenerować mają prefix `_proxy_`,
+    # a bare base_name pozostaje bare.
+    proxy_refs = [e["optimizer"] for e in job_matrix if e["optimizer"] != e["base_name"]]
+    assert proxy_refs, "Test fixtures wymuszają min. 1 proxy"
+    for ref in proxy_refs:
+        assert ref.startswith(PROXY_PREFIX), f"{ref} nie ma prefiksu {PROXY_PREFIX}"
+
+    # Sanity: bezpośrednia referencja `msffoa` (bez overrides) jest bare.
+    bare_refs = [e for e in job_matrix if e["optimizer"] == "msffoa" and e["base_name"] == "msffoa"]
+    assert bare_refs, "Bare msffoa-bez-overrides powinien się znaleźć w job_matrix"
 
 
 def test_prepare_experiment_empty_grid_fails(

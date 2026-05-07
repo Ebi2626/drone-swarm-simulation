@@ -1,0 +1,148 @@
+name: "per_env_test"
+# Demšar (2006) §4: Wilcoxon signed-rank z N=2 ma p-value floor = 1/2^2 = 0.25
+# (wszystkie pary są nierozróżnialne statystycznie). Dla N=4 (jak był sprzed
+# Kamienia 2): floor = 1/2^4 = 0.0625, czyli wszystkie p-value ≥ 0.0625 →
+# żaden test nie odrzuci H0 nawet jeśli różnica jest realna. Dla N≥10 floor
+# < 0.001 i statystyka faktycznie ma moc rozróżniania algorytmów.
+# Reference: Arcuri & Briand (2014) STVR §3.2 zaleca N ≥ 30 dla high-confidence,
+# N ≥ 10 jako minimum dla published comparison.
+runs_per_configuration: 10
+
+# =============================================================================
+# Realistyczny eksperyment porównawczy: 4 optymalizatorów × 4 avoidances × 2 envy
+# =============================================================================
+#
+# Cel: ceteris-paribus benchmark wszystkich algorytmów offline (MSFFOA, OOA,
+# SSA, NSGA-III) i online (msffoa, ooa, ssa, nsga-3), w środowiskach o
+# różnej charakterystyce (forest = wąski korytarz z rzadkimi cienkimi
+# przeszkodami; urban = szeroka strefa z gęstym układem dużych bryłowych
+# budynków).
+#
+# Liczba runów: 4 (opt) × 4 (avoid) × 2 (env) × 10 (seedy) = 320.
+# Czas: ~5–10 min/run × 320 / 6 workerów ≈ 5–8h przy `./run.sh`.
+#
+# -----------------------------------------------------------------------------
+# Filozofia per-env tuningu (urban):
+# -----------------------------------------------------------------------------
+# Bazowe konfigi (`configs/optimizer/*.yaml`) są nastrojone pod forest:
+#   - korytarz 600×60×11m, 13× cylinder ø2m×10m, threat sparse
+#   - preferred_height=5m (mid-corridor)
+#   - obstacle_safety_margin=1m (cienka przeszkoda nie wymaga buforu)
+#   - threat weight=0.8 (rzadko-pojawiające się przeszkody, łagodna kara)
+#
+# Urban różni się charakterystyką:
+#   - korytarz 1000×300×20m (5× szerszy, 2× wyższy, 67% dłuższy)
+#   - 27× BOX 15×15×15m, układ grid_jitter (dense urban building grid)
+#   - effective threat radius ≈ 13.6m (corner-to-corner przy boxie 15m),
+#     vs ~1.5m dla forest cylinder. Stąd safety_margin=3m i threat weight=5.0
+#     (Ishibuchi & Nojima 2007 § "Constrained-handling penalties": waga kary
+#     proporcjonalna do natural scale ograniczenia).
+#   - preferred_height=10m: mid-corridor 20m ceiling, ALG decyduje czy lecieć
+#     pod (≤ 5m) czy nad (≥ 15m) budynkami zamiast forsownie wybierać
+#     opcję "fly over" (preferred=17m) co usunęłoby challenge.
+#   - większy search space ⇒ pop_size 1001→1500, n_gen 200→300, więcej
+#     waypointów (11→15) dla trajektorii 67% dłuższej.
+#   - noise_std_{xy,z} skalowane ∝ rozmiar świata (XY: 7→12, Z: 1.5→3.0).
+#   - NSGA-III dostaje większą eksplorację (mutation_prob 0.1→0.15, eta_c
+#     15→12, eta_m 10→8) — Deb & Jain 2014 § "Tunable parameters":
+#     dla wysoko-wymiarowych objective spaces zalecane mniejsze η.
+# -----------------------------------------------------------------------------
+
+parameters_grid:
+  # --- Optymalizatory offline (4 algorytmy z per-env override dla urban) ---
+  # Konwencja: forest używa baseline z `configs/optimizer/<name>.yaml` (brak
+  # override). Urban dostaje pełny env_override mirrorujący `algorithm_params`.
+  optimizers:
+
+    # MSFFOA — Multi-Swarm Fruit Fly (Shi et al. 2020)
+    # Urban epochs skalibrowane empirycznie (exp_20260506): Q75 iter 85 → 200 = 2.4× margines.
+    - name: msffoa
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            epochs: 200
+            n_inner_waypoints: 15
+            objective_weights: [0.05, 0.5, 5.0, 1.0, 0.25]   # threat 0.8 → 5.0
+            obstacle_safety_margin: 3.0                       # 1.0 → 3.0
+            preferred_height: 10.0                            # 5.0 → 10.0
+            noise_std_xy: 12.0                                # 7.0 → 12.0
+            noise_std_z: 3.0                                  # 1.5 → 3.0
+            # MSFFOA step_*_frac są frakcjami world_size — automatycznie
+            # skalują się do 1000×300×20m. Pozostawione na default forest
+            # ([0.040, 0.010, 0.005] / [0.003, 0.001, 0.001]).
+
+    # OOA — Osprey Optimization Algorithm
+    - name: ooa
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            n_gen: 200
+            n_inner_waypoints: 15
+            objective_weights: [0.05, 0.5, 5.0, 1.0, 0.25]
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+
+    # SSA — Sparrow Search Algorithm (Xue & Shen 2020)
+    # Urban epochs: Q75 iter 129 → 200 = 1.6× margines (najwolniejszy algorytm).
+    - name: ssa
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            epochs: 200
+            n_inner_waypoints: 15
+            objective_weights: [0.05, 0.5, 5.0, 1.0, 0.25]
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+            # SSA-specific (ST/PD/SD) niezmienione — to parametry dynamiki
+            # populacji (paper Sec. 3), nie środowiska.
+
+    # NSGA-III — Non-dominated Sorting GA III (Deb & Jain 2014).
+    # Multi-objective: brak `objective_weights`; zamiast tego tunig
+    # operatorów krzyżowania/mutacji (większa eksploracja w gęstym urban).
+    # Urban n_gen: Q75 iter 106 → 200 = 1.9× margines.
+    - name: nsga-3
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            n_gen: 200
+            n_inner_waypoints: 15
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+            crossover_prob: 0.90
+            mutation_prob: 0.15      # 0.10 → 0.15 (więcej eksploracji)
+            eta_c: 12                # 15 → 12 (szerszy SBX)
+            eta_m: 8                 # 10 → 8 (większy impact mutacji PM)
+            decision_mode: "safety"  # niezmienione — preferuje feasibility
+
+  # --- Środowiska ---
+  environments:
+    - forest    # 600×60×11m, 13× cylinder, sparse
+    - urban     # 1000×300×20m, 27× BOX (15m tall), dense grid_jitter
+
+  # --- Avoidance algorithms (online reactive) ---
+  # Pełny cross-product wszystkich 4 metaheurystyk po stronie reaktywnej.
+  # Pozwala oddzielić "który optimizer offline daje najlepszą trajektorię"
+  # od "który avoidance online radzi sobie najlepiej z naprawami".
+  # Bez baseline `none` (gdyby był potrzebny — dodaj poniżej).
+  avoidances:
+    - msffoa
+    - ooa
+    - ssa
+    - nsga-3
+
+  # --- Static overrides (parameters_grid.<non-sweep>) ---
+  # `prepare_experiment.py` zbiera te klucze jako static overrides i wstrzykuje
+  # na top-level manifestu (`# @package _global_` deep-merge z `configs/config.yaml`).
+  simulation:
+    dynamic_obstacles: True   # wrogie drony jako poruszające się przeszkody
+    gui: False                # headless (run.sh / run_subprocess.py)

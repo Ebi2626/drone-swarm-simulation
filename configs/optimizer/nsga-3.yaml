@@ -5,24 +5,32 @@ _convert_: "all"
 # Parametry specyficzne dla NSGA-III
 algorithm_params:
   cruise_speed: 6.0
-  pop_size: 1000
-  n_gen: 200
+  # n_gen skalibrowane empirycznie (exp_20260506): Q75 konwergencji przy
+  # iteracji 69 (~69k NFE). n_gen=100 daje ~100k NFE = 1.4× margines.
+  pop_size: 1001
+  n_gen: 100
   n_inner_waypoints: 11
 
   crossover_prob: 0.90
-  mutation_prob: 0.4
-  eta_c: 4 # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja
-  eta_m: 3  # parametr rozkładu dla mutacji wielomianowej - im więcej tym mniej mutacji
+  mutation_prob: 0.1
+  eta_c: 15 # parametr rozkładu dla Simulated Binary Crossover (SBX) - im więcej tym mniejsza eksploracja, a większa eksploatacja
+  eta_m: 10  # parametr rozkładu dla mutacji wielomianowej - im więcej tym mniej mutacji
   decision_mode: "safety" # knee_point | safety | equal
 
-  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
+  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje / nowe kary) ---
   # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
-  obstacle_safety_margin: 2.0     # bufor wokół przeszkód [m]
+  obstacle_safety_margin: 1.0     # bufor wokół przeszkód [m]
   min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
   k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
   absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m]
   max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
 
+  # --- Parametry dla nowych celów optymalizacyjnych F (f_2 i f_5) ---
+  # W przeciwieństwie do algorytmów jednokryterialnych, NSGA-III nie wymaga wag.
+  # Optymalizuje bezpośrednio 5-wymiarową przestrzeń celów.
+  preferred_height: 5.0                # f_2: preferowana stała wysokość lotu [m]
+  coordination_penalty_factor: 1.2     # f_5: mnożnik wykładniczej kary za koordynację
+
   # --- Szum inicjalizacji populacji (anizotropowy) ---
-  noise_std_xy: 2.0
-  noise_std_z: 0.3
+  noise_std_xy: 7.0
+  noise_std_z: 1.5

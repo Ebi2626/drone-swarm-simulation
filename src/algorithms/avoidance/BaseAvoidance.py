@@ -9,12 +9,15 @@ from src.utils.optimization_metrics import OnlineOptimizationRecord
 
 @dataclass
 class EvasionPlan:
-    """Wynik planowania uniku: lokalny spline + informacja gdzie wracamy na bazową trasę."""
+    """Wynik planowania uniku: lokalny spline + informacja gdzie wracamy na bazową trasę.
+
+    Pole `astar_success` zostało wycofane 2026-05-07 (algorytm A* nie istnieje;
+    pole było zawsze `NOT fallback_used` — semantycznie redundantne).
+    """
     evasion_spline: BSplineTrajectory
     rejoin_point: np.ndarray
     rejoin_base_arc: float
     preferred_axis: str
-    astar_success: bool = True
     fallback_used: bool = False
     planning_wall_time_s: float = 0.0
 

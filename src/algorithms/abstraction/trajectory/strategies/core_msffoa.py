@@ -311,7 +311,9 @@ class MSFFOAOptimizer:
                 log_interval = max(1, self.max_generations // 10)
 
                 with self._measure("generation_loop"):
+                    import time
                     for gen in range(self.max_generations):
+                        gen_t0 = time.monotonic()
                         # =================================================================
                         # Phase 1: Multi-Swarm with Multi-Tasks Searching Strategy
                         # =================================================================
@@ -410,10 +412,27 @@ class MSFFOAOptimizer:
                             else:
                                 obj_matrix = new_fit_flat.reshape(-1, 1)
 
-                            self._history_writer.put_generation_data({
-                                "objectives_matrix": obj_matrix,
-                                "decisions_matrix": new_pop.reshape(self.pop_size, -1).copy(),
-                            })
+                            raw_g = getattr(self.fitness_fn, "last_constraints", None)
+                            evaluator = getattr(self.fitness_fn, "evaluator", None)
+                            n_eval = (
+                                int(evaluator.individuals_evaluated)
+                                if evaluator is not None
+                                and hasattr(evaluator, "individuals_evaluated")
+                                else (gen + 1) * self.pop_size  # fallback estymata
+                            )
+                            gen_elapsed = time.monotonic() - gen_t0
+
+                            from src.utils.per_gen_metrics import per_gen_metrics_from_FG
+
+                            self._history_writer.put_generation_data(
+                                per_gen_metrics_from_FG(
+                                    objectives=obj_matrix,
+                                    constraints=raw_g,
+                                    decisions=new_pop.reshape(self.pop_size, -1).copy(),
+                                    elapsed_s=gen_elapsed,
+                                    eval_count_cumulative=n_eval,
+                                )
+                            )
 
                         if (gen + 1) % log_interval == 0 or (gen + 1) == self.max_generations:
                             swarms_in_global = int(np.sum(is_global))

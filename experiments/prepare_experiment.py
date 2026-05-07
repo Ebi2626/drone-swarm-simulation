@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import collections.abc
+import copy
 import uuid
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 from itertools import product
+from typing import Optional
 
 import yaml
 
@@ -13,103 +16,266 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.utils.RunRegistry import RunRegistry
 
-def process_optimizers(optimizers_list: list, exp_id: str, configs_dir: Path) -> list:
-    """Generuje pliki proxy, które poprawnie dziedziczą i instancjują obiekty Hydry."""
-    processed_names = []
-    
-    # Źródło bazowych configów
-    source_optimizer_dir = configs_dir / "optimizer"
-    
-    # Cel dla wygenerowanych proxy (katalog tmp wewnątrz optimizer)
-    target_optimizer_dir = source_optimizer_dir / "tmp"
-    target_optimizer_dir.mkdir(parents=True, exist_ok=True)
-    
-    for idx, opt in enumerate(optimizers_list):
-        if isinstance(opt, str):
-            processed_names.append(opt)
-        elif isinstance(opt, dict) and "name" in opt:
-            base_name = opt["name"]
-            overrides = opt.get("overrides", {})
-            
-            if not overrides:
-                processed_names.append(base_name)
-                continue
-            
-            # KROK 1: Wczytanie oryginalnego pliku
-            base_file_path = source_optimizer_dir / f"{base_name}.yaml"
-            if not base_file_path.exists():
-                raise FileNotFoundError(f"Nie znaleziono pliku bazowego: {base_file_path}")
-                
-            with open(base_file_path, "r", encoding="utf-8") as bf:
-                base_content = yaml.safe_load(bf)
-                
-            # KROK 2: Budowanie struktury pliku proxy
-            proxy_content = {}
-            for magic_key in ["_target_", "_partial_", "_convert_"]:
-                if magic_key in base_content:
-                    proxy_content[magic_key] = base_content[magic_key]
-                    
-            # KROK 3: Rekurencyjna aktualizacja parametrów z naszymi nadpisaniami
-            def update_dict(d, u):
-                import collections.abc
-                for k, v in u.items():
-                    if isinstance(v, collections.abc.Mapping):
-                        d[k] = update_dict(d.get(k, {}), v)
-                    else:
-                        d[k] = v
-                return d
-            
-            for magic_key in ["_target_", "_partial_", "_convert_"]:
-                base_content.pop(magic_key, None)
-                
-            merged_content = update_dict(base_content, overrides)
-            proxy_content.update(merged_content)
-            
-            # KROK 4: Zapis pliku proxy do podkatalogu tmp
-            proxy_name = f"{exp_id}_{base_name}_{idx}"
-            proxy_file = target_optimizer_dir / f"{proxy_name}.yaml"
-            with open(proxy_file, "w", encoding="utf-8") as f:
-                f.write(f"# WYGENEROWANO AUTOMATYCZNIE - PROXY DLA {exp_id}\n")
-                yaml.dump(proxy_content, f, default_flow_style=False, sort_keys=False)
-                
-            # Dopisujemy 'tmp/' przed nazwą, żeby Hydra wiedziała, w którym podkatalogu szukać
-            processed_names.append(f"tmp/{proxy_name}")
-        else:
-            raise ValueError(f"Nieprawidłowy format definicji algorytmu: {opt}")
-            
-    return processed_names
 
-def generate_yaml_content(exp_id: str, definition: dict) -> str:
+def _deep_update(d: dict, u: collections.abc.Mapping) -> dict:
+    """Rekurencyjne scalanie: `u` nadpisuje `d` per-klucz, mappingi schodzą głębiej."""
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = _deep_update(d.get(k, {}) or {}, v)
+        else:
+            d[k] = v
+    return d
+
+
+# Prefiks dla proxy YAML-i — flat, bez slasha. Slash w referencji
+# (poprzednio `tmp/<name>`) powodował zagnieżdżenie w `results/<exp>/tmp/...`,
+# bo Hydra w MULTIRUN używa `${hydra:runtime.choices.optimizer}` w sweep.subdir
+# template; `/` w wartości tworzył zagnieżdżony katalog. ETL
+# (`list_run_directories` iterdir top-level) nie podchwytywał takich runów.
+PROXY_PREFIX = "_proxy_"
+
+
+def _write_proxy_yaml(
+    target_dir: Path,
+    exp_id: str,
+    base_name: str,
+    idx: int,
+    suffix: Optional[str],
+    base_content: dict,
+    overrides: collections.abc.Mapping,
+) -> str:
+    """Generuje plik proxy YAML łącząc bazowy config + overrides.
+
+    Plik trafia bezpośrednio do `configs/optimizer/` z prefiksem
+    `_proxy_<exp_id>_...`, więc referencja Hydra (`optimizer=<name>`) nie
+    zawiera `/` i nie tworzy zagnieżdżonych katalogów w `results/`.
+
+    Args:
+        suffix: Opcjonalny sufiks (np. nazwa env). Jeśli None, plik jest
+            jednym uniwersalnym proxy. Jeśli podany — proxy per-env.
+    Returns:
+        Nazwa pliku proxy bez rozszerzenia, gotowa do użycia jako Hydra
+        config-group reference (np. "_proxy_exp_xxx_msffoa_forest_0").
+    """
+    base_copy = copy.deepcopy(base_content)
+    magic = {k: base_copy.pop(k) for k in ("_target_", "_partial_", "_convert_") if k in base_copy}
+
+    merged = _deep_update(base_copy, overrides) if overrides else base_copy
+    proxy_content = {**magic, **merged}
+
+    if suffix is None:
+        proxy_name = f"{PROXY_PREFIX}{exp_id}_{base_name}_{idx}"
+    else:
+        proxy_name = f"{PROXY_PREFIX}{exp_id}_{base_name}_{suffix}_{idx}"
+
+    proxy_file = target_dir / f"{proxy_name}.yaml"
+    with open(proxy_file, "w", encoding="utf-8") as f:
+        f.write(f"# WYGENEROWANO AUTOMATYCZNIE - PROXY DLA {exp_id}\n")
+        if suffix is not None:
+            f.write(f"# Per-environment overrides: env={suffix}\n")
+        yaml.dump(proxy_content, f, default_flow_style=False, sort_keys=False)
+    return proxy_name
+
+
+def expand_optimizers_for_environments(
+    optimizers_list: list,
+    environments: list,
+    exp_id: str,
+    configs_dir: Path,
+) -> tuple[list[dict], list[str]]:
+    """Generuje proxy yamls i tablicę par (optimizer × environment).
+
+    Reguły:
+    - Optimizer jako string `"foo"`: brak overrides; pary `{optimizer: foo,
+      environment: env}` dla każdego env.
+    - Optimizer jako `{name: foo, overrides: {...}}` (bez env_overrides):
+      jeden proxy z bazowymi override'ami; pary `{optimizer: tmp/<proxy>,
+      environment: env}` dla każdego env.
+    - Optimizer jako `{name: foo, env_overrides: {<env>: {...}, ...}}`:
+      - Dla każdego env w `env_overrides` → dedykowany proxy
+        `tmp/<exp>_<foo>_<env>_<idx>` (scalony bazowy config + `overrides` + `env_overrides[env]`).
+      - Dla envów nieobecnych w `env_overrides`:
+        - Jeśli istnieje `overrides` (bazowe) → użyj jednego wspólnego bazowego proxy.
+        - W p.p. — sama nazwa bazowa (bez proxy).
+
+    Returns:
+        (job_matrix, base_names):
+            - job_matrix: lista dict-ów `{"optimizer": <ref>, "environment": <env>,
+              "base_name": <bazowa_nazwa>}`. `<ref>` to `tmp/<proxy_name>` (gdy
+              są overrides) albo bazowa nazwa (gdy ich brak). `base_name` jest
+              używane do nazewnictwa katalogu runu i wpisu w RunRegistry —
+              zapewnia spójność z `parse_run_dir_name` (regex `(opt)_(env)_...`)
+              niezależnie od długiej ścieżki proxy.
+            - base_names: lista bazowych nazw (jak deklarowano w definicji),
+              w kolejności zgłoszenia, z duplikatami.
+    """
+    # Proxy YAML-e lądują flat w `configs/optimizer/` z prefiksem `_proxy_`.
+    # Wcześniej w `tmp/`, ale slash w referencji Hydra-config-group powodował
+    # zagnieżdżenie wyników w `results/<exp>/tmp/...` (patrz `_write_proxy_yaml`).
+    source_dir = configs_dir / "optimizer"
+    target_dir = source_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    job_matrix: list[dict] = []
+    base_names: list[str] = []
+
+    for idx, opt in enumerate(optimizers_list):
+        # 1) String — brak overrides ani env_overrides.
+        if isinstance(opt, str):
+            base_names.append(opt)
+            for env in environments:
+                job_matrix.append({"optimizer": opt, "environment": env, "base_name": opt})
+            continue
+
+        if not isinstance(opt, dict) or "name" not in opt:
+            raise ValueError(f"Nieprawidłowy format definicji algorytmu: {opt}")
+
+        base_name = opt["name"]
+        base_names.append(base_name)
+        base_overrides = opt.get("overrides") or {}
+        env_overrides_map = opt.get("env_overrides") or {}
+
+        # 2) Brak overrides w ogóle — jak string.
+        if not base_overrides and not env_overrides_map:
+            for env in environments:
+                job_matrix.append({"optimizer": base_name, "environment": env, "base_name": base_name})
+            continue
+
+        # Do scalania potrzebny base_content z dysku (raz na optimizer).
+        base_file_path = source_dir / f"{base_name}.yaml"
+        if not base_file_path.exists():
+            raise FileNotFoundError(f"Nie znaleziono pliku bazowego: {base_file_path}")
+        with open(base_file_path, "r", encoding="utf-8") as bf:
+            base_content = yaml.safe_load(bf)
+
+        # Cache pojedynczego bazowego proxy (gdy `overrides` istnieje, ale env
+        # nie ma własnego nadpisania).
+        base_proxy_ref: Optional[str] = None
+
+        def _ensure_base_proxy() -> str:
+            nonlocal base_proxy_ref
+            if base_proxy_ref is None:
+                proxy_name = _write_proxy_yaml(
+                    target_dir, exp_id, base_name, idx,
+                    suffix=None, base_content=base_content, overrides=base_overrides,
+                )
+                # `proxy_name` zawiera już prefiks `_proxy_` — ref bez slasha.
+                base_proxy_ref = proxy_name
+            return base_proxy_ref
+
+        for env in environments:
+            if env in env_overrides_map:
+                # Scal: base_overrides + env_overrides[env] (env wins).
+                merged = _deep_update(copy.deepcopy(base_overrides), env_overrides_map[env])
+                proxy_name = _write_proxy_yaml(
+                    target_dir, exp_id, base_name, idx,
+                    suffix=env, base_content=base_content, overrides=merged,
+                )
+                job_matrix.append({
+                    "optimizer": proxy_name,
+                    "environment": env,
+                    "base_name": base_name,
+                })
+            elif base_overrides:
+                job_matrix.append({
+                    "optimizer": _ensure_base_proxy(),
+                    "environment": env,
+                    "base_name": base_name,
+                })
+            else:
+                job_matrix.append({
+                    "optimizer": base_name,
+                    "environment": env,
+                    "base_name": base_name,
+                })
+
+    return job_matrix, base_names
+
+SWEEP_KEYS = ("optimizers", "environments", "avoidances")
+
+
+def _collect_static_overrides(definition: dict) -> dict:
+    """Zbiera static overrides — wstrzykiwane na top-level manifestu jako
+    `# @package _global_` deep-merge.
+
+    Źródła (w kolejności priorytetu, ostatni wygrywa):
+    1. `parameters_grid.<klucz>` dla kluczy spoza {optimizers, environments,
+       avoidances} (np. `simulation`, `seed`, `logging`).
+    2. `static_overrides` (top-level) — pozwala wymusić wartości niezależne
+       od `parameters_grid`.
+
+    Reference: Hydra docs §"Defaults List override syntax" — top-level klucze
+    w `# @package _global_` config-u nadpisują wartości z grup
+    `defaults:` przez deep-merge.
+    """
+    grid = definition.get("parameters_grid", {}) or {}
+    overrides: dict = {}
+    for key, value in grid.items():
+        if key in SWEEP_KEYS:
+            continue
+        overrides[key] = value
+    for key, value in (definition.get("static_overrides") or {}).items():
+        overrides[key] = value
+    return overrides
+
+
+def generate_yaml_content(
+    exp_id: str,
+    definition: dict,
+    job_matrix: list[dict],
+) -> str:
+    """Buduje treść `manifest.yaml` (i `experiment_generated/<exp>.yaml`).
+
+    Format Option A: pary (optimizer × environment) są w `job_matrix`
+    (top-level), nie w `hydra.sweeper.params`. Pozostałe wymiary
+    (avoidance × seed) zostają w sweeper.params dla kartezjańskiego rozwinięcia
+    przez `experiments/run_subprocess.py`.
+    """
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     name = definition.get("name", "unnamed_experiment")
     runs = definition.get("runs_per_configuration", 1)
     grid = definition.get("parameters_grid", {})
-    
-    optimizers = grid.get("optimizers", [])
-    environments = grid.get("environments", [])
+
     avoidances = grid.get("avoidances", [])
-    
-    if not all([optimizers, environments, avoidances]):
-        raise ValueError("Siatka parametrów (optimizers, environments, avoidances) nie może być pusta!")
+
+    if not job_matrix:
+        raise ValueError("`job_matrix` jest puste — brak par (optimizer, environment).")
+    if not avoidances:
+        raise ValueError("`parameters_grid.avoidances` nie może być puste!")
 
     seeds = ",".join(str(i) for i in range(1, runs + 1))
-    
-    opt_str = ",".join(optimizers)
-    env_str = ",".join(environments)
     avoid_str = ",".join(avoidances)
-    
-    total_runs = runs * len(optimizers) * len(environments) * len(avoidances)
-    
-    static_overrides = definition.get("static_overrides", {})
-    static_overrides_str = ""
-    for key, value in static_overrides.items():
-        static_overrides_str += f"\n  {key}: {value}"
+    total_runs = runs * len(job_matrix) * len(avoidances)
+
+    # Serializujemy job_matrix przez yaml.dump dla czytelności (block style).
+    # Wcięcie 2 spacje, by trafiło pod top-level klucz w finalnym pliku.
+    job_matrix_yaml = yaml.dump(
+        {"job_matrix": job_matrix},
+        default_flow_style=False,
+        sort_keys=False,
+    ).rstrip()
+
+    static_overrides = _collect_static_overrides(definition)
+    if static_overrides:
+        static_overrides_yaml = (
+            "\n# Static overrides (parameters_grid.<non-sweep> + static_overrides)\n"
+            + yaml.dump(static_overrides, default_flow_style=False, sort_keys=False).rstrip()
+            + "\n"
+        )
+    else:
+        static_overrides_yaml = ""
 
     return f"""# @package _global_
 # AUTOMATICALLY GENERATED EXPERIMENT CONFIGURATION
 # Date: {date_str}
 # Experiment ID: {exp_id}
 # Based on definition: {name}
+#
+# Format Option A (per-environment overrides):
+#   `job_matrix` zawiera jawne pary (optimizer, environment). Generator
+#   `prepare_experiment.py` tworzy proxy yamls per (optimizer × env)
+#   gdy zdefiniowano `env_overrides`. Czytane przez
+#   `experiments/run_subprocess.py`.
 
 defaults:
   - override /hydra/launcher: joblib
@@ -119,11 +285,13 @@ experiment_meta:
   name: "{name}"
   total_runs: {total_runs}
 
+{job_matrix_yaml}
+{static_overrides_yaml}
 hydra:
   mode: MULTIRUN
   sweep:
     dir: results/${{experiment_meta.id}}
-    subdir: ${{hydra:runtime.choices.optimizer}}_${{hydra:runtime.choices.environment}}_${{hydra:runtime.choices.avoidance}}_seed${{seed}}  
+    subdir: ${{hydra:runtime.choices.optimizer}}_${{hydra:runtime.choices.environment}}_${{hydra:runtime.choices.avoidance}}_seed${{seed}}
   launcher:
     n_jobs: 6
     # backend `loky` (zamiast `multiprocessing`) używa fork-and-exec
@@ -136,11 +304,9 @@ hydra:
     prefer: processes
   sweeper:
     params:
-      optimizer: {opt_str}
-      environment: {env_str}
       avoidance: {avoid_str}
       seed: {seeds}
-""" + static_overrides_str
+"""
 
 def main():
     parser = argparse.ArgumentParser(description="Generator statycznych konfiguracji z pliku definicji YAML.")
@@ -169,62 +335,61 @@ def main():
     generated_configs_dir = configs_dir / "experiment_generated"
     results_dir = project_root / "results" / exp_id
     
-    raw_optimizers = definition.get("parameters_grid", {}).get("optimizers", [])
+    grid = definition.get("parameters_grid", {})
+    raw_optimizers = grid.get("optimizers", [])
+    env_names = list(grid.get("environments", []))
+    avoid_names = list(grid.get("avoidances", []))
+
+    if not raw_optimizers or not env_names or not avoid_names:
+        print("❌ `parameters_grid` musi zawierać niepuste optimizers/environments/avoidances.")
+        sys.exit(1)
+
     try:
-        processed_optimizers = process_optimizers(raw_optimizers, exp_id, configs_dir)
-        definition["parameters_grid"]["optimizers"] = processed_optimizers
+        job_matrix, base_optimizer_names = expand_optimizers_for_environments(
+            raw_optimizers, env_names, exp_id, configs_dir,
+        )
     except Exception as e:
         print(f"❌ Błąd przetwarzania algorytmów: {e}")
         sys.exit(1)
 
     generated_configs_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
-    
+
     try:
-        yaml_content = generate_yaml_content(exp_id, definition)
+        yaml_content = generate_yaml_content(exp_id, definition, job_matrix)
     except ValueError as e:
         print(f"❌ Błąd generowania zawartości: {e}")
         sys.exit(1)
-    
+
     yaml_filename = f"{exp_id}.yaml"
     config_path = generated_configs_dir / yaml_filename
     manifest_path = results_dir / "manifest.yaml"
-    
+
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(yaml_content)
-        
+
     shutil.copy(def_path, results_dir / "original_definition.yaml")
     shutil.copy(config_path, manifest_path)
-    
-    total_runs = definition.get("runs_per_configuration", 1) * \
-                 len(processed_optimizers) * \
-                 len(definition.get("parameters_grid", {}).get("environments", [])) * \
-                 len(definition.get("parameters_grid", {}).get("avoidances", []))
+
+    total_runs = (
+        int(definition.get("runs_per_configuration", 1))
+        * len(job_matrix)
+        * len(avoid_names)
+    )
 
     # --- Sweep params dla RunRegistry: generowane DOKŁADNIE z definicji
     # eksperymentu YAML, nie z hardcoded list. Liczba wpisów PENDING musi się
-    # zgadzać z liczbą Hydra-multirun jobów, inaczej `mark_started/completed`
+    # zgadzać z liczbą wystartowanych jobów, inaczej `mark_started/completed`
     # (UPDATE w RunRegistry) trafią w nieistniejące wiersze i registry pozostanie
     # niespójny z parquet-em. Patrz plan.md, Krok 6 — bug z 0 wpisami w
     # results/exp_20260426_b9b56922_complex_test/registry.db.
-    grid = definition.get("parameters_grid", {})
     runs = int(definition.get("runs_per_configuration", 1))
 
-    # Bazowe nazwy optymalizatorów (string lub dict-with-name) — spójne
-    # ze sposobem, w jaki main.py:_get_registry_job_key ekstraktuje krótką
-    # nazwę z `cfg.optimizer._target_`. Proxy override'y (`tmp/{exp_id}_X_N`)
-    # dzielą bazową nazwę i nie są rozróżniane przez registry — dla wariantów
-    # tego samego algorytmu z różnymi overrides obecnie współdzielimy wpis
-    # (znane ograniczenie do rozwiązania w przyszłym kroku).
-    base_optimizer_names: list[str] = []
-    for o in raw_optimizers:
-        if isinstance(o, str):
-            base_optimizer_names.append(o)
-        elif isinstance(o, dict) and "name" in o:
-            base_optimizer_names.append(o["name"])
-        else:
-            raise ValueError(f"Nieprawidłowa definicja optymalizatora: {o}")
-
+    # Bazowe nazwy optymalizatorów — spójne ze sposobem, w jaki
+    # `main.py:_get_registry_job_key` ekstraktuje krótką nazwę z
+    # `cfg.optimizer._target_`. Per-env proxy override'y (`tmp/{exp_id}_X_<env>_N`)
+    # i bazowe proxy (`tmp/{exp_id}_X_N`) wszystkie wskazują tym samym
+    # `_target_`, więc registry użyje wpisu bazowej nazwy.
     unique_optimizers = list(dict.fromkeys(base_optimizer_names))
     if len(unique_optimizers) != len(base_optimizer_names):
         print(
@@ -233,8 +398,6 @@ def main():
             f"Warianty z overrides współdzielą wpisy."
         )
 
-    env_names = list(grid.get("environments", []))
-    avoid_names = list(grid.get("avoidances", []))
     seed_values = list(range(1, runs + 1))
 
     sweep_params = [
@@ -267,10 +430,13 @@ def main():
 
     print("✅ Pomyślnie wygenerowano plik konfiguracji!")
     print(f"ID eksperymentu: {exp_id}")
-    print(f"Wygenerowane pliki proxy w: {configs_dir}/optimizer/tmp/")
+    print(f"Wygenerowane pliki proxy: {configs_dir}/optimizer/_proxy_{exp_id}_*.yaml")
     print(f"Zaplanowane symulacje: {total_runs}")
     print("\nAby usunąć pliki po wykonaniu eksperymentu:")
-    print(f"rm -rf {configs_dir}/optimizer/tmp/* && rm -rf {configs_dir}/experiment_generated/*")
+    print(
+        f"rm -f {configs_dir}/optimizer/_proxy_{exp_id}_*.yaml && "
+        f"rm -f {configs_dir}/experiment_generated/{exp_id}.yaml"
+    )
     print("\nAby uruchomić eksperyment z optymalizacją wieloprocesorową, wywołaj:\n")
     print(f"./run.sh {exp_id}")
 

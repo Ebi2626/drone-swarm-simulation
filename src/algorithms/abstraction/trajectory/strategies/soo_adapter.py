@@ -2,15 +2,22 @@
 Generic Single-Objective Adapter for VectorizedEvaluator.
 
 Bridges the multi-objective VectorizedEvaluator (F: objectives, G: constraints)
-to a scalar fitness value suitable for single-objective metaheuristics 
+to a scalar fitness value suitable for single-objective metaheuristics
 (e.g., PSO, DE, FOA variants).
 
 Golden Rules enforced:
 1. Objective Normalization — F is divided by F_ref (straight-line reference)
    before weighting, so objectives operate on a dimensionless ~1.0 scale.
-2. Weakest-Link Penalty — the worst single constraint violation (np.max)
-   defines the penalty, not the sum. One catastrophic violation cannot be
-   diluted by clean constraints.
+2. **Hard Feasibility-First (Big-M)** — infeasible solutions (any G[k]>0) get
+   fitness ≥ HARD_INFEASIBLE_BASE (1e6), proportional to total violation
+   magnitude. Feasible solutions get just `obj_values`. Effect: feasible
+   ALWAYS dominates infeasible regardless of objective differences. Mirrors
+   NSGA-III's native feasibility-first dominance (Deb 2000 §V.A) for SOO.
+
+Why hard gating: previously `np.max(0,G)*weight` (soft penalty, weakest-link)
+allowed infeasible-with-low-obj to outrank feasible-with-high-obj. Optimizer
+returned kinematically infeasible trajectories → drone executes → panic
+falls (user 2026-05-07).
 """
 
 from __future__ import annotations
@@ -22,6 +29,13 @@ from numpy.typing import NDArray
 
 # Zmiana nazwy importu zgodnie z fizyczną nazwą w projekcie
 from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
+
+
+# Big-M dla feasibility-first ordering (Golden Rule #2). Większe niż
+# jakakolwiek plausible obj_value po normalizacji (F_norm ~ O(1) per obj,
+# suma ≤ ~100 dla typowych weights), więc każde infeasible ma fitness
+# bezpiecznie > każde feasible.
+HARD_INFEASIBLE_BASE: float = 1e6
 
 
 class TrajectorySOOAdapter:
@@ -36,7 +50,10 @@ class TrajectorySOOAdapter:
     2. Prepend start positions, append target positions (Polyline construction).
     3. Query ``VectorizedEvaluator`` -> ``F (Pop, M)``, ``G (Pop, K)``.
     4. Normalize ``F`` by ``F_ref`` (Golden Rule #1).
-    5. Aggregate ``G`` via weakest-link max (Golden Rule #2).
+    5. Aggregate ``G`` via Big-M feasibility-first ordering (Golden Rule #2):
+       ``total_violation = sum(max(0, G[k]))`` — kara rośnie liniowo z każdym
+       naruszeniem (ranking inside-bucket dla infeasible). Każde infeasible
+       (any G[k]>0) wpada w bucket ``≥ HARD_INFEASIBLE_BASE``.
     6. Return ``(Pop,)`` scalar fitness.
 
     Args:
@@ -87,9 +104,20 @@ class TrajectorySOOAdapter:
     def _compute_reference_scales(self) -> NDArray[np.float64]:
         """Evaluate a straight-line trajectory to obtain F_ref for normalization.
 
-        F2 (collision risk) is often zero on the straight line. A tiny epsilon
-        is applied to prevent DivisionByZero, preserving the original scale 
-        for structurally small objectives (like smoothness).
+        Strategia (decyzja użytkownika 2026-05-07): bez cap'u.
+        - Dla `f_ref[k] > 1e-9`: używamy faktycznej wartości referencyjnej.
+          Normalizacja proporcjonalna do skali objectivu.
+        - Dla `f_ref[k] ≤ 1e-9` (komponent zerowy na straight line, np. f3
+          threat dla korytarza bez przeszkód): używamy `1.0` jako neutralny
+          mianownik. Skutek: `F_norm[k] = F[k]` (obserwowana wartość bez
+          skalowania), co zachowuje feasibility-first ordering — feasible
+          z normalnym `F[k] = O(1..10)` ma fitness w O(1..100), zawsze
+          poniżej `HARD_INFEASIBLE_BASE = 1e6`.
+
+        Wcześniejsze rozwiązanie (`max(f_ref, 1e-6)`) było pułapką: dla
+        f_ref[k]=0 normalizacja przez 1e-6 dawała `F_norm[k] = 1e6 · F[k]`,
+        co pozwala feasible solution wyjść > Big-M base i złamać Golden Rule #2
+        (zob. xfail test `test_soo_adapter_big_m_robust_to_zero_f_ref_component`).
 
         Returns:
             (M,) reference objective values, guaranteed > 0.
@@ -100,7 +128,7 @@ class TrajectorySOOAdapter:
 
         # Interpolation via broadcasting
         inner_ref = self._starts_bc + t * (self._targets_bc - self._starts_bc)
-        
+
         # Assemble sparse points
         sparse_ref = np.concatenate(
             [self._starts_bc, inner_ref, self._targets_bc], axis=2
@@ -108,11 +136,19 @@ class TrajectorySOOAdapter:
 
         out_ref: Dict[str, Any] = {}
         self.evaluator.evaluate(sparse_ref, out_ref)
-        
-        f_ref = out_ref["F"][0]  # Take the first (and only) population element's objectives
 
-        # Use 1e-6 instead of 1.0 to avoid flattening naturally small values (e.g., smoothness)
-        return np.maximum(f_ref, 1e-6)
+        f_ref = np.asarray(out_ref["F"][0], dtype=np.float64)
+
+        # Guard zerowych referencji — zwracamy `1.0` (neutralny mianownik)
+        # zamiast `1e-6`, żeby nie wzmacniać F_norm. Próg `1e-9` chroni
+        # przed numerycznym szumem (faktyczne zera są rzadkie ale możliwe
+        # dla f3=threat na czystym korytarzu).
+        zero_ref_mask = f_ref <= 1e-9
+        if np.any(zero_ref_mask):
+            self._zero_ref_components = np.where(zero_ref_mask)[0].tolist()
+        else:
+            self._zero_ref_components = []
+        return np.where(zero_ref_mask, 1.0, f_ref)
 
     # ------------------------------------------------------------------
     # Callable interface
@@ -154,16 +190,31 @@ class TrajectorySOOAdapter:
         # F_norm @ weights mathematically executes \sum_{i=1}^{M} w_i * F_{norm, i}
         obj_values = F_norm @ self.weights  # Result shape: (Pop_size,)
 
-        # Golden Rule #2: Weakest-link penalty (max violation, not sum)
-        # pymoo standard: G <= 0 is feasible, G > 0 is a violation.
-        # np.maximum(0.0, G) clips all feasible scores to zero.
-        # np.max(..., axis=1) finds the most severe violation for each population member.
-        penalties = self.penalty_weight * np.max(np.maximum(0.0, G), axis=1)
+        # Golden Rule #2: Hard Feasibility-First gating (Big-M).
+        # pymoo standard: G <= 0 feasible, G > 0 violation.
+        # Total violation = sum of positive parts (Big-M ordering INSIDE
+        # infeasible bucket: smaller violation → smaller fitness in bucket).
+        violations_clipped = np.maximum(0.0, G)
+        total_violation = np.sum(violations_clipped, axis=1)  # (Pop_size,)
+        infeasible_mask = total_violation > 0.0
+
+        # Big-M base — większe niż jakakolwiek plausible obj_value (z F_norm
+        # typowo O(1-10), suma weighted obj ≤ ~100). 1e6 to bezpieczny margin.
+        # Każde infeasible: fitness ≥ HARD_INFEASIBLE_BASE → feasible (≤ ~100)
+        # ZAWSZE wygrywa.
+        fitness = np.where(
+            infeasible_mask,
+            HARD_INFEASIBLE_BASE + self.penalty_weight * total_violation,
+            obj_values,
+        )
 
         # Optional: Print debug info only on the first pass
         if not self._debug_printed:
             print(f"\n[DEBUG SOO] Obj Norm (First Mem): {F_norm[0]} | Raw G: {G[0]}")
-            print(f"[DEBUG SOO] Fitness: {obj_values[0]:.4f} | Penalty: {penalties[0]:.4f}")
+            print(
+                f"[DEBUG SOO] Fitness: {fitness[0]:.4f} | "
+                f"Feasible={not bool(infeasible_mask[0])}"
+            )
             self._debug_printed = True
 
-        return obj_values + penalties
+        return fitness

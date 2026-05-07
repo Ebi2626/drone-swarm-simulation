@@ -47,12 +47,13 @@ _EVASION_HEADERS = [
     "event_type",
     "mode",
     "ttc",
+    "ttc_source",          # 'oracle_discrete' | 'continuous' | empty
     "dist_to_threat",
     "threat_x", "threat_y", "threat_z",
     "threat_vx", "threat_vy", "threat_vz",
     "rejoin_x", "rejoin_y", "rejoin_z",
     "rejoin_arc",
-    "astar_success",
+    "preferred_axis",       # 'right' | 'left' | 'up' | 'down' | empty (NULL gdy nieokreślone)
     "fallback_used",
     "pos_error_at_rejoin",
     "vel_error_at_rejoin",
@@ -148,22 +149,38 @@ class SimulationLogger:
         event_type: str,
         mode: int = -1,
         ttc: float = float("nan"),
+        ttc_source: Optional[str] = None,
         dist_to_threat: float = float("nan"),
         threat_pos: Optional[NDArray] = None,
         threat_vel: Optional[NDArray] = None,
         rejoin_point: Optional[NDArray] = None,
         rejoin_arc: float = float("nan"),
-        astar_success: Optional[bool] = None,
+        preferred_axis: Optional[str] = None,
         fallback_used: Optional[bool] = None,
         pos_error_at_rejoin: float = float("nan"),
         vel_error_at_rejoin: float = float("nan"),
         planning_wall_time_s: float = float("nan"),
         notes: str = "",
+        # Backward-compat alias: starsze callsity przekazują `astar_success`.
+        # `astar_success = NOT fallback_used` (semantycznie redundantne) —
+        # konwertujemy gdy `fallback_used` nie podane. Wycofane 2026-05-07.
+        astar_success: Optional[bool] = None,
     ) -> None:
         """
         Rekord diagnostyczny fazy uniku — pozwala mierzyć opóźnienie triggera,
-        skuteczność A*, błędy pozycji/prędkości przy rejoin. Fields mogą być
-        NaN jeśli nieznane w danym zdarzeniu.
+        skuteczność planowania (`fallback_used`), błędy pozycji/prędkości przy
+        rejoin. Fields mogą być NaN/None jeśli nieznane w danym zdarzeniu.
+
+        Args:
+            ttc_source: 'oracle_discrete' (z deterministycznej predykcji
+                splajnowej, dyskretyzowane) lub 'continuous' (klasyczne
+                `dist / closing_speed`). Pomaga rozpoznać czy ttc jest
+                proporcjonalne do `dist_to_threat`.
+            preferred_axis: 'right' | 'left' | 'up' | 'down' lub None — oś wybrana
+                przez `AxisChooser` w SingleArcDeflection (notacja kierunkowa
+                względem drone forward velocity XY).
+            astar_success: DEPRECATED. Algorytm A* wycofany; używać
+                `fallback_used` (semantycznie odwrotny).
         """
         def _xyz(v: Optional[NDArray]) -> tuple:
             if v is None:
@@ -174,18 +191,24 @@ class SimulationLogger:
         tvx, tvy, tvz = _xyz(threat_vel)
         rx, ry, rz = _xyz(rejoin_point)
 
+        # Backward-compat: jeśli ktoś wciąż przekazuje astar_success a nie
+        # fallback_used, wywodzimy fallback_used jako negację.
+        if fallback_used is None and astar_success is not None:
+            fallback_used = not astar_success
+
         self.evasion_buffer.append({
             "time": round(current_time, 3),
             "drone_id": drone_id,
             "event_type": event_type,
             "mode": mode,
             "ttc": ttc,
+            "ttc_source": ttc_source if ttc_source is not None else "",
             "dist_to_threat": dist_to_threat,
             "threat_x": tx, "threat_y": ty, "threat_z": tz,
             "threat_vx": tvx, "threat_vy": tvy, "threat_vz": tvz,
             "rejoin_x": rx, "rejoin_y": ry, "rejoin_z": rz,
             "rejoin_arc": rejoin_arc,
-            "astar_success": astar_success if astar_success is not None else "",
+            "preferred_axis": preferred_axis if preferred_axis in ("X", "Y", "Z") else "",
             "fallback_used": fallback_used if fallback_used is not None else "",
             "pos_error_at_rejoin": pos_error_at_rejoin,
             "vel_error_at_rejoin": vel_error_at_rejoin,

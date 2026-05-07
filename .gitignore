@@ -240,3 +240,5 @@ trajectory_preview_bspline.png
 # Data outputs (per-run optimization history h5)
 optimization_history/
 
+experiment_restrictions.md
+code-review.md

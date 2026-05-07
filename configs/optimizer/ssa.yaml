@@ -11,7 +11,7 @@ algorithm_params:
   # (~177k NFE). epochs=100 daje ~290k NFE = 1.6× margines powyżej Q75.
   # Ujednolicone z MSFFOA/OOA/NSGA-III dla ceteris paribus.
   pop_size: 1001
-  epochs: 100
+  epochs: 200
   n_inner_waypoints: 11
 
   # --- Parametry biologiczne SSA (paper Xue & Shen 2020) ---

@@ -8,7 +8,7 @@ algorithm_params:
   # n_gen skalibrowane empirycznie (exp_20260506): Q75 konwergencji przy
   # iteracji 69 (~69k NFE). n_gen=100 daje ~100k NFE = 1.4× margines.
   pop_size: 1001
-  n_gen: 100
+  n_gen: 200
   n_inner_waypoints: 11
 
   crossover_prob: 0.90

@@ -8,7 +8,7 @@ algorithm_params:
   # epochs skalibrowane empirycznie (exp_20260506): Q75 konwergencji przy
   # iteracji 56 (~112k NFE). epochs=100 daje ~200k NFE = 1.8× margines.
   pop_size: 1001
-  epochs: 100
+  epochs: 200
   n_inner_waypoints: 11
 
   # --- Wagi celów (skalaryzacja MOO → SOO dla 5 funkcji kosztu) ---

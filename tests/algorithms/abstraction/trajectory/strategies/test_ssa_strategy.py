@@ -8,6 +8,7 @@ from src.algorithms.abstraction.trajectory.strategies.ssa_strategy import (
     LoggedOriginalSSA,
     ssa_swarm_strategy,
 )
+from src.utils.SeedRegistry import SeedRegistry
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.ssa_strategy"
 
@@ -48,6 +49,10 @@ def mock_evaluator():
     evaluator.evaluate.side_effect = side_effect
     return evaluator
 
+@pytest.fixture
+def mock_master_seed():
+    seeds = SeedRegistry(master_seed=int(42))
+    return seeds
 
 # ===========================================================================
 # TESTY: SSAProblemAdapter
@@ -284,11 +289,120 @@ class TestSSASwarmStrategy:
 
         assert np.all(result[0, :, 2] >= 0.5)
 
-    def test_mealpy_called_correctly_with_biological_params(self, mock_world_data, basic_positions, patch_deps):
+    def test_logged_ssa_batches_population_eval_and_skips_logger_reeval(self, basic_positions):
+        """Regresja perf-fix 2026-05-07.
+
+        `LoggedOriginalSSA.update_target_for_population` musi:
+          - liczyć fitness JEDNYM batch-callem do `evaluate_population`
+            (nie 1× per agent),
+          - przykleić F/G do `agent.target._F_row/_G_row`.
+
+        `LoggedOriginalSSA.evolve` przy logowaniu musi BRAĆ F/G z cache na
+        targetach zamiast wołać `evaluate_full(decisions)` (eliminacja
+        nadmiarowej re-ewaluacji 1× pop_size NFE/gen).
+        """
+        starts, targets = basic_positions
+        n_drones = starts.shape[0]
+        n_inner = 3
+        d = n_drones * n_inner * 3
+        pop_size = 5
+        n_obj = 5
+        n_g = 3
+
+        # Real adapter (nie mock) — chcemy rzeczywistego flow przez
+        # evaluate_population → scalar_adapter.last_objectives.
+        scalar_adapter = MagicMock()
+        scalar_adapter.return_value = np.full(pop_size, 7.0)
+
+        # Po wywołaniu __call__ scalar_adapter musi mieć last_objectives/last_constraints
+        # ustawione na ndarray — symulujemy zachowanie TrajectorySOOAdapter.
+        captured_F = np.full((pop_size, n_obj), 0.5)
+        captured_G = np.full((pop_size, n_g), -0.1)
+
+        def scalar_call_side_effect(inner):
+            scalar_adapter.last_objectives = captured_F
+            scalar_adapter.last_constraints = captured_G
+            return np.full(inner.shape[0], 7.0)
+        scalar_adapter.side_effect = scalar_call_side_effect
+
+        evaluator = MagicMock()
+        evaluator.individuals_evaluated = 0
+
+        adapter = SSAProblemAdapter(
+            bounds=FloatVar(lb=np.full(d, -50.0), ub=np.full(d, 150.0)),
+            evaluator=evaluator,
+            scalar_adapter=scalar_adapter,
+            start_pos=starts,
+            target_pos=targets,
+            n_drones=n_drones,
+            n_inner=n_inner,
+            n_output_samples=20,
+        )
+
+        history_writer = MagicMock()
+        ssa = LoggedOriginalSSA(
+            epoch=1,
+            pop_size=pop_size,
+            history_writer=history_writer,
+            history_problem=adapter,
+        )
+        ssa.nfe_counter = 0
+
+        # Symulujemy populację mealpy: lista obiektów z atrybutem `solution`.
+        class _FakeAgent:
+            def __init__(self, sol):
+                self.solution = sol
+                self.target = None
+
+        fake_pop = [_FakeAgent(np.zeros(d)) for _ in range(pop_size)]
+        scalar_adapter.reset_mock()
+        scalar_adapter.side_effect = scalar_call_side_effect
+
+        # 1) Batchowanie: 1 call do scalar_adapter dla całej populacji.
+        result_pop = ssa.update_target_for_population(fake_pop)
+        assert scalar_adapter.call_count == 1, (
+            "update_target_for_population powinno wykonać dokładnie 1 batch-call "
+            f"do scalar_adapter (got {scalar_adapter.call_count})."
+        )
+        # Każdy agent dostaje target z fitness=7.0 oraz przyklejone F_row/G_row
+        # NA AGENCIE (Agent.copy zachowuje vars(self), Target.copy nie).
+        for agent in result_pop:
+            assert agent.target is not None
+            assert float(agent.target.fitness) == pytest.approx(7.0)
+            assert isinstance(agent._F_row, np.ndarray)
+            assert agent._F_row.shape == (n_obj,)
+            assert isinstance(agent._G_row, np.ndarray)
+            assert agent._G_row.shape == (n_g,)
+        assert ssa.nfe_counter == pop_size
+
+        # 2) Brak re-ewaluacji w evolve: po super().evolve(epoch), evolve
+        # powinien zalogować F/G z cache zamiast wołać evaluate_full(...).
+        ssa.pop = result_pop
+        adapter.evaluate_full = MagicMock(side_effect=AssertionError(
+            "evaluate_full nie powinno być wołane gdy _F_row/_G_row są zacache'owane"
+        ))
+
+        with patch.object(LoggedOriginalSSA, "evolve",
+                          autospec=False) as patched_super_evolve:
+            # nie mockujemy całego evolve — mockujemy super().evolve poprzez
+            # patch na OriginalSSA (rodzicu), żeby `super().evolve(epoch)`
+            # nie zmieniał stanu.
+            pass
+
+        with patch("mealpy.swarm_based.SSA.OriginalSSA.evolve") as super_evolve:
+            super_evolve.return_value = None
+            ssa.evolve(epoch=0)
+
+        # Logger dostał call z F/G z cache (kształty (pop_size, n_obj/n_g)).
+        assert history_writer.put_generation_data.call_count == 1
+        logged = history_writer.put_generation_data.call_args.args[0]
+        assert logged["objectives_matrix"].shape == (pop_size, n_obj)
+
+    def test_mealpy_called_correctly_with_biological_params(self, mock_world_data, basic_positions, patch_deps, mock_master_seed):
         """Weryfikuje czy biologiczne parametry ST, PD, SD algorytmu Sparrow Search wchodzą do Mealpy."""
         starts, targets = basic_positions
         custom_params = {
-            "pop_size": 12, "n_gen": 5, "n_workers": 2, "seed": 42,
+            "pop_size": 12, "n_gen": 5, "n_workers": 2, "seeds": mock_master_seed,
             "st": 0.9, "pd_ratio": 0.3, "sd_ratio": 0.15
         }
 
@@ -308,6 +422,7 @@ class TestSSASwarmStrategy:
                 number_of_waypoints=20,
                 drone_swarm_size=2,
                 algorithm_params=custom_params,
+                seeds=mock_master_seed
             )
 
             call_args, call_kwargs = MockSSA.call_args

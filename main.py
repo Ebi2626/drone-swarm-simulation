@@ -55,7 +55,7 @@ class ExperimentRunner:
             self.tracked_drone_id = 0
 
         # Zmienne środowiskowe (nadpisane przez strategię lub initialize_world)
-        self.environemnt = None
+        self.environment = None
         self.world_data = None
         self.obstacles_data = None
         self.drones_trajectories = None
@@ -183,7 +183,7 @@ class ExperimentRunner:
             all_end_xyzs = self.end_positions
             all_initial_rpys = self.initial_rpys
 
-        self.environemnt = instantiate(
+        self.environment = instantiate(
             self.cfg.environment,
             world_data=self.world_data,
             obstacles_data=self.obstacles_data,
@@ -224,17 +224,101 @@ class ExperimentRunner:
         )
 
     def _process_collisions(self, sim_time: float, current_step: int):
-        """Przetwarza kolizje — loguje i usuwa z aktywnych tylko drony głównego roju."""
-        for d_id, o_id in self.environemnt.get_detailed_collisions():
+        """Przetwarza kolizje — loguje i usuwa z aktywnych tylko drony głównego roju.
+
+        Trzy źródła kolizji:
+        1. Fizyczne kontakty PyBullet'a (`get_detailed_collisions`) — drone
+           styka się z ground/ceiling/obstacle/drugim dronem.
+        2. Proximity-based inter-drone (`get_inter_drone_proximity_collisions`,
+           Krok 2 plan.md 2026-05-07) — drony są ≤ INTER_DRONE_COLLISION_THRESHOLD_M
+           od siebie. Łapie scenariusz w którym drony nie zdążyły się zetknąć
+           fizycznie, bo PID się nasyca + downwash bayli i obie spadają na
+           ziemię (kolizja maskowana jako ground hit).
+
+        Po kolizji: dron usunięty z `active_drones`, silniki + LiDAR
+        wyłączone w `trajectory_controller.disable_drone(d_id)`.
+        """
+        # 1. Fizyczne kontakty
+        for d_id, o_id in self.environment.get_detailed_collisions():
             if d_id >= self.num_drones:
                 continue
-            if self.logger:
-                self.logger.log_collision(sim_time, d_id, o_id)
-            if d_id in self.active_drones:
-                self.active_drones.remove(d_id)
-                print(
-                    f"[INFO] Dron {d_id} uległ kolizji w czasie {sim_time:.2f}s (krok {current_step})."
-                )
+            self._handle_collision(int(d_id), int(o_id), sim_time, current_step)
+
+        # 2. Proximity-based inter-drone (z marginesem przed LCP impulse)
+        for a_idx, b_idx, _dist in self.environment.get_inter_drone_proximity_collisions():
+            # Skip jeśli któryś z pary jest już crashed (nie raportuj
+            # podwójnie z fizycznego kontaktu i proximity).
+            already_a = self.logger and a_idx in self.logger.crashed_drones
+            already_b = self.logger and b_idx in self.logger.crashed_drones
+            if already_a and already_b:
+                continue
+            # Body IDs primary swarm dronów do `other_body_id` w log.
+            body_b = int(self.environment.DRONE_IDS[b_idx])
+            body_a = int(self.environment.DRONE_IDS[a_idx])
+            if not already_a:
+                self._handle_collision(int(a_idx), body_b, sim_time, current_step)
+            if not already_b:
+                self._handle_collision(int(b_idx), body_a, sim_time, current_step)
+
+    def _handle_collision(
+        self, d_id: int, o_id: int, sim_time: float, current_step: int
+    ) -> None:
+        """Wspólna ścieżka logowania kolizji (fizycznej i proximity-based)."""
+        if self.logger:
+            already_crashed = d_id in self.logger.crashed_drones
+            self.logger.log_collision(sim_time, d_id, o_id)
+            # Krok 3.4 plan.md: zamknij ewentualny otwarty rekord uniku
+            # outcome'em `collided_*` (klasyfikacja po `env.get_body_role`).
+            self._update_evasion_collision_outcome(d_id, o_id)
+            # Disable silniki + LiDAR ZARAZ po pierwszej kolizji
+            # (idempotentne — `disable_drone` może być wołane wielokrotnie).
+            if not already_crashed and hasattr(
+                self.trajectory_controller, "disable_drone"
+            ):
+                self.trajectory_controller.disable_drone(d_id)
+        if d_id in self.active_drones:
+            self.active_drones.remove(d_id)
+            print(
+                f"[INFO] Dron {d_id} uległ kolizji w czasie {sim_time:.2f}s "
+                f"(krok {current_step}, other={o_id})."
+            )
+
+    def _update_evasion_collision_outcome(self, drone_id: int, other_body_id: int) -> None:
+        """Maps PyBullet body id → outcome string i wywołuje update na loggerze.
+
+        Brak otwartego pending-rekordu (drone rozbił się w MODE_TRACKING bez
+        uniku) → silent no-op via `consume_pending_evasion_trigger_time`.
+        """
+        controller = self.trajectory_controller
+        if controller is None or not hasattr(
+            controller, "consume_pending_evasion_trigger_time"
+        ):
+            return
+        trigger_time = controller.consume_pending_evasion_trigger_time(drone_id)
+        if trigger_time is None:
+            return
+
+        from src.utils.optimization_metrics import (
+            OUTCOME_COLLIDED_DRONE,
+            OUTCOME_COLLIDED_GROUND,
+            OUTCOME_COLLIDED_OBSTACLE,
+        )
+        try:
+            role = self.environment.get_body_role(int(other_body_id))
+        except Exception:
+            role = "static_obstacle"
+        if role == "ground" or role == "ceiling":
+            outcome = OUTCOME_COLLIDED_GROUND
+        elif role in ("drone", "dynamic_obstacle"):
+            outcome = OUTCOME_COLLIDED_DRONE
+        else:
+            outcome = OUTCOME_COLLIDED_OBSTACLE
+
+        self.logger.update_online_optimization_outcome(
+            drone_id=drone_id,
+            trigger_time=float(trigger_time),
+            outcome=outcome,
+        )
 
     def _process_arrivals(self, drone_states: list, sim_time: float):
         """Sprawdza czy drony głównego roju dotarły do celu."""
@@ -257,7 +341,7 @@ class ExperimentRunner:
     def _get_all_drone_states(self) -> list:
         """Zwraca stany wszystkich total_agents agentów ze środowiska."""
         return [
-            self.environemnt._getDroneStateVector(d) for d in range(self.total_agents)
+            self.environment._getDroneStateVector(d) for d in range(self.total_agents)
         ]
 
     def _split_states(self, all_states: list) -> tuple[list, list]:
@@ -284,7 +368,7 @@ class ExperimentRunner:
         print("Running experiment...")
         self.initialize_world()
 
-        self.trajectory_controller.init_lidars(self.environemnt.CLIENT)
+        self.trajectory_controller.init_lidars(self.environment.CLIENT)
 
         is_running = not self.cfg.simulation.gui
         current_step = 0
@@ -341,7 +425,7 @@ class ExperimentRunner:
                             drone_pre_states, self.tracked_drone_id
                         )
 
-                self.environemnt.step(
+                self.environment.step(
                     self._merge_actions(drone_actions, obstacle_actions)
                 )
 
@@ -385,7 +469,7 @@ class ExperimentRunner:
         print(f"[DEBUG] Koniec symulacji. Czas: {duration:.2f}s ---")
         if self.logger:
             self.logger.save()
-        self.environemnt.close()
+        self.environment.close()
 
 
 # =============================================================================

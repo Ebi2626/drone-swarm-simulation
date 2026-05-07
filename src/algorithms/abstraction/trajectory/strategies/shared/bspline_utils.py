@@ -451,3 +451,151 @@ def evaluate_bspline_trajectory_sync(
                     prev_positions[d, 2] = cur_positions[d, 2]
 
     return obstacle_collisions, lengths, swarm_collisions
+
+
+@njit(cache=True)
+def compute_max_observed_acceleration(
+    control_points,
+    cruise_speed: float,
+    samples_per_segment: int = 30,
+    boundary_segments_skip: int = 0,
+):
+    """Twardy fizyczny constraint na **LATERAL** acceleration drona podążającego
+    za B-spline'em (Kamień 2026-05-07, refactor v2).
+
+    Mierzy wyłącznie składową lateralną (perpendicular do kierunku ruchu) bo:
+    - **Tangencjalna** acceleration (along velocity) jest bounded przez
+      trapezoidal velocity profile w `NumbaTrajectoryProfile` (≤ max_accel
+      by construction). Mierzenie tej składowej daje **false positives**
+      dla geometrycznie prostych trajektorii (np. linia prosta ma niezerową
+      drugą pochodną parametryczną z powodu klampowania, ale lateral=0).
+    - **Lateralna** = `v² × κ` (κ = krzywizna). To jest faktyczne wymaganie
+      siły bocznej od drona — to chcemy ograniczyć przez max_accel.
+
+    Implementacja:
+    1. Sample B-spline parametrycznie (samples_per_segment per segment)
+    2. Central-difference v_param i a_param (parametryczne)
+    3. Lateral component: a_lat_param = a_param - (a_param · v_unit)·v_unit
+    4. Mapping fizyczne: |a_lat_phys| = |a_lat_param| × (cruise_speed/|v_param|)²
+       (chain rule przy zamianie zmiennej; assume worst case v_phys=cruise_speed)
+    5. Track max przez całą trajektorię (per drone, per individual)
+
+    Z lateral-only check, `boundary_segments_skip=0` jest bezpieczne —
+    klampowanie produkuje tangential acceleration (ramp-in/ramp-out)
+    która nie jest karana. Tylko realne zakręty (lateral) trafiają.
+
+    Args:
+        control_points: shape (PopSize, NDrones, NControl, 3)
+        cruise_speed: max physical speed (m/s)
+        samples_per_segment: gęstość samplingu (default 30)
+        boundary_segments_skip: ile pierwszych/ostatnich segmentów pominąć
+            (default 0 — z lateral-only nie ma artefaktów klampowania)
+
+    Returns:
+        max_acc: shape (PopSize, NDrones) — max observed |a_lat_phys|.
+    """
+    cp = clamp_control_points_batch(control_points)
+    pop_size, n_drones, n_ctrl, _ = cp.shape
+    n_segments = n_ctrl - 3
+
+    max_acc = np.zeros((pop_size, n_drones), dtype=np.float64)
+
+    if n_segments < 1:
+        return max_acc
+
+    # Core segments po skipowaniu boundary. Dla bardzo krótkich trajektorii
+    # (n_seg ≤ 2*skip) — fallback na całą trajektorię (lepiej coś niż nic).
+    if n_segments > 2 * boundary_segments_skip:
+        seg_start = boundary_segments_skip
+        seg_end = n_segments - boundary_segments_skip
+    else:
+        seg_start = 0
+        seg_end = n_segments
+
+    dt_param = 1.0 / samples_per_segment
+    dt_param_sq = dt_param * dt_param
+    v_phys_sq = cruise_speed * cruise_speed
+
+    # Minimum ||v_param||² żeby a_phys mapping był sensowny. Powolne
+    # ruchy w param space (clustered control points) → nieproporcjonalna
+    # eksplozja a_phys. Threshold = (cruise_speed × dt_param)² = oczekiwana
+    # parametryczna prędkość gdy drone leci cruise. Min: 0.01 × cruise_speed²
+    # (drone w hover/ramp).
+    min_v_param_sq = 0.01 * v_phys_sq * dt_param_sq
+
+    for p in range(pop_size):
+        for d in range(n_drones):
+            # Reset sliding window per (p, d)
+            ppx = ppy = ppz = 0.0
+            px = py = pz = 0.0
+            cx = cy = cz = 0.0
+            n_collected = 0
+
+            for seg in range(seg_start, seg_end):
+                seg_p0x = cp[p, d, seg, 0]
+                seg_p0y = cp[p, d, seg, 1]
+                seg_p0z = cp[p, d, seg, 2]
+                seg_p1x = cp[p, d, seg+1, 0]
+                seg_p1y = cp[p, d, seg+1, 1]
+                seg_p1z = cp[p, d, seg+1, 2]
+                seg_p2x = cp[p, d, seg+2, 0]
+                seg_p2y = cp[p, d, seg+2, 1]
+                seg_p2z = cp[p, d, seg+2, 2]
+                seg_p3x = cp[p, d, seg+3, 0]
+                seg_p3y = cp[p, d, seg+3, 1]
+                seg_p3z = cp[p, d, seg+3, 2]
+
+                start_step = 0 if seg == seg_start else 1
+                for step in range(start_step, samples_per_segment + 1):
+                    t = step * dt_param
+                    b0, b1, b2, b3 = bspline_basis_cubic(t)
+                    new_x = b0*seg_p0x + b1*seg_p1x + b2*seg_p2x + b3*seg_p3x
+                    new_y = b0*seg_p0y + b1*seg_p1y + b2*seg_p2y + b3*seg_p3y
+                    new_z = b0*seg_p0z + b1*seg_p1z + b2*seg_p2z + b3*seg_p3z
+
+                    ppx, ppy, ppz = px, py, pz
+                    px, py, pz = cx, cy, cz
+                    cx, cy, cz = new_x, new_y, new_z
+                    n_collected += 1
+
+                    if n_collected < 3:
+                        continue
+
+                    # Central difference velocity (parametric)
+                    vx = (cx - ppx) / (2.0 * dt_param)
+                    vy = (cy - ppy) / (2.0 * dt_param)
+                    vz = (cz - ppz) / (2.0 * dt_param)
+                    v_param_sq = vx*vx + vy*vy + vz*vz
+
+                    # Skip slow regions (stagnant lub clustered control points)
+                    # — physical mapping a_phys eksploduje, ale faktycznie
+                    # to jest ramp/hover gdzie v_phys też → 0.
+                    if v_param_sq < min_v_param_sq:
+                        continue
+
+                    # Central difference acceleration (parametric)
+                    ax = (cx - 2.0*px + ppx) / dt_param_sq
+                    ay = (cy - 2.0*py + ppy) / dt_param_sq
+                    az = (cz - 2.0*pz + ppz) / dt_param_sq
+
+                    # Decompose into tangential + lateral (perpendicular do v)
+                    # v_unit = v_param / ||v_param||
+                    # a_tang = (a_param · v_unit) * v_unit
+                    # a_lat = a_param - a_tang
+                    # ||v_param|| = sqrt(v_param_sq)
+                    inv_v = 1.0 / np.sqrt(v_param_sq)
+                    vux = vx * inv_v
+                    vuy = vy * inv_v
+                    vuz = vz * inv_v
+                    a_dot_v = ax*vux + ay*vuy + az*vuz
+                    a_lat_x = ax - a_dot_v * vux
+                    a_lat_y = ay - a_dot_v * vuy
+                    a_lat_z = az - a_dot_v * vuz
+                    a_lat_param_sq = a_lat_x*a_lat_x + a_lat_y*a_lat_y + a_lat_z*a_lat_z
+
+                    # Physical lateral: |a_lat_phys| = |a_lat_param| × (v_phys/v_param)²
+                    a_lat_phys_sq = a_lat_param_sq * (v_phys_sq / v_param_sq) ** 2
+                    if a_lat_phys_sq > max_acc[p, d] * max_acc[p, d]:
+                        max_acc[p, d] = np.sqrt(a_lat_phys_sq)
+
+    return max_acc

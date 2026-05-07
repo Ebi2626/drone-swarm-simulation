@@ -1,5 +1,27 @@
+"""Agregat per-run metryk do tabeli `run_metrics`.
+
+Refaktor 2026-05-07: usunięte legacy 8-component costs (`total_energy_cost`,
+`total_smoothness_cost`, `total_altitude_cost`, `total_terrain_penalty`,
+`total_climb_penalty`, `total_collision_penalty`) — żaden z 4 algorytmów
+ich nie produkuje. Aktualny `VectorizedEvaluator` ma 5-obj F-vector
+mapowane na `final_objective_f1_trajectory/f2_height_angle/total_threat_cost/
+total_turn_penalty/total_coordination_cost` przez `populate_offline_objectives`.
+
+Usunięte też never-populated: `decision_mode`, `selected_solution_index`,
+`feasible_nondominated_count`, `reference_point_json`.
+
+Refaktor 2026-05-08 (decyzja użytkownika #9 — "nie wstawiajmy sztucznych
+nulli"): pola `final_objective`, `total_threat_cost`, `total_turn_penalty`
+zostały **usunięte z INSERT/ON CONFLICT** w tym populatorze. Należą do
+domeny `populate_offline_objectives` (z h5 F-vector). Schema dopuszcza
+NULL — wiersz tworzony przez ten populator pozostaje bez tych pól, dopóki
+`populate_offline_objectives` nie wykona UPDATE. Eliminuje to ordering
+dependency (poprzednio: jawne NULL nadpisywały wartości z h5 jeśli kolejność
+była zaburzona).
+"""
 import json
 import sqlite3
+
 
 def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
     cur = conn.execute(
@@ -8,16 +30,7 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
         uav AS (
             SELECT
                 COUNT(*) AS uav_rows,
-                MIN(COALESCE(success, 1)) AS all_uav_success,
-                CASE WHEN COUNT(final_objective) > 0 THEN total(final_objective) END AS final_objective,
-                CASE WHEN COUNT(energy_cost) > 0 THEN total(energy_cost) END AS total_energy_cost,
-                CASE WHEN COUNT(smoothness_cost) > 0 THEN total(smoothness_cost) END AS total_smoothness_cost,
-                CASE WHEN COUNT(threat_cost) > 0 THEN total(threat_cost) END AS total_threat_cost,
-                CASE WHEN COUNT(altitude_cost) > 0 THEN total(altitude_cost) END AS total_altitude_cost,
-                CASE WHEN COUNT(terrain_penalty) > 0 THEN total(terrain_penalty) END AS total_terrain_penalty,
-                CASE WHEN COUNT(turn_penalty) > 0 THEN total(turn_penalty) END AS total_turn_penalty,
-                CASE WHEN COUNT(climb_penalty) > 0 THEN total(climb_penalty) END AS total_climb_penalty,
-                CASE WHEN COUNT(collision_penalty) > 0 THEN total(collision_penalty) END AS total_collision_penalty
+                MIN(COALESCE(success, 1)) AS all_uav_success
             FROM uav_metrics
             WHERE run_id = ?
         ),
@@ -64,16 +77,40 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             SELECT
                 MAX(CASE WHEN ogs.metric_name IN ('nondominated_solutions', 'nd_count', 'rank0_count')
                          THEN ogs.metric_value END) AS nondominated_count,
-                MAX(CASE WHEN ogs.metric_name = 'feasible_nondominated_count'
-                         THEN ogs.metric_value END) AS feasible_nondominated_count,
                 MAX(CASE WHEN ogs.metric_name = 'hypervolume'
                          THEN ogs.metric_value END) AS hypervolume,
                 MAX(CASE WHEN ogs.metric_name IN ('igd_plus', 'igd+')
-                         THEN ogs.metric_value END) AS igd_plus
+                         THEN ogs.metric_value END) AS igd_plus,
+                MAX(CASE WHEN ogs.metric_name = 'front_size'
+                         THEN ogs.metric_value END) AS front_size_last_gen,
+                MAX(CASE WHEN ogs.metric_name = 'hypervolume_normalized'
+                         THEN ogs.metric_value END) AS hypervolume_normalized
             FROM optimization_generation_stats ogs
             JOIN last_gen lg
               ON lg.generation = ogs.generation
             WHERE ogs.run_id = ?
+        ),
+        online_uav AS (
+            SELECT
+                MIN(min_inter_uav_distance_m)        AS min_inter_uav_distance_m,
+                AVG(mean_inter_uav_distance_m)       AS mean_inter_uav_distance_m,
+                CASE WHEN COUNT(inter_uav_safety_violation_count) > 0
+                     THEN total(inter_uav_safety_violation_count)
+                END                                   AS total_inter_uav_safety_violations,
+                AVG(energy_indicator)                AS mean_energy_indicator,
+                AVG(smoothness_indicator)            AS mean_smoothness_indicator
+            FROM uav_online_metrics
+            WHERE run_id = ?
+        ),
+        moo_quality_final AS (
+            SELECT
+                im.gd            AS gd_final,
+                im.spread        AS spread_final,
+                im.spacing       AS spacing_final,
+                im.r2_indicator  AS r2_final
+            FROM iteration_metrics im
+            JOIN last_gen lg ON im.iteration = lg.generation
+            WHERE im.run_id = ?
         ),
         drones_fallback AS (
             SELECT COUNT(DISTINCT drone_id) AS drone_count
@@ -92,75 +129,37 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
                 ELSE 1
             END AS success,
 
-            (SELECT final_objective FROM uav) AS final_objective,
             (SELECT total_path_length_2d FROM traj) AS total_path_length_2d,
             (SELECT total_path_length_3d FROM traj) AS total_path_length_3d,
-            (SELECT total_energy_cost FROM uav) AS total_energy_cost,
-            (SELECT total_smoothness_cost FROM uav) AS total_smoothness_cost,
-            (SELECT total_threat_cost FROM uav) AS total_threat_cost,
-            (SELECT total_altitude_cost FROM uav) AS total_altitude_cost,
-            (SELECT total_terrain_penalty FROM uav) AS total_terrain_penalty,
-            (SELECT total_turn_penalty FROM uav) AS total_turn_penalty,
-            (SELECT total_climb_penalty FROM uav) AS total_climb_penalty,
-            (SELECT total_collision_penalty FROM uav) AS total_collision_penalty,
             (SELECT collision_count FROM coll) AS collision_count,
             (SELECT evasion_event_count FROM evas) AS evasion_event_count,
             (SELECT obstacle_count FROM obs) AS obstacle_count,
             (SELECT best_iteration FROM best_gen) AS best_iteration,
             (SELECT nondominated_count FROM moo) AS nondominated_count,
-            (SELECT feasible_nondominated_count FROM moo) AS feasible_nondominated_count,
             (SELECT hypervolume FROM moo) AS hypervolume,
             (SELECT igd_plus FROM moo) AS igd_plus,
+            (SELECT front_size_last_gen FROM moo) AS front_size_last_gen,
+            (SELECT hypervolume_normalized FROM moo) AS hypervolume_normalized,
+            (SELECT min_inter_uav_distance_m FROM online_uav) AS min_inter_uav_distance_m,
+            (SELECT mean_inter_uav_distance_m FROM online_uav) AS mean_inter_uav_distance_m,
+            (SELECT total_inter_uav_safety_violations FROM online_uav) AS total_inter_uav_safety_violations,
+            (SELECT mean_energy_indicator FROM online_uav) AS mean_energy_indicator,
+            (SELECT mean_smoothness_indicator FROM online_uav) AS mean_smoothness_indicator,
+            (SELECT gd_final FROM moo_quality_final) AS gd_final,
+            (SELECT spread_final FROM moo_quality_final) AS spread_final,
+            (SELECT spacing_final FROM moo_quality_final) AS spacing_final,
+            (SELECT r2_final FROM moo_quality_final) AS r2_final,
             (SELECT uav_rows FROM uav) AS uav_rows,
             (SELECT traj_rows FROM traj) AS traj_rows
         """,
-        (run_id, run_id, run_id, run_id, run_id, run_id, run_id, run_id, run_id),
+        # 11 placeholders: uav, traj, coll, evas, obs, best_gen, last_gen,
+        # moo, online_uav, moo_quality_final, drones_fallback.
+        (run_id,) * 11,
     )
 
     row = cur.fetchone()
     columns = [desc[0] for desc in cur.description]
     data = dict(zip(columns, row))
-
-    decision_mode = conn.execute(
-        """
-        SELECT value
-        FROM meta
-        WHERE key = ?
-        """,
-        (f"{run_id}.decision_mode",),
-    ).fetchone()
-    decision_mode = decision_mode[0] if decision_mode else None
-
-    selected_solution_index = conn.execute(
-        """
-        SELECT value
-        FROM meta
-        WHERE key = ?
-        """,
-        (f"{run_id}.selected_solution_index",),
-    ).fetchone()
-    selected_solution_index = int(selected_solution_index[0]) if selected_solution_index else None
-
-    reference_point = conn.execute(
-        """
-        SELECT value
-        FROM meta
-        WHERE key = ?
-        """,
-        (f"{run_id}.reference_point_json",),
-    ).fetchone()
-    reference_point_json = reference_point[0] if reference_point else None
-
-    objective_components = {
-        "energy_cost": data["total_energy_cost"],
-        "smoothness_cost": data["total_smoothness_cost"],
-        "threat_cost": data["total_threat_cost"],
-        "altitude_cost": data["total_altitude_cost"],
-        "terrain_penalty": data["total_terrain_penalty"],
-        "turn_penalty": data["total_turn_penalty"],
-        "climb_penalty": data["total_climb_penalty"],
-        "collision_penalty": data["total_collision_penalty"],
-    }
 
     summary = {
         "path_source": "trajectory_samples",
@@ -171,93 +170,152 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
         "trajectory_metric_rows_used": data["traj_rows"],
     }
 
+    total_violations = data["total_inter_uav_safety_violations"]
+    total_violations_int = (
+        int(total_violations) if total_violations is not None else None
+    )
+
+    convergence_speed_gen, auc_best_so_far = _convergence_speed_and_auc(conn, run_id)
+
+    # Decyzja 2026-05-08 (#9): `final_objective`, `total_threat_cost`,
+    # `total_turn_penalty` NIE są w tym INSERT — domena `populate_offline_objectives`.
+    # Schema dopuszcza NULL → wiersz powstaje tutaj BEZ tych pól.
     conn.execute(
         """
         INSERT INTO run_metrics (
             run_id,
             drone_count,
             success,
-            final_objective,
             total_path_length_2d,
             total_path_length_3d,
-            total_energy_cost,
-            total_smoothness_cost,
-            total_threat_cost,
-            total_altitude_cost,
-            total_terrain_penalty,
-            total_turn_penalty,
-            total_climb_penalty,
-            total_collision_penalty,
             collision_count,
             evasion_event_count,
             obstacle_count,
             best_iteration,
-            decision_mode,
-            selected_solution_index,
             nondominated_count,
-            feasible_nondominated_count,
             hypervolume,
             igd_plus,
-            reference_point_json,
-            objective_components_json,
+            front_size_last_gen,
+            hypervolume_normalized,
+            min_inter_uav_distance_m,
+            mean_inter_uav_distance_m,
+            total_inter_uav_safety_violations,
+            mean_energy_indicator,
+            mean_smoothness_indicator,
+            gd_final,
+            spread_final,
+            spacing_final,
+            r2_final,
+            convergence_speed_gen,
+            auc_best_so_far,
             summary_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
             drone_count = excluded.drone_count,
             success = excluded.success,
-            final_objective = excluded.final_objective,
             total_path_length_2d = excluded.total_path_length_2d,
             total_path_length_3d = excluded.total_path_length_3d,
-            total_energy_cost = excluded.total_energy_cost,
-            total_smoothness_cost = excluded.total_smoothness_cost,
-            total_threat_cost = excluded.total_threat_cost,
-            total_altitude_cost = excluded.total_altitude_cost,
-            total_terrain_penalty = excluded.total_terrain_penalty,
-            total_turn_penalty = excluded.total_turn_penalty,
-            total_climb_penalty = excluded.total_climb_penalty,
-            total_collision_penalty = excluded.total_collision_penalty,
             collision_count = excluded.collision_count,
             evasion_event_count = excluded.evasion_event_count,
             obstacle_count = excluded.obstacle_count,
             best_iteration = excluded.best_iteration,
-            decision_mode = excluded.decision_mode,
-            selected_solution_index = excluded.selected_solution_index,
             nondominated_count = excluded.nondominated_count,
-            feasible_nondominated_count = excluded.feasible_nondominated_count,
             hypervolume = excluded.hypervolume,
             igd_plus = excluded.igd_plus,
-            reference_point_json = excluded.reference_point_json,
-            objective_components_json = excluded.objective_components_json,
+            front_size_last_gen = excluded.front_size_last_gen,
+            hypervolume_normalized = excluded.hypervolume_normalized,
+            min_inter_uav_distance_m = excluded.min_inter_uav_distance_m,
+            mean_inter_uav_distance_m = excluded.mean_inter_uav_distance_m,
+            total_inter_uav_safety_violations = excluded.total_inter_uav_safety_violations,
+            mean_energy_indicator = excluded.mean_energy_indicator,
+            mean_smoothness_indicator = excluded.mean_smoothness_indicator,
+            gd_final = excluded.gd_final,
+            spread_final = excluded.spread_final,
+            spacing_final = excluded.spacing_final,
+            r2_final = excluded.r2_final,
+            convergence_speed_gen = excluded.convergence_speed_gen,
+            auc_best_so_far = excluded.auc_best_so_far,
             summary_json = excluded.summary_json
         """,
         (
             run_id,
             data["drone_count"],
             data["success"],
-            data["final_objective"],
             data["total_path_length_2d"],
             data["total_path_length_3d"],
-            data["total_energy_cost"],
-            data["total_smoothness_cost"],
-            data["total_threat_cost"],
-            data["total_altitude_cost"],
-            data["total_terrain_penalty"],
-            data["total_turn_penalty"],
-            data["total_climb_penalty"],
-            data["total_collision_penalty"],
             data["collision_count"],
             data["evasion_event_count"],
             data["obstacle_count"],
             data["best_iteration"],
-            decision_mode,
-            selected_solution_index,
             int(data["nondominated_count"]) if data["nondominated_count"] is not None else None,
-            int(data["feasible_nondominated_count"]) if data["feasible_nondominated_count"] is not None else None,
             data["hypervolume"],
             data["igd_plus"],
-            reference_point_json,
-            json.dumps(objective_components, ensure_ascii=False, sort_keys=True),
+            int(data["front_size_last_gen"]) if data["front_size_last_gen"] is not None else None,
+            data["hypervolume_normalized"],
+            data["min_inter_uav_distance_m"],
+            data["mean_inter_uav_distance_m"],
+            total_violations_int,
+            data["mean_energy_indicator"],
+            data["mean_smoothness_indicator"],
+            data["gd_final"],
+            data["spread_final"],
+            data["spacing_final"],
+            data["r2_final"],
+            convergence_speed_gen,
+            auc_best_so_far,
             json.dumps(summary, ensure_ascii=False, sort_keys=True),
         ),
     )
+
+
+def _convergence_speed_and_auc(
+    conn: sqlite3.Connection, run_id: str
+) -> tuple[int | None, float | None]:
+    """Liczy z `iteration_metrics`:
+    - convergence_speed_gen: pierwsza generacja gdy HV ≥ 0.9 · HV(last_gen).
+      NULL gdy brak HV lub last_gen HV < final*0.9.
+    - auc_best_so_far: ∫ best_so_far(g) dg (trapez), znormalizowane przez
+      (last_gen − first_gen). Lower = lepiej (mniej kosztu over time).
+    """
+    rows = conn.execute(
+        """
+        SELECT iteration, hypervolume, best_so_far
+        FROM iteration_metrics
+        WHERE run_id = ?
+        ORDER BY iteration ASC
+        """,
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        return None, None
+
+    iters = [int(r[0]) for r in rows]
+    hvs = [r[1] for r in rows]
+    bsf = [r[2] for r in rows]
+
+    convergence_speed_gen: int | None = None
+    valid_hvs = [(i, h) for i, h in zip(iters, hvs) if h is not None]
+    if valid_hvs:
+        final_hv = valid_hvs[-1][1]
+        if final_hv > 0:
+            threshold = 0.9 * final_hv
+            for i, h in valid_hvs:
+                if h >= threshold:
+                    convergence_speed_gen = i
+                    break
+
+    auc_best_so_far: float | None = None
+    valid_bsf = [(i, b) for i, b in zip(iters, bsf) if b is not None]
+    if len(valid_bsf) >= 2:
+        xs = [p[0] for p in valid_bsf]
+        ys = [p[1] for p in valid_bsf]
+        area = 0.0
+        for k in range(1, len(xs)):
+            dx = xs[k] - xs[k - 1]
+            area += 0.5 * (ys[k] + ys[k - 1]) * dx
+        span = xs[-1] - xs[0]
+        if span > 0:
+            auc_best_so_far = area / span
+
+    return convergence_speed_gen, auc_best_so_far

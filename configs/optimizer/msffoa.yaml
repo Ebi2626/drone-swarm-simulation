@@ -5,52 +5,24 @@ _convert_: "all"
 
 algorithm_params:
   cruise_speed: 6.0
-  pop_size: 1000
+  # epochs skalibrowane empirycznie (exp_20260506): Q75 konwergencji przy
+  # iteracji 56 (~112k NFE). epochs=100 daje ~200k NFE = 1.8× margines.
+  pop_size: 1001
   epochs: 200
   n_inner_waypoints: 11
-  seed: 42
 
-  # --- Wagi celów (skalaryzacja MOO → SOO) ---
-  # Pełny wzór fitness obliczany w TrajectorySOOAdapter.__call__:
-  #   fitness(x) = Σ_i  weights[i] * F[i](x) / F_ref[i]
-  #              + penalty_weight * max_j max(0, G[j](x))
-  #
-  # Wektor F pochodzi z VectorizedEvaluator.evaluate (objective_constrains.py)
-  # i ma TRZY składowe — każda waga steruje jednym konkretnym aspektem:
-  #
-  #   weights[0] → F[0] = swarm_total_length
-  #     Suma długości łuku B-Spline po wszystkich dronach (∝ czas/energia lotu).
-  #     ZWIĘKSZ → wymusza krótsze trasy (mniej objazdów wokół przeszkód).
-  #     ZMNIEJSZ → pozwala dłuższym trasom omijać przeszkody bezpieczniej.
-  #
-  #   weights[1] → F[1] = swarm_smoothness
-  #     Suma kwadratów drugich różnic wielokąta kontrolnego (∝ ostrość zakrętów).
-  #     ZWIĘKSZ → premiuje gładkie krzywe; tłumi zygzaki, ale algorytm może
-  #               przedkładać łagodność nad omijanie przeszkód.
-  #     ZMNIEJSZ → pozwala na ostrzejsze manewry uniku.
-  #     UWAGA: F_ref[1] dla linii prostej = 0 → klipowane do 1.0, więc każde
-  #            zaszumienie populacji daje F_norm[1] rzędu 10²–10³ (skala
-  #            niezdegenerowana). Faza 4 w plan.md przewiduje rekalibrację.
-  #
-  #   weights[2] → F[2] = swarm_collisions  (kolizje WEWNĄTRZ roju, dron-dron)
-  #     Suma penetracji par dronów poniżej `min_drone_distance` na próbkach
-  #     krzywej. Miękki sygnał gradientu — twarda kara za to samo siedzi w G[1].
-  #     ZWIĘKSZ → silniej rozsuwa drony w trakcie lotu.
-  #     ZMNIEJSZ → drony mogą przelatywać bliżej siebie (rzadziej domyślnie).
-  #
-  # Wagi spójne z konfiguracją OOA (wzorzec). Wartości zostały zweryfikowane
-  # eksperymentalnie na środowisku forest — patrz plan.md.
-  #
-  # ❗ Kolizje z PRZESZKODAMI (nie z innymi dronami) nie są w F. Trafiają do
-  # G[0] = swarm_collision_penalty i są karane przez `penalty_weight` niżej.
-  objective_weights: [0.05, 1.0, 0.25]
-  #                    │     │    └─ weights[2] = waga F[2] swarm_collisions (dron-dron)
-  #                    │     └────── weights[1] = waga F[1] swarm_smoothness (gładkość)
-  #                    └──────────── weights[0] = waga F[0] swarm_total_length (długość)
+  # --- Wagi celów (skalaryzacja MOO → SOO dla 5 funkcji kosztu) ---
+  # Wektor F pochodzi z VectorizedEvaluator.evaluate i posiada 5 składowych:
+  #   weights[0] → F[0] = f_1 (trajectory) : długość + kształt. 
+  #   weights[1] → F[1] = f_2 (height) : odchylenia wys. + ostre wznoszenia.
+  #   weights[2] → F[2] = f_3 (threat) : penetracja zagrożeń.
+  #   weights[3] → F[3] = f_4 (turn_cost) : gładkość trasy w XY (ostre zakręty).
+  #   weights[4] → F[4] = f_5 (coordination) : bliskość dronów (miękka kara za ścisk).
+  objective_weights: [0.05, 0.5, 0.8, 1.0, 0.25]
 
   # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje) ---
   # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
-  obstacle_safety_margin: 2.0     # bufor wokół przeszkód [m]
+  obstacle_safety_margin: 1.0     # bufor wokół przeszkód [m]
   min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
   k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
   absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m] (zgodnie z OOA)
@@ -87,12 +59,15 @@ algorithm_params:
   #     F_smoothness → algorytm „utyka" bez postępu.
   #   - 1% XY / 0.5% Z (poniżej) daje monotoniczną zbieżność porównywalną
   #     z OOA na forest.
-  step_global_frac: [0.020, 0.010, 0.005]    # faza globalna: x_best + sin(2·rand) · world_size · frac
+  step_global_frac: [0.040, 0.010, 0.005]    # faza globalna: x_best + sin(2·rand) · world_size · frac
   step_local_frac:  [0.003, 0.001, 0.001]    # faza lokalna:  x_best + rand · world_size · frac
 
   # --- Szum inicjalizacji populacji (anizotropowy) ---
   # Zakres Z (start ↔ cel) w typowych scenariuszach jest rzędu pojedynczych
   # metrów; izotropowy szum (σ=2m) zepchnąłby populację Z na dolny limit
   # po klipowaniu — stąd osobne σ_z.
-  noise_std_xy: 2.0
-  noise_std_z: 0.3
+  noise_std_xy: 7.0
+  noise_std_z: 1.5
+
+  preferred_height: 5.0                # f_2: preferowana stała wysokość lotu [m]
+  coordination_penalty_factor: 1.5      # f_5: mnożnik wykładniczej kary za koordynację

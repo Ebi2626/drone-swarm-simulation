@@ -7,6 +7,7 @@ from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy impor
     SwarmOptimizationProblem,
     calculate_n_partitions
 )
+from src.utils.SeedRegistry import SeedRegistry
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy"
 
@@ -32,9 +33,22 @@ def mock_obstacles_data():
     obstacles.data = np.empty((0, 6))
     return obstacles
 
+@pytest.fixture
+def mock_master_seed():
+    seeds = SeedRegistry(master_seed=int(42))
+    return seeds
+
 def test_calculate_n_partitions():
+    """
+    Das-Dennis: H = C(n_obj+p-1, p). Funkcja szuka p ∈ [1, 49] minimalizującego
+    |H - pop_size|, z early-break gdy H już przekroczyło pop_size.
+
+    Production: NSGA-III dla 5 obj (zgodnie z `VectorizedEvaluator`):
+      pop_size=100, n_obj=5 → p=5: C(9,5)=126, |126-100|=26 najmniejsze.
+      pop_size=100, n_obj=3 → p=13: C(15,13)=105, |105-100|=5 najmniejsze.
+    """
     assert calculate_n_partitions(100, 3) == 13
-    assert calculate_n_partitions(100, 2) == 12
+    assert calculate_n_partitions(100, 5) == 5
 
 
 def test_swarm_optimization_problem_bounds(mock_world_data):
@@ -64,7 +78,7 @@ def test_swarm_optimization_problem_bounds(mock_world_data):
 @patch("hydra.core.hydra_config.HydraConfig")
 @patch(f"{TARGET_MODULE}.minimize")
 def test_nsga3_strategy_fallback_with_altitude(
-    mock_minimize, mock_hydraconfig, mock_world_data, mock_obstacles_data, tmp_path
+    mock_minimize, mock_hydraconfig, mock_world_data, mock_obstacles_data, tmp_path, mock_master_seed
 ):
     mock_hydraconfig.get.return_value.runtime.output_dir = str(tmp_path)
 
@@ -82,7 +96,8 @@ def test_nsga3_strategy_fallback_with_altitude(
         world_data=mock_world_data,
         number_of_waypoints=5,
         drone_swarm_size=1,
-        algorithm_params={"min_safe_altitude": 2.0}
+        algorithm_params={"min_safe_altitude": 2.0},
+        seeds=mock_master_seed
     )
 
     expected_z = np.full(5, 2.0)
@@ -103,7 +118,8 @@ def test_nsga3_strategy_success(
     mock_writer, 
     mock_timing, 
     mock_world_data, 
-    mock_obstacles_data
+    mock_obstacles_data,
+    mock_master_seed
 ):
     # Ustawienie atrapy ścieżki (tylko po to, aby os.path.join w logice kodu nie wyrzucił TypeError)
     mock_hydraconfig.get.return_value.runtime.output_dir = "dummy_dir"
@@ -129,7 +145,8 @@ def test_nsga3_strategy_success(
         world_data=mock_world_data,
         number_of_waypoints=n_waypoints,
         drone_swarm_size=1,
-        algorithm_params={"decision_mode": "safety", "n_inner_waypoints": 3, "pop_size": 10}
+        algorithm_params={"decision_mode": "safety", "n_inner_waypoints": 3, "pop_size": 10},
+        seeds=mock_master_seed
     )
 
     assert result.shape == (1, n_waypoints, 3)

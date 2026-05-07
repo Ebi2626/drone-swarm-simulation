@@ -9,6 +9,7 @@ from src.algorithms.abstraction.trajectory.strategies.ooa_strategy import (
     osprey_swarm_strategy,
     LoggedOriginalOOA
 )
+from src.utils.SeedRegistry import SeedRegistry
 
 TARGET_MODULE = "src.algorithms.abstraction.trajectory.strategies.ooa_strategy"
 
@@ -50,6 +51,10 @@ def mock_evaluator():
     evaluator.evaluate.side_effect = side_effect
     return evaluator
 
+@pytest.fixture
+def mock_master_seed():
+    seeds = SeedRegistry(master_seed=int(42))
+    return seeds
 
 # ===========================================================================
 # TESTY: OOAProblemAdapter
@@ -263,7 +268,82 @@ class TestOspreySwarmStrategy:
         np.testing.assert_array_almost_equal(result[0, 0, :2], starts[0, :2])
         np.testing.assert_array_almost_equal(result[0, -1, :2], targets[0, :2])
 
-    def test_mealpy_called_correctly(self, mock_world_data, basic_positions, patch_deps):
+    def test_logged_ooa_caches_FG_on_agents_and_skips_logger_reeval(self, basic_positions):
+        """Regresja perf-fix 2026-05-07.
+
+        `LoggedOriginalOOA.generate_agent` ma przykleić F/G (z cache
+        scalar_adapter) do `agent._F_row/_G_row` (atrybut na AGENCIE
+        przetrwa `agent.copy()`, na targecie nie). `evolve` przy logowaniu
+        używa tych F/G zamiast wywoływać `evaluate_full(decisions)`
+        (eliminacja nadmiarowej re-ewaluacji 1× pop_size NFE/gen).
+        """
+        starts, targets = basic_positions
+        n_drones = starts.shape[0]
+        n_inner = 3
+        d = n_drones * n_inner * 3
+        pop_size = 5
+        n_obj = 5
+        n_g = 3
+
+        scalar_adapter = MagicMock()
+        # Symulacja TrajectorySOOAdapter.__call__: po każdym wywołaniu
+        # ustawia last_objectives/last_constraints na ndarray (1, M).
+        def scalar_call_side_effect(inner):
+            batch = inner.shape[0]
+            scalar_adapter.last_objectives = np.full((batch, n_obj), 0.7)
+            scalar_adapter.last_constraints = np.full((batch, n_g), -0.2)
+            return np.full(batch, 11.0)
+        scalar_adapter.side_effect = scalar_call_side_effect
+
+        evaluator = MagicMock()
+        evaluator.individuals_evaluated = 0
+
+        adapter = OOAProblemAdapter(
+            bounds=FloatVar(lb=np.full(d, -50.0), ub=np.full(d, 150.0)),
+            evaluator=evaluator,
+            scalar_adapter=scalar_adapter,
+            start_pos=starts,
+            target_pos=targets,
+            n_drones=n_drones,
+            n_inner=n_inner,
+            n_output_samples=20,
+        )
+
+        history_writer = MagicMock()
+        ooa = LoggedOriginalOOA(
+            epoch=1,
+            pop_size=pop_size,
+            history_writer=history_writer,
+            history_problem=adapter,
+        )
+        # mealpy.Optimizer.get_target deleguje do self.problem.get_target —
+        # w pełnym flow ustawiane przez solve(); w teście jednostkowym
+        # podpinamy wprost ten sam adapter.
+        ooa.problem = adapter
+
+        # 1) generate_agent przykleja F_row/G_row na AGENCIE.
+        agent = ooa.generate_agent(np.zeros(d))
+        assert isinstance(getattr(agent, "_F_row", None), np.ndarray)
+        assert agent._F_row.shape == (n_obj,)
+        assert isinstance(getattr(agent, "_G_row", None), np.ndarray)
+        assert agent._G_row.shape == (n_g,)
+
+        # 2) evolve nie woła evaluate_full gdy _F_row/_G_row są dostępne.
+        ooa.pop = [ooa.generate_agent(np.zeros(d)) for _ in range(pop_size)]
+
+        adapter.evaluate_full = MagicMock(side_effect=AssertionError(
+            "evaluate_full nie powinno być wołane gdy _F_row/_G_row są zacache'owane"
+        ))
+
+        with patch("mealpy.swarm_based.OOA.OriginalOOA.evolve") as super_evolve:
+            super_evolve.return_value = None
+            ooa.evolve(epoch=0)
+
+        assert history_writer.put_generation_data.call_count == 1
+        logged = history_writer.put_generation_data.call_args.args[0]
+        assert logged["objectives_matrix"].shape == (pop_size, n_obj)
+
+    def test_mealpy_called_correctly(self, mock_world_data, basic_positions, patch_deps, mock_master_seed):
         """Weryfikuje, czy Mealpy jest parametryzowany zgodnie z konfiguracją wejściową algorytmu z logowaniem danych."""
         starts, targets = basic_positions
         custom_params = {"pop_size": 12, "n_gen": 5, "n_workers": 2, "seed": 42, "n_inner_waypoints": 3}
@@ -284,6 +364,7 @@ class TestOspreySwarmStrategy:
                 number_of_waypoints=20,
                 drone_swarm_size=2,
                 algorithm_params=custom_params,
+                seeds=mock_master_seed
             )
 
             call_args, call_kwargs = MockOOA.call_args
@@ -293,6 +374,6 @@ class TestOspreySwarmStrategy:
             solve_kwargs = mock_model_instance.solve.call_args.kwargs
             assert solve_kwargs["mode"] == "thread"
             assert solve_kwargs["n_workers"] == 2
-            assert solve_kwargs["seed"] == 42
+            assert solve_kwargs["seed"] == 3276785861 # master-seed 42
             assert "problem" in solve_kwargs
             assert "starting_solutions" in solve_kwargs

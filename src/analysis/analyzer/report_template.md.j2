@@ -1,0 +1,171 @@
+# Experiment Report: {{ experiment_name }}
+
+**Generated:** {{ generation_date }}
+**Runs:** {{ n_runs }} | **Algorithms:** {{ algorithms | join(', ') }} | **Environments:** {{ environments | join(', ') }}
+{% if avoidances %}**Avoidances:** {{ avoidances | join(', ') }}{% endif %}
+
+---
+
+## 1. Offline Optimization Results
+
+### 1.1 Summary Statistics
+{% for metric in offline_key_metrics %}
+{% if metric in offline_summary %}
+
+#### {{ metric | replace('_', ' ') | title }}
+
+| Environment | Optimizer | n | Mean | Std | Median | CI95 Low | CI95 High |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+{% for row in offline_summary[metric].itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.ci95_low) }} | {{ "%.4f" | format(row.ci95_high) }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+### 1.2 Friedman Rankings
+
+{% if best_per_metric is not none and best_per_metric | length > 0 %}
+| Metric | Best Algorithm | Avg Rank | p-value | Significant (p<0.05) |
+|:---|:---|---:|---:|:---:|
+{% for row in best_per_metric.itertuples() -%}
+| {{ row.metric | replace('_', ' ') | title }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "%.4f" | format(row.p_value) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
+{% endfor %}
+
+{% if n_datasets is defined %}
+*N = {{ n_datasets }} datasets (environment x seed combinations).*
+{% endif %}
+{% else %}
+*Friedman test not available (insufficient data).*
+{% endif %}
+
+### 1.3 Pairwise Comparisons (Wilcoxon Signed-Rank + Holm-Bonferroni)
+
+{% for metric in offline_key_metrics %}
+{% if metric in significant_pairs and significant_pairs[metric] | length > 0 %}
+#### {{ metric | replace('_', ' ') | title }}
+
+| Algorithm A | Algorithm B | p-value (raw) | p-value (Holm) | Median Diff |
+|:---|:---|---:|---:|---:|
+{% for row in significant_pairs[metric].itertuples() -%}
+| {{ row.alg_a }} | {{ row.alg_b }} | {{ "%.4f" | format(row.p_value) }} | {{ "%.4f" | format(row.p_value_holm) }} | {{ "%.4f" | format(row.median_diff) }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+### 1.4 Effect Sizes (Vargha-Delaney A12)
+
+{% for metric in offline_key_metrics %}
+{% if metric in a12_effects and a12_effects[metric] | length > 0 %}
+#### {{ metric | replace('_', ' ') | title }}
+
+| Algorithm A | Algorithm B | A12 | Magnitude |
+|:---|:---|---:|:---|
+{% for row in a12_effects[metric].itertuples() -%}
+| {{ row.alg_a }} | {{ row.alg_b }} | {{ "%.3f" | format(row.a12) }} | {{ row.magnitude }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+### 1.5 Key Plots (Offline)
+
+{% for plot in offline_plots %}
+#### {{ plot.title }}
+
+![{{ plot.title }}]({{ plot.relative_path }})
+
+{% endfor %}
+
+---
+
+## 2. Online Avoidance Results
+
+{% if has_online_data %}
+
+### 2.1 Summary Statistics
+{% for metric in online_key_metrics %}
+{% if metric in online_summary %}
+
+#### {{ metric | replace('_', ' ') | title }}
+
+| Environment | Optimizer | n | Mean | Std | Median | CI95 Low | CI95 High |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+{% for row in online_summary[metric].itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.ci95_low) }} | {{ "%.4f" | format(row.ci95_high) }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+### 2.2 Key Plots (Online)
+
+{% for plot in online_plots %}
+#### {{ plot.title }}
+
+![{{ plot.title }}]({{ plot.relative_path }})
+
+{% endfor %}
+{% else %}
+*No online avoidance data available.*
+{% endif %}
+
+---
+
+## 3. Failure Analysis
+
+{% if failure_offline is not none %}
+### 3.1 Offline Failure Rate (HV=0 or empty Pareto front)
+
+| Environment | Optimizer | Runs | Failures | Failure Rate |
+|:---|:---|---:|---:|---:|
+{% for row in failure_offline.itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n_runs }} | {{ row.n_failures | int }} | {{ "%.1f%%" | format(row.failure_rate * 100) }} |
+{% endfor %}
+{% endif %}
+
+{% if failure_online is not none %}
+### 3.2 Online Failure Rate (collision_count > 0)
+
+| Environment | Optimizer | Runs | Failures | Failure Rate |
+|:---|:---|---:|---:|---:|
+{% for row in failure_online.itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n_runs }} | {{ row.n_failures | int }} | {{ "%.1f%%" | format(row.failure_rate * 100) }} |
+{% endfor %}
+{% endif %}
+
+---
+
+## 4. Summary and Recommendations
+
+### 4.1 Overall Offline Ranking
+
+Averaged Friedman rank across key offline metrics: {{ offline_key_metrics | join(', ') }}.
+
+{% if overall_ranking is not none and overall_ranking | length > 0 %}
+| Rank | Algorithm | Avg Friedman Rank |
+|---:|:---|---:|
+{% for row in overall_ranking.itertuples() -%}
+| {{ loop.index }} | **{{ row.optimizer }}** | {{ "%.2f" | format(row.avg_rank) }} |
+{% endfor %}
+{% else %}
+*Insufficient data for overall ranking.*
+{% endif %}
+
+### 4.2 Best Algorithm per Metric
+
+{% if best_per_metric is not none and best_per_metric | length > 0 %}
+| Metric | Best Algorithm | Avg Rank | Statistically Significant |
+|:---|:---|---:|:---:|
+{% for row in best_per_metric.itertuples() -%}
+| {{ row.metric }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
+{% endfor %}
+{% endif %}
+
+### 4.3 Key Findings
+
+{% for finding in key_findings %}
+- {{ finding }}
+{% endfor %}
+
+---
+
+*Report generated automatically by `ReportGenerator` from `src/analysis/analyzer/report_generator.py`.*
+*Statistical methodology follows Demsар (2006, JMLR) and Arcuri & Briand (2014, STVR).*

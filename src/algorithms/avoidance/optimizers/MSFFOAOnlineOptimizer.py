@@ -97,7 +97,10 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
         self.step_local_frac = float(step_local_frac)
         self.min_compute_time_s = float(min_compute_time_s)
         self.rng = rng
-        
+
+    @property
+    def population_size(self) -> int:
+        return self.pop_size
 
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
         t_start = time.perf_counter()
@@ -119,8 +122,16 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             K = int(path_repr.gene_dim(ctx))
             assert lb.shape == (K,) and ub.shape == (K,), "gene_bounds shape mismatch"
 
-            # === Inicjalizacja populacji w jednolitym rozkładzie U(lb, ub) ============
-            pop = lb[None, :] + rng.uniform(0.0, 1.0, size=(self.pop_size, K)) * (ub - lb)[None, :]
+            # === Inicjalizacja populacji (ceteris paribus) ==========================
+            # Jeśli `GenericOptimizingAvoidance` wygenerował wspólną populację,
+            # używamy jej bezpośrednio. Fallback: wewnętrzna U(lb, ub).
+            if (
+                problem.initial_population is not None
+                and problem.initial_population.shape == (self.pop_size, K)
+            ):
+                pop = np.clip(problem.initial_population, lb, ub)
+            else:
+                pop = lb[None, :] + rng.uniform(0.0, 1.0, size=(self.pop_size, K)) * (ub - lb)[None, :]
             fits = self._eval_batch(pop, problem)
 
             # Reshape na (G, P, K) dla operacji per-swarm.
@@ -134,6 +145,10 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             global_best_idx = int(np.argmin(swarm_best_fit))
             global_best_fit = float(swarm_best_fit[global_best_idx])
             global_best_pos = swarm_best_pos[global_best_idx].copy()
+
+            # Convergence trace: po każdej generacji append'ujemy global_best_fit
+            # (Krok 3.3b plan.md). Index 0 = stan po inicjalizacji (pre-loop).
+            convergence_trace: list[float] = [global_best_fit]
 
             # Threshold dynamiczny — separuje fazę globalną od lokalnej.
             threshold = max(1e-3, global_best_fit * self.threshold_ratio)
@@ -203,6 +218,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     global_best_pos = swarm_best_pos[cur_global_idx].copy()
 
                 generations_completed = gen + 1
+                convergence_trace.append(global_best_fit)
 
             # === Wynik ===========================================================
             # Filtr sentinel-cost (regression fix 2026-05-02): jeśli global_best_fit
@@ -247,6 +263,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     "generations_completed": int(generations_completed),
                     "wallclock_s": elapsed,
                     "reason": "ok",
+                    "convergence_trace": list(convergence_trace),
                     # MSFFOA-specific (extra-extra, optional):
                     "n_swarms": self.G,
                 },
@@ -280,6 +297,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                                 "generations_completed": int(generations_completed),
                                 "wallclock_s": elapsed,
                                 "reason": "budget_exceeded_returned_best_so_far",
+                                "convergence_trace": list(convergence_trace),
                                 "n_swarms": self.G,
                             },
                         )

@@ -20,6 +20,15 @@ drone-swarm-simulation/
 │   ├── algorithms/             # Logika optymalizacji (planowanie offline + unikanie online)
 │   │   ├── abstraction/        # Implementacje Strategy Pattern (MSFOA, NSGA-III, OOA, SSA)
 │   │   └── avoidance/          # Reaktywne unikanie lokalne (siatka A* 3D)
+│   ├── analysis/               # ETL i analiza statystyczna eksperymentów
+│   │   ├── ExperimentAggregator.py  # Agregacja CSV/HDF5 z runów do analysis.db (SQLite)
+│   │   ├── analyzer/                # Analiza statystyczna i generowanie raportów
+│   │   │   ├── ExperimentAnalyzer.py    # Orkiestrator: testy statystyczne → wykresy → raport
+│   │   │   ├── report_generator.py      # Generator raportów (Markdown + PDF via matplotlib PdfPages)
+│   │   │   ├── report_template.md.j2    # Szablon Jinja2 raportu Markdown
+│   │   │   └── plots/                   # Generatory wykresów (boxploty, konwergencja, CD diagramy, ...)
+│   │   │       └── PLOTS_LEGEND.md      # Legenda: jak interpretować wykresy i diagramy
+│   │   └── db/                  # Populacja bazy SQLite (schemat, metryki offline/online)
 │   ├── environments/           # Środowiska symulacji 3D
 │   │   ├── abstraction/        # Generatory przeszkód i granic świata
 │   │   ├── obstacles/          # Enum typów przeszkód (BOX, CYLINDER)
@@ -49,6 +58,7 @@ drone-swarm-simulation/
 ├── main.py                     # Runner z dwoma trybami uruchomienia:
 │                               #   default: python main.py — nowa symulacja z dynamicznym światem
 │                               #   replay:  python main.py --replay /results/2026-04-13/
+├── run_etl.py                  # ETL pipeline: agregacja wyników + analiza statystyczna + raport
 ├── environment.yaml            # Zależności Conda
 └── mypy.ini                    # Konfiguracja sprawdzania typów (mypy)
 ```
@@ -133,6 +143,36 @@ python main.py --replay ./results/2026-04-13/12-30-urban_msffoa/
 
 Wyniki zapisywane są w `/results/{data}/{czas}_{nazwa-świata}/`.
 
+## Analiza wyników (ETL pipeline)
+
+Po zakończeniu eksperymentu (lub zestawu eksperymentów) uruchom pipeline ETL,
+który agreguje surowe wyniki do bazy SQLite, wykonuje testy statystyczne
+(Friedman, Wilcoxon z korektą Holma-Bonferroniego, Vargha-Delaney A12),
+generuje wykresy (boxploty, krzywe zbieżności, diagramy CD, heatmapy rang)
+oraz kompiluje raport zbiorczy w formatach Markdown i PDF.
+
+```bash
+# Analiza wybranego eksperymentu
+python run_etl.py results/exp_20260506_377919c3_per_env_test
+```
+
+Wyniki analizy zapisywane są w podkatalogu `analysis_output/` eksperymentu:
+
+```
+results/<experiment>/analysis_output/
+├── analysis.db              # Baza SQLite z zagregowanymi metrykami
+├── tables/                  # Tabele CSV (summary, Friedman, Wilcoxon, A12)
+├── plots/                   # Wykresy (PDF + PNG): boxploty, konwergencja, CD, rankingi
+│   └── PLOTS_LEGEND.md      # Legenda — jak interpretować wykresy i diagramy
+└── report/
+    ├── experiment_report.md  # Raport Markdown z tabelami i odwołaniami do wykresów
+    └── experiment_report.pdf # Raport PDF (strony tytułowe, tabele, wykresy, wnioski)
+```
+
+Interpretację poszczególnych typów wykresów (diagramy CD, boxploty, krzywe
+zbieżności itd.) opisuje plik
+[`PLOTS_LEGEND.md`](src/analysis/analyzer/plots/PLOTS_LEGEND.md).
+
 ## Uruchamianie testów
 
 Testy odzwierciedlają strukturę katalogów `/src`. Aby uruchomić wszystkie testy jednostkowe:
@@ -166,6 +206,7 @@ Szczegółowe opisy działania poszczególnych komponentów systemu (założenia
 | `src/sensors/` | [`SENSORS.md`](src/sensors/SENSORS.md) | Symulacja detekcji LiDAR 3D (stożkowy FOV 30°, 123 promienie zorganizowane w 7 pierścieni). Optymalizacja operacji przez batch ray casting dla roju 5 UAV oraz integracja z modułem unikania online. |
 | `src/trajectory/` | [`TRAJECTORY.md`](src/trajectory/TRAJECTORY.md) | Generator gładkiej trajektorii B-Spline zapewniający ciągłość kinematyczną (C²), opisy profili prędkości (`TrapezoidalProfile` dla globalnych misji, `ConstantSpeedProfile` dla lokalnego unikania) oraz integracja z regulatorem PID w silniku PyBullet. |
 | `src/utils/` | [`UTILS.md`](src/utils/UTILS.md) | Przegląd narzędzi pomocniczych: centralny system logowania `SimulationLogger`, asynchroniczny zapis przestrzeni decyzyjnej optymalizacji do formatu HDF5, parsowanie Hydry oraz mechanizmy walidacji środowiska. |
+| `src/analysis/analyzer/plots/` | [`PLOTS_LEGEND.md`](src/analysis/analyzer/plots/PLOTS_LEGEND.md) | Legenda i przewodnik interpretacji wykresów: diagramy CD (Demšar 2006), boxploty, krzywe zbieżności, wykresy słupkowe, heatmapy rang, scatter ploty, projekcje frontu Pareto. Słowniczek metryk (HV, IGD+, GD) i testów statystycznych (Friedman, Nemenyi, Wilcoxon, A12). |
 
 ## Moja konfiguracja sprzętowa
 

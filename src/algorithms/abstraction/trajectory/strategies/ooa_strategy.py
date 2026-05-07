@@ -12,6 +12,7 @@ from hydra.core.hydra_config import HydraConfig
 from mealpy import FloatVar
 from mealpy import Problem as MealpyProblem
 from mealpy.swarm_based.OOA import OriginalOOA
+from mealpy.utils.target import Target  # noqa: F401  # re-export-safe; not strictly required, kept for symmetry with SSA
 
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
@@ -108,6 +109,16 @@ class OOAProblemAdapter(MealpyProblem):
         self.evaluator.evaluate(inner, out)
         return np.asarray(out["F"], dtype=np.float64)
 
+    def evaluate_full(self, population: NDArray[np.float64]) -> Dict[str, np.ndarray]:
+        """Zwraca {'F', 'G'} dla per-gen feasibility / CV w loggerze."""
+        inner = self._decode_inner(population)
+        out: Dict[str, Any] = {}
+        self.evaluator.evaluate(inner, out)
+        return {
+            "F": np.asarray(out["F"], dtype=np.float64),
+            "G": np.asarray(out["G"], dtype=np.float64) if "G" in out else None,
+        }
+
     def obj_func(self, x: np.ndarray) -> float:
         # Bezwzględne sprawdzenie na wejściu (fail-safe)
         x_safe = np.clip(np.nan_to_num(x, nan=self._ub), self._lb, self._ub)
@@ -119,6 +130,24 @@ class OOAProblemAdapter(MealpyProblem):
 # ---------------------------------------------------------------------------
 
 class LoggedOriginalOOA(OriginalOOA):
+    """OOA z logowaniem per-gen + cache F/G na targetach.
+
+    Zmiana wydajnościowa (2026-05-07):
+    OOA z paperu (`mealpy.swarm_based.OOA.OriginalOOA`) ma
+    `is_parallelizable=False` i w `evolve` woła `generate_agent` per osobnik
+    (dwie fazy → 2× pop_size pojedynczych ewaluacji per generację). Nie
+    batchujemy tego — wymagałoby zmiany semantyki `evolve`. Eliminujemy za to
+    redundantną re-ewaluację `self.pop` w loggerze poprzez nadpisanie
+    `get_target` tak, by dla każdego osobnika doczepić F/G (z cache
+    `scalar_adapter.last_objectives/last_constraints`) bezpośrednio do
+    `target._F_row/_G_row`. `evolve(...)` po `super().evolve(epoch)` zbiera te
+    F/G z `self.pop` zamiast wołać `evaluate_full(decisions)` (1× pop_size NFE
+    per generację — ~33% całego budżetu ewaluacji OOA).
+
+    Niezmienione: konstruktor, `solve(...)`, sygnatury i pola — testy
+    (`test_ooa_strategy.py`) nie operują na wewnętrznych metodach.
+    """
+
     def __init__(
         self,
         *args: Any,
@@ -130,24 +159,78 @@ class LoggedOriginalOOA(OriginalOOA):
         self._history_writer = history_writer
         self._history_problem = history_problem
 
+    def generate_agent(self, solution: np.ndarray = None) -> Any:  # type: ignore[override]
+        """Po standardowym `generate_agent` doczepia F/G z cache scalar_adapter
+        bezpośrednio do `agent._F_row/_G_row`. Atrybut przetrwa `agent.copy()`
+        (target.copy() nie kopiuje custom atrybutów, więc cache na targecie
+        gubi się po fazie 2 SSA — dla OOA mealpy także używa `agent.copy()`
+        wewnętrznie).
+        """
+        agent = super().generate_agent(solution)
+        scalar_adapter = getattr(self._history_problem, "scalar_adapter", None) if self._history_problem is not None else None
+        if scalar_adapter is None:
+            return agent
+        F_full = getattr(scalar_adapter, "last_objectives", None)
+        G_full = getattr(scalar_adapter, "last_constraints", None)
+        if isinstance(F_full, np.ndarray) and F_full.ndim == 2 and F_full.shape[0] == 1:
+            try:
+                agent._F_row = F_full[0].copy()
+            except Exception:
+                pass
+        if isinstance(G_full, np.ndarray) and G_full.ndim == 2 and G_full.shape[0] == 1:
+            try:
+                agent._G_row = G_full[0].copy()
+            except Exception:
+                pass
+        return agent
+
     def evolve(self, epoch: int) -> None:
+        import time
+
+        gen_t0 = time.monotonic()
         super().evolve(epoch)
+        gen_elapsed = time.monotonic() - gen_t0
 
         if self._history_writer is None or self._history_problem is None:
             return
 
         try:
-            # Wyciągamy wyclipowane decyzje
             decisions = np.vstack(
                 [self._history_problem.amend_position(np.asarray(agent.solution, dtype=np.float64)) for agent in self.pop]
             )
-            objectives = self._history_problem.evaluate_objectives(decisions)
+            n_eval = int(self._history_problem.evaluator.individuals_evaluated)
+
+            # Preferowana ścieżka: F/G zacache'owane na targetach przez
+            # nadpisany `get_target`. Eliminuje extra `evaluate_full(decisions)`.
+            F_rows: List[np.ndarray] = []
+            G_rows: List[np.ndarray] = []
+            for agent in self.pop:
+                f_row = getattr(agent, "_F_row", None)
+                g_row = getattr(agent, "_G_row", None)
+                if isinstance(f_row, np.ndarray):
+                    F_rows.append(f_row)
+                if isinstance(g_row, np.ndarray):
+                    G_rows.append(g_row)
+
+            if len(F_rows) == len(self.pop):
+                F = np.vstack(F_rows)
+                G = np.vstack(G_rows) if len(G_rows) == len(self.pop) else None
+            else:
+                # Fallback (np. testy z mockami) — re-eval pełnej populacji.
+                full = self._history_problem.evaluate_full(decisions)
+                F = full["F"]
+                G = full.get("G")
+
+            from src.utils.per_gen_metrics import per_gen_metrics_from_FG
 
             self._history_writer.put_generation_data(
-                {
-                    "objectives_matrix": objectives,
-                    "decisions_matrix": decisions,
-                }
+                per_gen_metrics_from_FG(
+                    objectives=F,
+                    constraints=G,
+                    decisions=decisions,
+                    elapsed_s=gen_elapsed,
+                    eval_count_cumulative=n_eval,
+                )
             )
         except Exception as e:
             logger.warning(f"[OOA] Warning: history logging failed at epoch {epoch}: {e}")

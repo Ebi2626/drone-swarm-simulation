@@ -228,6 +228,18 @@ class PathProblem:
     predictor: IObstaclePredictor
     fitness: IFitnessEvaluator
     path_repr: IPathRepresentation
+    initial_population: NDArray[np.float64] | None = None
+    """Pre-wygenerowana populacja początkowa (pop_size, gene_dim).
+
+    Gwarantuje warunek ceteris paribus: wszystkie online optimizery
+    (MSFOA, SSA, OOA, NSGA-III) startują z identycznego zbioru osobników
+    niezależnie od wewnętrznego backendu PRNG frameworka (mealpy PCG64,
+    pymoo MT19937, custom Generator).
+
+    Generowana przez ``GenericOptimizingAvoidance`` z ``U(lb, ub)`` na
+    wspólnym ``np.random.Generator``.  ``None`` → optimizer używa
+    własnej domyślnej inicjalizacji (backward-compatible).
+    """
 
 
 @dataclass(slots=True)
@@ -260,6 +272,19 @@ class IPathOptimizer(ABC):
     Faza 1: tylko `AStarOptimizer`. Faza 2: NSGA3/MSFFOA/SSA/OOA Online — z
     populacjami 10–30, max 5–15 generacji, by zmieścić się w 1 s.
     """
+
+    @property
+    def population_size(self) -> int:
+        """Rozmiar populacji wymagany przez optimizer.
+
+        Zwracane przez każdy ewolucyjny optimizer (MSFOA, SSA, OOA, NSGA-III).
+        ``GenericOptimizingAvoidance`` używa tej wartości do pre-generacji
+        ``PathProblem.initial_population`` o wymiarze ``(population_size, gene_dim)``.
+
+        Wartość ``0`` oznacza, że optimizer nie wymaga pre-generowanej populacji
+        (np. deterministyczny A*, hill-climbing).
+        """
+        return 0
 
     @abstractmethod
     def optimize(

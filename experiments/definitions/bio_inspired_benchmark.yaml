@@ -1,0 +1,182 @@
+name: "bio_inspired_benchmark"
+
+# =============================================================================
+# Produkcyjny benchmark: 4 algorytmy bio-inspirowane × 2 środowiska × 30 seedów
+# =============================================================================
+#
+# Cel: poparta statystycznie ewaluacja end-to-end performance pojedynczego
+# algorytmu (offline trajectory generation + online reactive avoidance) jako
+# spójnego stack-u. Każdy wiersz wyników to (algorytm, środowisko) — bez
+# crossowania optimizer × avoidance, bo nie chcemy testować "który optimizer
+# offline najlepiej współpracuje z którym avoidance online", tylko "który
+# stack jako całość wygrywa w danym środowisku".
+#
+# Format Scenariusza B:
+#   pairing: paired_only
+#   ⇒ tylko diagonal (msffoa,msffoa), (ooa,ooa), (ssa,ssa), (nsga-3,nsga-3).
+# =============================================================================
+
+# Liczba seedów. Demšar (2006) §4 + Arcuri & Briand (2014) STVR §3.2:
+#   - N=2 daje p-value floor 1/2² = 0.25 (wszystko nierozróżnialne)
+#   - N=10 minimum dla published comparison
+#   - N≥30 dla high-confidence (twierdzenie graniczne, Wilcoxon zbliża się do normalnej)
+# 30 ⇒ p-value floor 1/2³⁰ ≈ 1e-9; bezpieczna detekcja efektów rzędu 0.5σ.
+runs_per_configuration: 30
+
+# `paired_only` filtr: tylko pary, gdzie online avoidance = offline optimizer.
+# Generuje 4 (algos) × 2 (envs) × 30 (seeds) = 240 runów (vs 960 dla 'crossed').
+# Zob. experiments/prepare_experiment.py: PAIRING_MODES.
+pairing: paired_only
+
+# =============================================================================
+# Strategia tuningu per-env:
+# -----------------------------------------------------------------------------
+# FOREST (600×60×11m, 13× cylinder ø~2m×10m, sparse threat):
+#   - używamy defaultów z `configs/optimizer/*.yaml` — już skalibrowane na
+#     `exp_20260506_377919c3_per_env_test` (Q75 konwergencji ~iter 60-70,
+#     epochs/n_gen=100 daje 1.4-1.8× margines NFE).
+#   - pop_size=1001, n_inner_waypoints=11.
+#
+# URBAN (1000×300×20m, 27× BOX 15m³, dense grid_jitter):
+#   - większy search space ⇒ pop_size 1001→1500, n_gen 100→300, więcej
+#     waypointów (11→15). Wartości skopiowane z dotychczasowych `_proxy_`
+#     yamls (results/exp_20260506.../) — sprawdzone produkcyjnie.
+#   - effective threat radius ≈ 13.6m (corner box 15m), vs 1.5m forest cylinder
+#     ⇒ obstacle_safety_margin 1.0→3.0, threat weight 0.8→5.0
+#     (Ishibuchi & Nojima 2007 §"Constrained-handling penalties": waga kary
+#     proporcjonalna do natural scale ograniczenia).
+#   - preferred_height 5→10m: środek korytarza 20m; ALG decyduje pod-/nad-
+#     budynkami zamiast forsownie wybierać "fly over" (preferred=17m by
+#     usunęło challenge).
+#   - noise inicjalizacji ∝ rozmiar świata: noise_std_xy 7→12, noise_std_z 1.5→3.0.
+#   - NSGA-III: większa eksploracja (mutation_prob 0.10→0.15, eta_c 15→12,
+#     eta_m 10→8) — Deb & Jain 2014: wysoko-wymiarowe obj-spaces preferują
+#     mniejsze η.
+# =============================================================================
+
+parameters_grid:
+  optimizers:
+
+    # -----------------------------------------------------------------------
+    # MSFFOA — Multi-Swarm Fruit Fly (Shi et al. 2020)
+    # -----------------------------------------------------------------------
+    # Forest: defaults (pop=1001, epochs=100). Urban: pełny override.
+    - name: msffoa
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            epochs: 300
+            n_inner_waypoints: 15
+            objective_weights: [0.05, 0.5, 5.0, 1.0, 0.25]
+            penalty_weight: 2.0
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+            # MSFFOA `step_*_frac` to ułamki world_size — automatycznie
+            # skalują się z 100×60×12 → 1000×300×20. Pozostawione na default.
+
+    # -----------------------------------------------------------------------
+    # OOA — Osprey Optimization Algorithm (Trojovský & Dehghani 2023)
+    # -----------------------------------------------------------------------
+    - name: ooa
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            n_gen: 300
+            n_inner_waypoints: 15
+            objective_weights: [0.05, 0.5, 5.0, 1.0, 0.25]
+            penalty_weight: 2.0
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+
+    # -----------------------------------------------------------------------
+    # SSA — Sparrow Search Algorithm (Xue & Shen 2020)
+    # -----------------------------------------------------------------------
+    # Po perf-fix 2026-05-08 (LoggedOriginalSSA: batch update_target_for_population
+    # + cache F/G na agentach): ~1.50× speedup vs poprzedni run, NFE redukcja
+    # ~34% per generation.
+    - name: ssa
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            epochs: 300
+            n_inner_waypoints: 15
+            ST: 0.6
+            PD: 0.4
+            SD: 0.1
+            objective_weights: [0.05, 0.5, 5.0, 1.0, 0.25]
+            penalty_weight: 2.0
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+
+    # -----------------------------------------------------------------------
+    # NSGA-III — Non-dominated Sorting GA III (Deb & Jain 2014)
+    # -----------------------------------------------------------------------
+    # Multi-objective bez `objective_weights` (wybiera z frontu Pareto).
+    # `decision_mode: safety` — preferuje feasibility-first przy konflikcie.
+    - name: nsga-3
+      env_overrides:
+        urban:
+          algorithm_params:
+            pop_size: 1500
+            n_gen: 300
+            n_inner_waypoints: 15
+            penalty_weight: 2.0
+            obstacle_safety_margin: 3.0
+            preferred_height: 10.0
+            noise_std_xy: 12.0
+            noise_std_z: 3.0
+            crossover_prob: 0.90
+            mutation_prob: 0.15      # 0.10 → 0.15 (więcej eksploracji)
+            eta_c: 12                # 15 → 12 (szerszy SBX)
+            eta_m: 8                 # 10 → 8 (większy impact mutacji PM)
+            decision_mode: "safety"
+
+  # --- Środowiska ---
+  environments:
+    - forest    # 100×60×12m, 13× cylinder, sparse threat
+    - urban     # 1000×300×20m, 27× BOX (15m³), dense grid_jitter
+
+  # --- Avoidances (online reactive) ---
+  # Każdy algorytm reaktywny musi mieć odpowiednika w `optimizers` (paired_only
+  # validation w prepare_experiment.py). Ta lista jest formalnie obecna,
+  # bo skrypt jej wymaga, ale `pairing: paired_only` filtruje runy do diagonal.
+  avoidances:
+    - msffoa
+    - ooa
+    - ssa
+    - nsga-3
+
+  # --- Static overrides (deep-merged na top-level manifestu) ---
+  simulation:
+    dynamic_obstacles: True   # wrogie drony jako poruszające się przeszkody
+    gui: False                # headless (./run.sh / run_subprocess.py)
+
+# =============================================================================
+# Oszacowania (na bazie exp_20260506_377919c3_per_env_test + perf-fix 2026-05-08):
+# -----------------------------------------------------------------------------
+#   - Total runs: 4 × 2 × 30 = 240
+#   - CPU-time AFTER fix:
+#       * forest msffoa: 30 × 300s ≈ 2.5h
+#       * forest nsga-3: 30 × 186s ≈ 1.6h
+#       * forest ooa:    30 × 378s ≈ 3.2h  (1.19× speedup)
+#       * forest ssa:    30 × 394s ≈ 3.3h  (1.50× speedup)
+#       * urban  msffoa: 30 × 3596s ≈ 30.0h
+#       * urban  nsga-3: 30 × 1934s ≈ 16.1h
+#       * urban  ooa:    30 × 4284s ≈ 35.7h
+#       * urban  ssa:    30 × 4849s ≈ 40.4h
+#   - Suma CPU-time: ~133 h ≈ 5.5 dnia
+#   - Wall-clock przy n_jobs=6 (efektywny ~5.84×): ~22-23 godzin ≈ 1 dzień
+#   - Disk: ~88 GB (forest 22 GB + urban 65 GB + analysis.db 0.86 GB)
+#
+# UWAGA: forest defaultsy obniżone z poprzednich n_gen=200 do n_gen=100
+# (post-kalibracji budżetu w `configs/optimizer/*.yaml`). Urban nadal 300.
+# =============================================================================

@@ -273,3 +273,101 @@ class SwarmBaseWorld(BaseAviary):
             if other_agent_idx is not None and other_agent_idx != agent_idx:
                 collisions.append((agent_idx, other_agent_idx))
         return list(set(collisions))
+
+    # ------------------------------------------------------------------ #
+    # PROXIMITY-BASED inter-drone collision detection (2026-05-07)       #
+    # ------------------------------------------------------------------ #
+    # Threshold rozszerzony 0.15m → 0.5m (2026-05-07, decyzja A z
+    # "near-miss" anomalii — zob. test_near_miss_drones_must_log_inter_drone
+    # _event_not_ground). Geneza:
+    # - Empirycznie (`/tmp/measure_repulsion_threshold.py`) PyBullet LCP
+    #   solver generuje contact impulse BINARNIE przy dist≤0.12m (cylinder
+    #   collision shape r=0.06m).
+    # - 0.15m (1.25× contact) łapał TYLKO scenariusze fizycznego styku.
+    #   Tracił "near-miss" gdzie drony są blisko (0.5-2m), nie dotykają,
+    #   ale przy zbliżeniu PID wpada w niestabilność i drone spada
+    #   ("Te '0' to kolizje między dronami" — user 2026-05-07).
+    # - 0.5m (~4.2× contact) łapie również near-miss, dodaje ~70ms
+    #   wyprzedzenia przy v=5m/s, vs 30ms dla 0.15m. Generuje minimalne
+    #   false positives bo drony w roju (n=3, korytarz 600×60×11) typowo
+    #   utrzymują dystans >2m (z Kamień 2 analizy real run min(0,1)=2.18m).
+    INTER_DRONE_COLLISION_THRESHOLD_M = 0.5
+
+    def get_inter_drone_proximity_collisions(
+        self, threshold_m: float | None = None,
+    ) -> list[tuple[int, int, float]]:
+        """Wykrywa pary primary-swarm dronów których odległość center-to-center
+        jest ≤ `threshold_m`. Komplementarne do `get_detailed_collisions`,
+        które wymagają fizycznego kontaktu (LCP).
+
+        Returns:
+            Lista (agent_idx_a, agent_idx_b, distance_m), gdzie a < b.
+            Pusta gdy żadne pary nie kwalifikują.
+        """
+        if threshold_m is None:
+            threshold_m = self.INTER_DRONE_COLLISION_THRESHOLD_M
+
+        n = self.primary_num_drones
+        if n < 2:
+            return []
+
+        # Pobierz pozycje wszystkich primary drones jednym przebiegiem.
+        positions = np.array(
+            [p.getBasePositionAndOrientation(self.DRONE_IDS[i])[0] for i in range(n)],
+            dtype=np.float64,
+        )
+
+        pairs: list[tuple[int, int, float]] = []
+        for a in range(n):
+            for b in range(a + 1, n):
+                dist = float(np.linalg.norm(positions[a] - positions[b]))
+                if dist <= threshold_m:
+                    pairs.append((a, b, dist))
+        return pairs
+
+    def get_all_inter_drone_collisions(
+        self, threshold_m: float | None = None,
+    ) -> list[tuple[int, int, float, str]]:
+        """Łączy fizyczne (LCP) i proximity-based wykrywanie kolizji dron-dron
+        do jednej spójnej listy. Każda krotka:
+            (agent_idx_a, agent_idx_b, distance_m, source)
+        gdzie `source ∈ {"contact", "proximity"}`.
+
+        Deduplikacja: jeśli para jest wykryta zarówno fizycznie jak i przez
+        proximity, raportujemy tylko raz z source="contact" (silniejszy
+        wskaźnik — fizycznie się stykają).
+        """
+        # Fizyczne kontakty: agent-agent pairs z get_agent_collisions, tylko
+        # primary drones (nie dynamic obstacles).
+        contact_pairs: dict[tuple[int, int], float] = {}
+        for a, b in self.get_agent_collisions(include_dynamic_obstacles=False):
+            if b >= self.primary_num_drones:
+                continue  # b to dynamic obstacle — nie inter-drone
+            key = (min(int(a), int(b)), max(int(a), int(b)))
+            if key in contact_pairs:
+                continue
+            # Wyznacz dist dla raportu (z getClosestPoints, nie wymaga LCP).
+            try:
+                cp = p.getClosestPoints(
+                    bodyA=self.DRONE_IDS[key[0]],
+                    bodyB=self.DRONE_IDS[key[1]],
+                    distance=10.0,
+                )
+                dist = min((c[8] for c in cp), default=0.0) + 2 * 0.06  # edge→center
+            except Exception:
+                dist = 0.0
+            contact_pairs[key] = float(max(0.0, dist))
+
+        out: list[tuple[int, int, float, str]] = [
+            (a, b, d, "contact") for (a, b), d in contact_pairs.items()
+        ]
+
+        # Proximity (bez fizycznego kontaktu) — dodaj tylko pary których
+        # nie ma w `contact_pairs`.
+        for a, b, d in self.get_inter_drone_proximity_collisions(threshold_m):
+            key = (a, b)
+            if key in contact_pairs:
+                continue
+            out.append((a, b, d, "proximity"))
+
+        return out

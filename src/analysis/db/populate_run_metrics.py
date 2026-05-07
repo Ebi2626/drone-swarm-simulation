@@ -10,12 +10,14 @@ total_turn_penalty/total_coordination_cost` przez `populate_offline_objectives`.
 Usunięte też never-populated: `decision_mode`, `selected_solution_index`,
 `feasible_nondominated_count`, `reference_point_json`.
 
-UWAGA: ten populator wstawia `final_objective`, `total_threat_cost`,
-`total_turn_penalty` jako NULL (uav_metrics ich nie ma). Wartości są
-nadpisywane przez `populate_offline_objectives` z F-vectora h5.
-W `backfill_moo_quality_with_reference` musi być wywołany
-`populate_offline_objectives` PO `populate_run_metrics`, inaczej F-vector
-zostanie wymazany przez ON CONFLICT excluded.<col>=NULL.
+Refaktor 2026-05-08 (decyzja użytkownika #9 — "nie wstawiajmy sztucznych
+nulli"): pola `final_objective`, `total_threat_cost`, `total_turn_penalty`
+zostały **usunięte z INSERT/ON CONFLICT** w tym populatorze. Należą do
+domeny `populate_offline_objectives` (z h5 F-vector). Schema dopuszcza
+NULL — wiersz tworzony przez ten populator pozostaje bez tych pól, dopóki
+`populate_offline_objectives` nie wykona UPDATE. Eliminuje to ordering
+dependency (poprzednio: jawne NULL nadpisywały wartości z h5 jeśli kolejność
+była zaburzona).
 """
 import json
 import sqlite3
@@ -175,20 +177,17 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
 
     convergence_speed_gen, auc_best_so_far = _convergence_speed_and_auc(conn, run_id)
 
-    # `final_objective`, `total_threat_cost`, `total_turn_penalty` zostawiamy
-    # NULL — wypełnia je `populate_offline_objectives` z h5 F-vectora po
-    # tym wywołaniu (i po backfill MOO quality).
+    # Decyzja 2026-05-08 (#9): `final_objective`, `total_threat_cost`,
+    # `total_turn_penalty` NIE są w tym INSERT — domena `populate_offline_objectives`.
+    # Schema dopuszcza NULL → wiersz powstaje tutaj BEZ tych pól.
     conn.execute(
         """
         INSERT INTO run_metrics (
             run_id,
             drone_count,
             success,
-            final_objective,
             total_path_length_2d,
             total_path_length_3d,
-            total_threat_cost,
-            total_turn_penalty,
             collision_count,
             evasion_event_count,
             obstacle_count,
@@ -211,14 +210,10 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             auc_best_so_far,
             summary_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
             drone_count = excluded.drone_count,
             success = excluded.success,
-            -- NIE nadpisujemy final_objective/total_threat_cost/total_turn_penalty
-            -- — są ustawiane przez populate_offline_objectives z h5 F-vectora.
-            -- Ich włączenie w SET tutaj powodowało overwrite bug
-            -- (backfill MOO re-runował populate_run_metrics i wymazywał F-vector).
             total_path_length_2d = excluded.total_path_length_2d,
             total_path_length_3d = excluded.total_path_length_3d,
             collision_count = excluded.collision_count,
@@ -247,11 +242,8 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             run_id,
             data["drone_count"],
             data["success"],
-            None,                                 # final_objective (offline F[0])
             data["total_path_length_2d"],
             data["total_path_length_3d"],
-            None,                                 # total_threat_cost (offline F[2])
-            None,                                 # total_turn_penalty (offline F[3])
             data["collision_count"],
             data["evasion_event_count"],
             data["obstacle_count"],

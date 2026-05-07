@@ -219,6 +219,30 @@ def _collect_static_overrides(definition: dict) -> dict:
     return overrides
 
 
+PAIRING_MODES = ("crossed", "paired_only")
+
+
+def _resolve_pairing(definition: dict) -> str:
+    """Czyta i waliduje top-level `pairing` z definition (default: 'crossed').
+
+    Tryby:
+      - 'crossed' (default, back-compat): pełen kartezjan
+        optimizer × environment × avoidance × seed.
+      - 'paired_only': filtr do par optimizer == avoidance, czyli
+        |optimizer ∩ avoidance| × environment × seed.
+
+    Raises:
+        ValueError: gdy wartość spoza zbioru `PAIRING_MODES`.
+    """
+    pairing = definition.get("pairing", "crossed")
+    if pairing not in PAIRING_MODES:
+        raise ValueError(
+            f"`pairing` musi być jednym z {PAIRING_MODES}, "
+            f"otrzymano: {pairing!r}"
+        )
+    return pairing
+
+
 def generate_yaml_content(
     exp_id: str,
     definition: dict,
@@ -230,11 +254,16 @@ def generate_yaml_content(
     (top-level), nie w `hydra.sweeper.params`. Pozostałe wymiary
     (avoidance × seed) zostają w sweeper.params dla kartezjańskiego rozwinięcia
     przez `experiments/run_subprocess.py`.
+
+    Tryb `pairing: paired_only` (top-level definition) zapisany do
+    `experiment_meta.pairing` — `run_subprocess.py` filtruje wtedy jobs do par
+    `pair["base_name"] == avoidance` przed wykonaniem.
     """
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     name = definition.get("name", "unnamed_experiment")
     runs = definition.get("runs_per_configuration", 1)
     grid = definition.get("parameters_grid", {})
+    pairing = _resolve_pairing(definition)
 
     avoidances = grid.get("avoidances", [])
 
@@ -245,7 +274,22 @@ def generate_yaml_content(
 
     seeds = ",".join(str(i) for i in range(1, runs + 1))
     avoid_str = ",".join(avoidances)
-    total_runs = runs * len(job_matrix) * len(avoidances)
+
+    if pairing == "paired_only":
+        # paired_only: tylko pary, gdzie optimizer (po expansion: pair["base_name"])
+        # ma odpowiednik w avoidances. Liczba runów = runs × |valid_pairs| × env_count
+        # (env-count już wbudowany w job_matrix — każdy entry to (opt, env)).
+        valid_pairs_count = sum(1 for jm in job_matrix if jm.get("base_name") in avoidances)
+        if valid_pairs_count == 0:
+            raise ValueError(
+                "`pairing: paired_only` ale żaden optimizer nie ma odpowiednika "
+                f"w avoidances. Optimizers w job_matrix: "
+                f"{sorted({jm.get('base_name') for jm in job_matrix})}, "
+                f"avoidances: {avoidances}"
+            )
+        total_runs = runs * valid_pairs_count
+    else:
+        total_runs = runs * len(job_matrix) * len(avoidances)
 
     # Serializujemy job_matrix przez yaml.dump dla czytelności (block style).
     # Wcięcie 2 spacje, by trafiło pod top-level klucz w finalnym pliku.
@@ -284,6 +328,7 @@ experiment_meta:
   id: "{exp_id}"
   name: "{name}"
   total_runs: {total_runs}
+  pairing: {pairing}
 
 {job_matrix_yaml}
 {static_overrides_yaml}
@@ -345,12 +390,30 @@ def main():
         sys.exit(1)
 
     try:
+        pairing = _resolve_pairing(definition)
+    except ValueError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
+
+    try:
         job_matrix, base_optimizer_names = expand_optimizers_for_environments(
             raw_optimizers, env_names, exp_id, configs_dir,
         )
     except Exception as e:
         print(f"❌ Błąd przetwarzania algorytmów: {e}")
         sys.exit(1)
+
+    # Walidacja paired_only: każdy bazowy optimizer MUSI mieć odpowiednik
+    # w `avoidances`. Inaczej run zostanie cicho wyfiltrowany.
+    if pairing == "paired_only":
+        unmatched = [o for o in dict.fromkeys(base_optimizer_names) if o not in avoid_names]
+        if unmatched:
+            print(
+                f"❌ `pairing: paired_only` wymaga, by każdy optimizer miał "
+                f"odpowiednika w `avoidances`. Brakuje: {unmatched}. "
+                f"Avoidances: {avoid_names}."
+            )
+            sys.exit(1)
 
     generated_configs_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -371,11 +434,12 @@ def main():
     shutil.copy(def_path, results_dir / "original_definition.yaml")
     shutil.copy(config_path, manifest_path)
 
-    total_runs = (
-        int(definition.get("runs_per_configuration", 1))
-        * len(job_matrix)
-        * len(avoid_names)
-    )
+    runs_count = int(definition.get("runs_per_configuration", 1))
+    if pairing == "paired_only":
+        valid_pairs_count = sum(1 for jm in job_matrix if jm.get("base_name") in avoid_names)
+        total_runs = runs_count * valid_pairs_count
+    else:
+        total_runs = runs_count * len(job_matrix) * len(avoid_names)
 
     # --- Sweep params dla RunRegistry: generowane DOKŁADNIE z definicji
     # eksperymentu YAML, nie z hardcoded list. Liczba wpisów PENDING musi się
@@ -400,10 +464,20 @@ def main():
 
     seed_values = list(range(1, runs + 1))
 
-    sweep_params = [
-        {"optimizer": o, "environment": e, "avoidance": a, "seed": s}
-        for o, e, a, s in product(unique_optimizers, env_names, avoid_names, seed_values)
-    ]
+    if pairing == "paired_only":
+        # `paired_only`: zachowaj tylko kombinacje, gdzie online avoidance
+        # = offline optimizer (baseline porównania ceteris-paribus po
+        # algorytmie reaktywnym = algorytmie planującym).
+        sweep_params = [
+            {"optimizer": o, "environment": e, "avoidance": o, "seed": s}
+            for o, e, s in product(unique_optimizers, env_names, seed_values)
+            if o in avoid_names
+        ]
+    else:
+        sweep_params = [
+            {"optimizer": o, "environment": e, "avoidance": a, "seed": s}
+            for o, e, a, s in product(unique_optimizers, env_names, avoid_names, seed_values)
+        ]
 
     if not sweep_params:
         raise ValueError(

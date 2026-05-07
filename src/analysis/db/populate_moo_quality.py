@@ -134,7 +134,15 @@ def populate_moo_quality(
 
                     if n_obj not in r2_weights_cache:
                         r2_weights_cache[n_obj] = _generate_simplex_weights(n_obj, n_partitions=8)
-                    r2 = _r2_indicator(front, r2_weights_cache[n_obj])
+                    # Przekazujemy `ideal_point` (globalny z* z reference set
+                    # per env) gdy dostępny — gwarancja ceteris paribus dla
+                    # cross-algorithm porównań. Brak ideal_point → fallback
+                    # na local z* (mniej miarodajny, ale niezerowy).
+                    r2 = _r2_indicator(
+                        front, r2_weights_cache[n_obj],
+                        z_star=ideal_point if ideal_point is not None
+                        and ideal_point.shape[0] == n_obj else None,
+                    )
                     if r2 is not None:
                         rows.append((run_id, gen, "moo_quality", "r2_indicator", float(r2)))
 
@@ -311,21 +319,34 @@ def _generate_simplex_weights(n_obj: int, n_partitions: int = 8) -> np.ndarray:
     return np.asarray(pts, dtype=np.float64)
 
 
-def _r2_indicator(front: np.ndarray, weights: np.ndarray) -> Optional[float]:
+def _r2_indicator(
+    front: np.ndarray,
+    weights: np.ndarray,
+    z_star: Optional[np.ndarray] = None,
+) -> Optional[float]:
     """R2(A, W, z*) = (1/|W|) Σ_w min_a max_j w_j · |a_j − z*_j|.
-    z* = ideal point (component-wise min) z fronta.
 
-    UWAGA NAUKOWA: standard R2 (Hansen 1998, Brockhoff 2012) używa
-    **globalnego** z* (across wszystkich fronts porównywanych algorytmów)
-    by indikator był comparable cross-run. Tu liczymy `z*` lokalnie z
-    aktualnego frontu — wartość R2 nie jest sensownie porównywalna
-    między różnymi runami / algorytmami. Komparuj tylko ranking porządkowy
-    w obrębie pojedynczego runu albo refaktoruj na global z* jeśli wymagasz
-    cross-run statistics. Patrz `code-review.md` (TODO global ideal point).
+    Args:
+        front: Pareto front (|A|, n_obj).
+        weights: simplex weights (|W|, n_obj).
+        z_star: ideal point (n_obj,). Gdy podany — używany **globalnie**
+            dla cross-run comparability (Hansen 1998, Brockhoff 2012).
+            Gdy None — fallback na `min(front, axis=0)` (lokalny ideal),
+            wartość R2 NIE jest porównywalna między runami.
+
+    Strategia ceteris paribus (Krok 8, decyzja użytkownika 2026-05-08):
+    przekazujemy `z_star` z `reference_pareto_sets.ideal_point` (per env,
+    n_obj) — ten sam ideal dla wszystkich algorytmów porównywanych
+    w danym środowisku. Bez tego R2 jest stale-of-the-art tylko dla
+    own-run rankingu, niewłaściwe dla benchmark cross-algorithm.
     """
     if front.shape[0] == 0 or weights.shape[0] == 0:
         return None
-    z_star = np.min(front, axis=0)
+    if z_star is None:
+        z_star = np.min(front, axis=0)
+    z_star = np.asarray(z_star, dtype=np.float64).reshape(-1)
+    if z_star.shape[0] != front.shape[1]:
+        return None
     # |W| × |A| × n_obj
     diffs = np.abs(front[np.newaxis, :, :] - z_star[np.newaxis, np.newaxis, :])
     weighted = weights[:, np.newaxis, :] * diffs

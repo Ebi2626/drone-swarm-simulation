@@ -234,10 +234,12 @@ def backfill_moo_quality_with_reference(
         )
 
     # Re-trigger iteration_metrics + run_metrics dla wszystkich runów,
-    # żeby pochwycić nowe GD/IGD+/HV. Następnie populate_offline_objectives
-    # restored — populate_run_metrics ON CONFLICT zerowałby final_objective/
-    # total_threat_cost/total_turn_penalty (te pola pochodzą z F-vector h5,
-    # nie z uav_metrics aggregate).
+    # żeby pochwycić nowe GD/IGD+/HV. Po refaktorze 2026-05-08:
+    # `populate_run_metrics` NIE odnosi się do `final_objective`/`total_threat_cost`/
+    # `total_turn_penalty` (domena `populate_offline_objectives`), więc re-run
+    # tej funkcji jest bezpieczny — nie wymazuje F-vector z poprzedniego cyklu.
+    # `populate_offline_objectives` jest tu wywoływany ponownie żeby gwarantować
+    # poprawne wartości po backfill (defensive idempotent re-write).
     from src.analysis.db.populate_iteration_metrics import populate_iteration_metrics
     from src.analysis.db.populate_run_metrics import populate_run_metrics
     from src.analysis.db.populate_offline_objectives import populate_offline_objectives

@@ -112,10 +112,16 @@ def parse_sweep_params(manifest_path: Path) -> Dict[str, Any]:
             for o in optimizers for e in environments
         ]
 
+    # `experiment_meta.pairing` zapisany przez prepare_experiment.py:
+    #   - 'crossed' (default, back-compat): pełen kartezjan job_matrix × avoidance.
+    #   - 'paired_only': filtr do par pair["base_name"] == avoidance.
+    pairing = manifest.get("experiment_meta", {}).get("pairing", "crossed")
+
     return {
         "job_matrix": job_matrix,
         "avoidances": avoidances,
         "seeds": seeds,
+        "pairing": pairing,
     }
 
 
@@ -137,6 +143,10 @@ def main() -> int:
         return 1
 
     sweep = parse_sweep_params(manifest_path)
+    pairing = sweep.get("pairing", "crossed")
+    # `paired_only`: każdy run używa SWOJEGO algorytmu zarówno offline (optimizer)
+    # jak i online (avoidance). Filtr: pair["base_name"] == a. Bez tej flagi
+    # (default 'crossed') odpalamy pełen kartezjan jak dotąd.
     jobs = [
         {
             "exp_id": parsed.exp_id,
@@ -150,10 +160,11 @@ def main() -> int:
         for pair in sweep["job_matrix"]
         for a in sweep["avoidances"]
         for s in sweep["seeds"]
+        if pairing != "paired_only" or pair.get("base_name", pair["optimizer"]) == a
     ]
 
     print(f"[run_subprocess] {len(jobs)} jobs, n_jobs={parsed.n_jobs}, "
-          f"exp_id={parsed.exp_id}")
+          f"exp_id={parsed.exp_id}, pairing={pairing}")
 
     failures = 0
     completed = 0

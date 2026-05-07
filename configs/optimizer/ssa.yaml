@@ -6,12 +6,10 @@ _convert_: "all"
 # Schemat pól zgodny z konfiguracją OOA i MSFFOA — pozwala na porównanie ceteris paribus.
 algorithm_params:
   cruise_speed: 6.0
-  # pop_size i epochs ustawione na szybkie testy/iteracje rozwojowe.
-  # Pełna kalibracja konwergencji (exp_20260506_377919c3_per_env_test, 8 seedów × 2 env)
-  # wskazywała Q75 osiągnięcia 95% best_so_far przy iteracji ~61 (~177k NFE),
-  # więc dla "production" runów rekomendowane epochs=100 (~290k NFE = 1.6× margin
-  # powyżej Q75). Tu pozostawiamy 20 dla szybkiego smoke-testu pipeline'u —
-  # override per-experiment przez `optimizer.algorithm_params.epochs=100`.
+  # epochs skalibrowane empirycznie (exp_20260506_377919c3_per_env_test,
+  # 8 seedów × 2 env): Q75 osiągnięcia 95% best_so_far przy iteracji ~61
+  # (~177k NFE). epochs=100 daje ~290k NFE = 1.6× margines powyżej Q75.
+  # Ujednolicone z MSFFOA/OOA/NSGA-III dla ceteris paribus.
   pop_size: 1001
   epochs: 100
   n_inner_waypoints: 11

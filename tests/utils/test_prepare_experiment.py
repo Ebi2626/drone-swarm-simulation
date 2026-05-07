@@ -245,6 +245,182 @@ def test_proxy_optimizer_refs_have_no_slash(tmp_path: Path) -> None:
     assert bare_refs, "Bare msffoa-bez-overrides powinien się znaleźć w job_matrix"
 
 
+def test_pairing_paired_only_filters_to_diagonal(
+    tmp_path: Path, cleanup_artifacts: dict
+) -> None:
+    """
+    `pairing: paired_only` → registry zawiera tylko wpisy z optimizer == avoidance.
+
+    Dla 2 optimizers × 1 env × 2 avoidances × 2 seedy:
+      - default 'crossed': 2×1×2×2 = 8 wpisów (wszystkie pary opt-avo)
+      - 'paired_only': 2×1×2 = 4 wpisy (tylko msffoa-msffoa, ssa-ssa, ×2 seedy)
+
+    Plus weryfikacja, że manifest.yaml ma `experiment_meta.pairing: paired_only`
+    — `run_subprocess.py` polega na tym przy filtrowaniu jobs.
+    """
+    definition = {
+        "name": "test_paired",
+        "runs_per_configuration": 2,
+        "pairing": "paired_only",
+        "parameters_grid": {
+            "optimizers": ["msffoa", "ssa"],
+            "environments": ["forest"],
+            "avoidances": ["msffoa", "ssa"],
+        },
+    }
+    yaml_path = tmp_path / "paired.yaml"
+    yaml_path.write_text(yaml.safe_dump(definition))
+
+    proc = subprocess.run(
+        [sys.executable, str(PREPARE_SCRIPT), str(yaml_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"prepare_experiment.py failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+
+    candidates = sorted((PROJECT_ROOT / "results").glob("exp_*_test_paired"))
+    assert candidates
+    exp_dir = candidates[-1]
+    _register_artifacts(cleanup_artifacts, exp_dir.name)
+
+    # Manifest yaml: pairing przekazane do run_subprocess.py.
+    manifest = yaml.safe_load((exp_dir / "manifest.yaml").read_text())
+    assert manifest["experiment_meta"]["pairing"] == "paired_only"
+    assert manifest["experiment_meta"]["total_runs"] == 4
+
+    # Registry: dokładnie 4 wpisy, każdy z opt == avo.
+    registry_path = exp_dir / "registry.db"
+    with sqlite3.connect(registry_path) as conn:
+        rows = conn.execute(
+            "SELECT optimizer, environment, avoidance, seed FROM runs "
+            "ORDER BY optimizer, seed"
+        ).fetchall()
+
+    assert len(rows) == 4, f"expected 4 paired runs, got {len(rows)}: {rows}"
+    expected = {
+        ("msffoa", "forest", "msffoa", 1),
+        ("msffoa", "forest", "msffoa", 2),
+        ("ssa", "forest", "ssa", 1),
+        ("ssa", "forest", "ssa", 2),
+    }
+    assert set(rows) == expected, f"got {set(rows)}, expected {expected}"
+
+
+def test_pairing_paired_only_rejects_unmatched_optimizer(
+    tmp_path: Path, cleanup_artifacts: dict
+) -> None:
+    """
+    `pairing: paired_only` z optimizer-em bez odpowiednika w avoidances → fail
+    z czytelnym komunikatem (zamiast cicho generować 0 runów).
+    """
+    definition = {
+        "name": "test_paired_unmatched",
+        "runs_per_configuration": 1,
+        "pairing": "paired_only",
+        "parameters_grid": {
+            "optimizers": ["msffoa", "ooa"],   # ooa nie jest w avoidances
+            "environments": ["forest"],
+            "avoidances": ["msffoa"],
+        },
+    }
+    yaml_path = tmp_path / "bad_paired.yaml"
+    yaml_path.write_text(yaml.safe_dump(definition))
+
+    proc = subprocess.run(
+        [sys.executable, str(PREPARE_SCRIPT), str(yaml_path)],
+        capture_output=True,
+        text=True,
+    )
+    candidates = sorted((PROJECT_ROOT / "results").glob("exp_*_test_paired_unmatched"))
+    for c in candidates:
+        _register_artifacts(cleanup_artifacts, c.name)
+
+    assert proc.returncode != 0
+    assert "paired_only" in proc.stdout or "paired_only" in proc.stderr
+    assert "ooa" in proc.stdout or "ooa" in proc.stderr
+
+
+def test_pairing_invalid_value_fails(
+    tmp_path: Path, cleanup_artifacts: dict
+) -> None:
+    """Wartość spoza {'crossed', 'paired_only'} → błąd."""
+    definition = {
+        "name": "test_paired_invalid",
+        "runs_per_configuration": 1,
+        "pairing": "diagonal",   # nieznane
+        "parameters_grid": {
+            "optimizers": ["msffoa"],
+            "environments": ["forest"],
+            "avoidances": ["msffoa"],
+        },
+    }
+    yaml_path = tmp_path / "invalid_pairing.yaml"
+    yaml_path.write_text(yaml.safe_dump(definition))
+
+    proc = subprocess.run(
+        [sys.executable, str(PREPARE_SCRIPT), str(yaml_path)],
+        capture_output=True,
+        text=True,
+    )
+    candidates = sorted((PROJECT_ROOT / "results").glob("exp_*_test_paired_invalid"))
+    for c in candidates:
+        _register_artifacts(cleanup_artifacts, c.name)
+
+    assert proc.returncode != 0
+    assert "pairing" in proc.stdout or "pairing" in proc.stderr
+
+
+def test_pairing_default_remains_crossed(
+    tmp_path: Path, cleanup_artifacts: dict
+) -> None:
+    """
+    Brak klucza `pairing` w definicji → fallback do 'crossed' (back-compat).
+
+    Krytyczne dla istniejących plików w experiments/definitions/ — żaden
+    z nich nie ma klucza `pairing` i nie powinno to zmieniać semantyki.
+    """
+    definition = {
+        "name": "test_default_crossed",
+        "runs_per_configuration": 1,
+        "parameters_grid": {
+            "optimizers": ["msffoa", "ssa"],
+            "environments": ["forest"],
+            "avoidances": ["msffoa", "ssa"],
+        },
+    }
+    yaml_path = tmp_path / "default.yaml"
+    yaml_path.write_text(yaml.safe_dump(definition))
+
+    proc = subprocess.run(
+        [sys.executable, str(PREPARE_SCRIPT), str(yaml_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    candidates = sorted((PROJECT_ROOT / "results").glob("exp_*_test_default_crossed"))
+    exp_dir = candidates[-1]
+    _register_artifacts(cleanup_artifacts, exp_dir.name)
+
+    # Default: pairing == crossed, total_runs = 2×1×2×1 = 4
+    manifest = yaml.safe_load((exp_dir / "manifest.yaml").read_text())
+    assert manifest["experiment_meta"]["pairing"] == "crossed"
+    assert manifest["experiment_meta"]["total_runs"] == 4
+
+    # Registry zawiera wszystkie 4 pary (crossed): msffoa-msffoa, msffoa-ssa,
+    # ssa-msffoa, ssa-ssa. Czyli 2 opt × 2 avo × 1 env × 1 seed.
+    with sqlite3.connect(exp_dir / "registry.db") as conn:
+        rows = conn.execute(
+            "SELECT optimizer, avoidance FROM runs ORDER BY optimizer, avoidance"
+        ).fetchall()
+    assert sorted(rows) == sorted([
+        ("msffoa", "msffoa"), ("msffoa", "ssa"),
+        ("ssa", "msffoa"), ("ssa", "ssa"),
+    ])
+
+
 def test_prepare_experiment_empty_grid_fails(
     tmp_path: Path, cleanup_artifacts: dict
 ) -> None:

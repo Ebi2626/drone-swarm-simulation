@@ -43,7 +43,7 @@ algorithm_params:
   n_swarms: 5                 # G — liczba podrojów (sub-swarms)
   coe1: 0.8                   # waga lidera w Eq. 14 (offspring competition)
   coe2: 0.2                   # waga aktualnej muchy w Eq. 14 (coe1 + coe2 = 1)
-  threshold_ratio: 0.18       # próg fitness do przełączenia faza global ↔ 
+  threshold_ratio: 0.05       # próg fitness do przełączenia faza global ↔ 
                               # (dynamicznie skalowany przez initial_fitness)
 
   # --- Amplitudy perturbacji (paper Sec. 1: R jako parametr) ---
@@ -70,4 +70,4 @@ algorithm_params:
   noise_std_z: 1.5
 
   preferred_height: 5.0                # f_2: preferowana stała wysokość lotu [m]
-  coordination_penalty_factor: 1.5      # f_5: mnożnik wykładniczej kary za koordynację
+  coordination_penalty_factor: 1.2      # f_5: ujednolicone z OOA/SSA/NSGA-III dla ceteris paribus (2026-05-09)

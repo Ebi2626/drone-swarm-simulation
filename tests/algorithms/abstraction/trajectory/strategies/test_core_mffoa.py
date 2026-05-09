@@ -349,3 +349,267 @@ def test_default_step_fractions_when_not_provided(base_params):
     # world_size = [100, 100, 50]
     np.testing.assert_allclose(opt.step_global, np.array([1.0, 1.0, 0.25]))
     np.testing.assert_allclose(opt.step_local, np.array([0.3, 0.3, 0.05]))
+
+
+# ---------------------------------------------------------------------------
+# Logowanie per-gen — stan algorytmu (swarm_best_pos), nie offspring (new_pop)
+# ---------------------------------------------------------------------------
+
+class _CapturingHistoryWriter:
+    """Zbiera wywołania put_generation_data dla testów logowania."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def put_generation_data(self, payload: dict) -> None:
+        self.calls.append({k: (v.copy() if hasattr(v, "copy") else v)
+                           for k, v in payload.items()})
+
+    def close(self) -> None:
+        pass
+
+
+class _AdapterMock:
+    """
+    Imituje TrajectorySOOAdapter — wystawia last_objectives / last_constraints
+    po każdym wywołaniu (jak Big-M adapter w soo_adapter.py).
+    Wszystkie osobniki feasible (G=0) → feasible_ratio = 1.0 dla każdego liderów.
+    """
+
+    def __init__(self, n_obj: int = 3, n_g: int = 2) -> None:
+        self.n_obj = n_obj
+        self.n_g = n_g
+        self.last_objectives: np.ndarray | None = None
+        self.last_constraints: np.ndarray | None = None
+        self.evaluator = None  # symuluje brak `individuals_evaluated`
+
+    def __call__(self, pop: np.ndarray) -> np.ndarray:
+        # pop shape: (N, n_drones, n_inner, 3) → fitness ~ Σ |x|
+        flat = pop.reshape(pop.shape[0], -1)
+        fit = np.linalg.norm(flat, axis=1)
+        # Wielokolumnowe F/G żeby symulować realny przypadek (M, K > 1)
+        self.last_objectives = np.column_stack(
+            [fit] + [fit * (0.5 + 0.1 * k) for k in range(self.n_obj - 1)]
+        )
+        # Wszystkie feasible (G ≤ 0)
+        self.last_constraints = np.full((pop.shape[0], self.n_g), -1.0)
+        return fit
+
+
+def test_history_writer_logs_swarm_leaders_not_offspring(base_params):
+    """
+    Po Phase 3 do history_writer wpisywany jest STAN algorytmu — G liderów
+    (swarm_best_pos po elityzmie), NIE offspring (new_pop). Spójne z NSGA-III/
+    OOA/SSA, które logują populację po selekcji.
+
+    Eliminuje fałszywą degradację `feasible_ratio` raportowaną w
+    exp_20260508 (offspring tuż za wąską niszą feasibility, mimo że liderzy
+    sami są feasible).
+    """
+    base_params["max_generations"] = 4
+    writer = _CapturingHistoryWriter()
+    adapter = _AdapterMock(n_obj=3, n_g=2)
+
+    opt = MSFFOAOptimizer(
+        **base_params,
+        fitness_function=adapter,
+        history_writer=writer,
+    )
+    opt.optimize()
+
+    G = opt.G
+    M = adapter.n_obj
+    n_var = base_params["n_drones"] * base_params["n_inner"] * 3
+
+    # Po max_generations wywołań — jeden put_generation_data per generację
+    assert len(writer.calls) == base_params["max_generations"]
+
+    for call in writer.calls:
+        # Kluczowy kontrakt: pop_size logowane = G (liderzy), nie pop_size optimizera
+        assert call["objectives_matrix"].shape == (G, M)
+        assert call["decisions_matrix"].shape == (G, n_var)
+        assert call["feasible_mask"].shape == (G,)
+        assert call["constraint_violation"].shape == (G,)
+        # AdapterMock daje wszystkie osobniki feasible — feasible_ratio liderów = 1.0
+        assert call["feasible_mask"].all()
+
+
+def test_history_log_decisions_match_swarm_best_pos_after_optimize(base_params):
+    """
+    decisions_matrix[gen=last] z history_writer musi pokrywać się z
+    final swarm_best_pos (po reshape) — gwarantuje, że logujemy faktyczny
+    stan algorytmu, nie offspring/eksplorację.
+    """
+    base_params["max_generations"] = 3
+    writer = _CapturingHistoryWriter()
+    adapter = _AdapterMock(n_obj=2, n_g=1)
+
+    opt = MSFFOAOptimizer(
+        **base_params,
+        fitness_function=adapter,
+        history_writer=writer,
+    )
+    opt.optimize()
+
+    last_decisions = writer.calls[-1]["decisions_matrix"]
+    expected = opt.swarm_best_pos.reshape(opt.G, -1)
+    np.testing.assert_allclose(last_decisions, expected, rtol=0, atol=0,
+                               err_msg="Logowane decisions w ostatniej generacji "
+                                        "muszą równać się swarm_best_pos (stan algo)")
+
+
+def test_swarm_best_F_G_track_elitism(base_params):
+    """
+    swarm_best_F i swarm_best_G aktualizują się tym samym `update_mask` co
+    swarm_best_pos. Po optymalizacji mają shape (G, M) / (G, K) i są spójne
+    z liderami: F[g, 0] (kolumna fitness-proxy) ≈ swarm_best_fit[g].
+    """
+    base_params["max_generations"] = 5
+    adapter = _AdapterMock(n_obj=2, n_g=1)
+
+    opt = MSFFOAOptimizer(**base_params, fitness_function=adapter)
+    opt.optimize()
+
+    assert opt.swarm_best_F is not None
+    assert opt.swarm_best_G is not None
+    assert opt.swarm_best_F.shape == (opt.G, adapter.n_obj)
+    assert opt.swarm_best_G.shape == (opt.G, adapter.n_g)
+    # AdapterMock: pierwsza kolumna F = fitness, więc F[:, 0] ≈ swarm_best_fit
+    np.testing.assert_allclose(opt.swarm_best_F[:, 0], opt.swarm_best_fit, rtol=1e-9)
+
+
+def test_static_threshold_mode_does_not_modify_threshold(base_params):
+    """
+    Domyślnie `threshold_ratio is None` — paperowy tryb statyczny: wartość
+    `threshold` przekazana w konstruktorze NIE zmienia się w trakcie optymalizacji.
+    """
+    base_params["max_generations"] = 5
+    initial_threshold = 42.0
+
+    opt = MSFFOAOptimizer(
+        **base_params,
+        fitness_function=dummy_fitness,
+        threshold=initial_threshold,
+    )
+    opt.optimize()
+
+    # Brak adaptacji → threshold pozostaje dokładnie 42.0
+    assert opt.threshold == initial_threshold
+    assert opt.threshold_ratio is None
+
+
+def test_adaptive_threshold_uses_best_feasible_swarm_fit(base_params):
+    """
+    Tryb adaptacyjny: `threshold = best_feasible_fit × (1 + threshold_ratio)`.
+    Dla feasible AdapterMock (G=0 dla wszystkich) próg po pełnym runie
+    musi być spójny z aktualnym best feasible podrojem.
+    """
+    base_params["max_generations"] = 4
+    adapter = _AdapterMock(n_obj=2, n_g=1)
+    ratio = 0.18
+
+    opt = MSFFOAOptimizer(
+        **base_params,
+        fitness_function=adapter,
+        threshold_ratio=ratio,
+    )
+    opt.optimize()
+
+    # Wszystkie liderzy feasible (mock daje G=−1 stale)
+    feasible = opt.swarm_best_fit < opt._HARD_INFEASIBLE_BASE
+    assert feasible.all()
+    expected_threshold = float(np.min(opt.swarm_best_fit)) * (1.0 + ratio)
+    assert opt.threshold == pytest.approx(expected_threshold, rel=1e-9)
+
+
+def test_adaptive_threshold_preserves_initial_when_all_infeasible(base_params):
+    """
+    Gdy wszystkie liderzy są infeasible (≥ HARD_INFEASIBLE_BASE), threshold
+    NIE jest resetowany — zachowuje się wartość początkowa z konstruktora
+    (lub ostatnia kalibracja feasible). Funkcjonalnie równoważne resetowi
+    do 0 (każde infeasible ~1e6 ≫ jakikolwiek sensowny threshold), ale
+    daje spójny log między strategy a optimizer.
+    """
+    base_params["max_generations"] = 3
+    initial_threshold = 0.26  # symuluje wartość z strategy (sum(|w|) * ratio)
+
+    class InfeasibleAdapter:
+        """AdapterMock zawsze zwracający fitness ≥ Big-M (infeasible)."""
+        def __init__(self):
+            self.last_objectives: np.ndarray | None = None
+            self.last_constraints: np.ndarray | None = None
+            self.evaluator = None
+
+        def __call__(self, pop: np.ndarray) -> np.ndarray:
+            n = pop.shape[0]
+            # Każdy osobnik infeasible: fitness = 1e6 + scalar
+            base_fit = np.linalg.norm(pop.reshape(n, -1), axis=1)
+            fit = 1e6 + base_fit  # zawsze ≥ 1e6
+            self.last_objectives = np.column_stack([fit, fit * 0.5])
+            # G > 0 → infeasible (per konwencję per_gen_metrics_from_FG)
+            self.last_constraints = np.full((n, 1), 5.0)
+            return fit
+
+    adapter = InfeasibleAdapter()
+    opt = MSFFOAOptimizer(
+        **base_params,
+        fitness_function=adapter,
+        threshold=initial_threshold,
+        threshold_ratio=0.18,
+    )
+    opt.optimize()
+
+    # Wszystkie liderzy infeasible → threshold zachowuje wartość initial,
+    # nie zostaje zresetowany do 0. Behavior pozostaje all GLOBAL bo
+    # każde infeasible (~1e6) >> initial_threshold (0.26).
+    assert (opt.swarm_best_fit >= opt._HARD_INFEASIBLE_BASE).all()
+    assert opt.threshold == pytest.approx(initial_threshold, rel=1e-12)
+
+
+def test_adaptive_threshold_recalibrates_per_generation(base_params):
+    """
+    Threshold musi się aktualizować co generację. Sprawdzamy, że po
+    optymalizacji threshold jest spójny z FINAL stanem swarm_best_fit
+    (a nie z pre-init wartością `threshold` przekazaną w konstruktorze).
+    """
+    base_params["max_generations"] = 6
+    adapter = _AdapterMock(n_obj=3, n_g=2)
+    ratio = 0.5
+
+    opt = MSFFOAOptimizer(
+        **base_params,
+        fitness_function=adapter,
+        threshold=99999.0,  # wstępna wartość — powinna być nadpisana
+        threshold_ratio=ratio,
+    )
+    opt.optimize()
+
+    # Final threshold odzwierciedla bieżący best feasible, nie 99999
+    assert opt.threshold < 99999.0
+    expected = float(np.min(opt.swarm_best_fit)) * (1.0 + ratio)
+    assert opt.threshold == pytest.approx(expected, rel=1e-9)
+
+
+def test_logging_change_does_not_break_seed_reproducibility(base_params):
+    """
+    Regresja: zmiana logowania (snapshot F/G + reshape) NIE konsumuje rng,
+    więc dwa runy z tym samym seedem dają identyczny final fitness — także
+    z aktywnym history_writer.
+    """
+    base_params["max_generations"] = 8
+    params_a = base_params.copy()
+    params_b = base_params.copy()
+    params_a["rng"] = np.random.default_rng(123)
+    params_b["rng"] = np.random.default_rng(123)
+
+    writer_a = _CapturingHistoryWriter()
+    writer_b = _CapturingHistoryWriter()
+    adapter_a = _AdapterMock()
+    adapter_b = _AdapterMock()
+
+    _, fit_a = MSFFOAOptimizer(**params_a, fitness_function=adapter_a,
+                               history_writer=writer_a).optimize()
+    _, fit_b = MSFFOAOptimizer(**params_b, fitness_function=adapter_b,
+                               history_writer=writer_b).optimize()
+
+    assert fit_a == pytest.approx(fit_b, rel=1e-12)

@@ -26,11 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 # Margin ε w `r* = nadir + ε · (nadir − ideal)` (Ishibuchi 2018, Eq. 4).
-# ε=0.1 to środek zalecanego pasma [0.05, 0.2]; dla 5-obj w forest/urban
-# objective space jest dobrze unormowany przez nasze ograniczenia, więc
-# margines 10% wystarcza by każde feasible rozwiązanie było zdominowane
-# przez r* (warunek konieczny żeby HV było > 0).
-DEFAULT_REF_POINT_MARGIN = 0.1
+# Re-kalibracja 2026-05-09 z 0.1 → 0.5 po analizie exp_20260508_f3f718f8:
+#   - 67 % runów NSGA-III miało HV=0 przy ε=0.1 (wąskie reference points
+#     prowadzily do front'ów leżących całkowicie poza r*-box).
+#   - Ishibuchi 2018 §4: dla benchmarków z wąskimi front'ami zalecane
+#     ε ∈ [0.5, 1.0]; ε=0.5 zachowuje porównywalność HV między cellami
+#     (NSGA-III i SOO obojętnie szerokość frontu).
+DEFAULT_REF_POINT_MARGIN = 0.5
 
 
 def build_reference_pareto_sets(conn: sqlite3.Connection, experiment_dir: Path) -> dict[tuple[str, int], np.ndarray]:

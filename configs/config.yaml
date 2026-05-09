@@ -1,8 +1,8 @@
 defaults:
   - _self_
   - environment: forest # city, forest
-  - optimizer: ssa # nsga-3, ooa, ssa, msffoa
-  - avoidance: ssa # nsga-3, ooa, ssa, msffoa
+  - optimizer: msffoa # nsga-3, ooa, ssa, msffoa
+  - avoidance: msffoa # nsga-3, ooa, ssa, msffoa
 
 simulation:
   duration_sec: 180 # twardy limit czasu symulacji

@@ -35,6 +35,7 @@ from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (
     MSFFOAOptimizer,
 )
 from src.algorithms.abstraction.trajectory.strategies.soo_adapter import (
+    HARD_INFEASIBLE_BASE,
     TrajectorySOOAdapter,
 )
 
@@ -149,7 +150,10 @@ def msffoa_strategy(
 
                 logger.info(f"[MSFOA] F_ref (normalization scales): {adapter._f_ref}")
 
-                # Dynamiczny próg (Shi et al., 2020)
+                # Anchor wstępny dla threshold (Shi et al., 2020 Eq. 5-8).
+                # Faktyczna kalibracja jest odroczona do momentu, gdy znamy
+                # initial_population — pozwala to wykryć Big-M domination i użyć
+                # mediany feasible jako anchora zamiast magnitudy violation.
                 t_vals = np.linspace(0, 1, n_inner + 2)[1:-1]
                 t_reshaped   = t_vals.reshape(1, 1, n_inner, 1)
                 starts_bc    = start_positions[np.newaxis, :, np.newaxis, :]
@@ -158,18 +162,7 @@ def msffoa_strategy(
 
                 initial_fitness = float(adapter(base_inner)[0])
                 threshold_ratio = float(params.get("threshold_ratio", 0.1))
-
-                # Paper Sec. 1 podaje threshold jako parametr stały. Adaptujemy
-                # do dynamicznej kalibracji `initial_fitness · threshold_ratio`,
-                # bo bezwzględna wartość fitness zależy od F_ref normalization
-                # i jest trudna do ustawienia z góry. Floor 0.01 chroni przed
-                # zerowym progiem, gdy initial_fitness jest patologicznie niski
-                # (np. perfect feasible straight-line z penalty=0).
-                THRESHOLD_FLOOR = 0.01
-                dynamic_threshold = max(initial_fitness * threshold_ratio, THRESHOLD_FLOOR)
-
                 logger.info(f"[MSFOA] Initial Straight-Line Fitness: {initial_fitness:.4f}")
-                logger.info(f"[MSFOA] Dynamic Threshold: {dynamic_threshold:.4f} (Ratio: {threshold_ratio})")
 
                 # --- INSTANCJONOWANIE TEGO SAMEGO PROBLEMU CO NSGA-III ---
                 # Gwarantuje to identyczne limity clippingu (xl, xu)
@@ -201,6 +194,47 @@ def msffoa_strategy(
                 initial_population_flat = sampling._do(problem, pop_size)
                 initial_population = initial_population_flat.reshape(
                     pop_size, drone_swarm_size, n_inner, 3
+                )
+
+                # --- Wstępny threshold (Shi et al. 2020 Eq. 5-8) ---
+                # WAŻNE: ta wartość jest tylko *początkową* wartością przed
+                # pierwszą adaptacją. Optimizer przeliczy threshold po
+                # `_initialize_swarms` używając `threshold_ratio` (adaptacyjny
+                # tryb relatywny do best feasible). Jeśli `threshold_ratio is
+                # None`, ta wartość zostaje na stałe (paperowy tryb statyczny).
+                #
+                # Dla trybu adaptacyjnego ten wstępny anchor i tak nie wpłynie
+                # na dynamikę — _update_adaptive_threshold() w pierwszej
+                # iteracji nadpisze go na podstawie liderów po init. Ale
+                # zachowujemy go jako sensowny default dla edge-case'ów
+                # (np. gdy adaptacja jest wyłączona).
+                THRESHOLD_FLOOR = 0.01
+                if initial_fitness < HARD_INFEASIBLE_BASE:
+                    # Straight-line feasible — Big-M nie wpływa, oryginalna kalibracja
+                    threshold_anchor = initial_fitness
+                    anchor_source = "straight-line (feasible)"
+                else:
+                    # Big-M dominacja — sample skalę feasible z init pop
+                    init_pop_fits = np.asarray(adapter(initial_population), dtype=np.float64)
+                    feasible_in_init = init_pop_fits < HARD_INFEASIBLE_BASE
+                    if feasible_in_init.any():
+                        threshold_anchor = float(np.median(init_pop_fits[feasible_in_init]))
+                        anchor_source = (
+                            f"median feasible ({int(feasible_in_init.sum())}/"
+                            f"{init_pop_fits.size} feasible w init pop)"
+                        )
+                    else:
+                        # 100% init pop infeasible — analytical fallback. Suma |w|
+                        # to górne oszacowanie skali feasible przy F_norm ~ 1
+                        # (każdy objective znormalizowany do straight-line ≤ 1).
+                        threshold_anchor = float(np.sum(np.abs(weights)))
+                        anchor_source = "sum(|weights|) (no feasible in init pop)"
+                dynamic_threshold = max(threshold_anchor * threshold_ratio, THRESHOLD_FLOOR)
+                logger.info(
+                    f"[MSFOA] Initial threshold anchor={threshold_anchor:.4f} "
+                    f"({anchor_source}) → initial_threshold={dynamic_threshold:.4f} "
+                    f"(ratio={threshold_ratio}) — będzie przeliczone adaptacyjnie "
+                    f"po init populacji w optimizerze"
                 )
 
                 # Granice clippingu zgodne z NSGA-III i OOA: bierzemy je
@@ -241,6 +275,7 @@ def msffoa_strategy(
                     coe1=coe1,
                     coe2=coe2,
                     threshold=dynamic_threshold,
+                    threshold_ratio=threshold_ratio,
                     step_global_frac=step_global_frac,
                     step_local_frac=step_local_frac,
                     history_writer=writer,

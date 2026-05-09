@@ -6,9 +6,6 @@ _convert_: "all"
 # Parametry specyficzne dla Osprey Optimization Algorithm (OOA)
 algorithm_params:
   cruise_speed: 6.0
-  # n_gen skalibrowane empirycznie (exp_20260506): Q75 konwergencji przy
-  # iteracji 1 (~7.5k NFE). n_gen=100 daje ~300k NFE = 40× margines.
-  # Zachowujemy 100 (jak MSFFOA/SSA/NSGA-III) dla porównywalności.
   pop_size: 1001
   n_gen: 200
   n_inner_waypoints: 11

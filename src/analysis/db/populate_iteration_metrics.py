@@ -143,7 +143,7 @@ def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             handled = True
 
         # =========================================================
-        # MOO quality indicators (populate_moo_quality, 2026-05-06)
+        # MOO quality indicators (zob. `populate_moo_quality`)
         # =========================================================
         elif metric_name == "gd":
             entry["gd"] = metric_value
@@ -162,7 +162,7 @@ def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
             handled = True
 
         # =========================================================
-        # Diagnostyki MOO (Kamień 2 — 2026-05-07)
+        # Diagnostyki MOO
         # =========================================================
         elif metric_name == "front_size":
             entry["front_size"] = int(metric_value)

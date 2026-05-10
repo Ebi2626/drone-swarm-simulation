@@ -1,4 +1,4 @@
-"""Wskaźniki jakości MOO per generation (Faza 2 plan.md).
+"""Wskaźniki jakości MOO per generation.
 
 Wskaźniki (lower=better dla GD/IGD+/spread/spacing; r2 też lower=better):
 - **Spread** Δ (Deb et al. 2002, NSGA-II paper, equation (15)):
@@ -54,7 +54,7 @@ def populate_moo_quality(
         reference_point: r* per (env, n_obj) dla HV. Ishibuchi et al. 2018.
         ideal_point: z* = min(R, axis=0) per (env, n_obj). Wymagany dla
             `hypervolume_normalized = HV / Π(r* − z*)` (Riquelme 2015 §3.6,
-            Kamień 2 — cross-env porównywalność HV).
+            zapewnia cross-env porównywalność HV).
         compute_baseline_metrics: gdy False, pomija spread/spacing/r2
             (zakłada że są już w `optimization_generation_stats` z poprzedniego
             biegu). Używane w `backfill_moo_quality_with_reference` żeby
@@ -116,7 +116,7 @@ def populate_moo_quality(
                     rows.append((run_id, gen, "moo_quality", "front_size", 0.0))
                     continue
 
-                # Diagnostic: |F_feas ∩ ND| per gen — Kamień 2.
+                # Diagnostic: |F_feas ∩ ND| per gen.
                 rows.append((run_id, gen, "moo_quality", "front_size", float(front.shape[0])))
 
                 # --- Spread / Spacing / R2 (baseline indicators) ---
@@ -334,11 +334,11 @@ def _r2_indicator(
             Gdy None — fallback na `min(front, axis=0)` (lokalny ideal),
             wartość R2 NIE jest porównywalna między runami.
 
-    Strategia ceteris paribus (Krok 8, decyzja użytkownika 2026-05-08):
-    przekazujemy `z_star` z `reference_pareto_sets.ideal_point` (per env,
-    n_obj) — ten sam ideal dla wszystkich algorytmów porównywanych
-    w danym środowisku. Bez tego R2 jest stale-of-the-art tylko dla
-    own-run rankingu, niewłaściwe dla benchmark cross-algorithm.
+    Strategia ceteris paribus: przekazujemy `z_star` z
+    `reference_pareto_sets.ideal_point` (per env, n_obj) — ten sam ideal dla
+    wszystkich algorytmów porównywanych w danym środowisku. Bez tego R2 jest
+    porównywalne tylko w obrębie pojedynczego runa, niewłaściwe dla benchmark
+    cross-algorithm.
     """
     if front.shape[0] == 0 or weights.shape[0] == 0:
         return None

@@ -1,23 +1,12 @@
 """Agregat per-run metryk do tabeli `run_metrics`.
 
-Refaktor 2026-05-07: usunięte legacy 8-component costs (`total_energy_cost`,
-`total_smoothness_cost`, `total_altitude_cost`, `total_terrain_penalty`,
-`total_climb_penalty`, `total_collision_penalty`) — żaden z 4 algorytmów
-ich nie produkuje. Aktualny `VectorizedEvaluator` ma 5-obj F-vector
-mapowane na `final_objective_f1_trajectory/f2_height_angle/total_threat_cost/
-total_turn_penalty/total_coordination_cost` przez `populate_offline_objectives`.
-
-Usunięte też never-populated: `decision_mode`, `selected_solution_index`,
-`feasible_nondominated_count`, `reference_point_json`.
-
-Refaktor 2026-05-08 (decyzja użytkownika #9 — "nie wstawiajmy sztucznych
-nulli"): pola `final_objective`, `total_threat_cost`, `total_turn_penalty`
-zostały **usunięte z INSERT/ON CONFLICT** w tym populatorze. Należą do
-domeny `populate_offline_objectives` (z h5 F-vector). Schema dopuszcza
-NULL — wiersz tworzony przez ten populator pozostaje bez tych pól, dopóki
-`populate_offline_objectives` nie wykona UPDATE. Eliminuje to ordering
-dependency (poprzednio: jawne NULL nadpisywały wartości z h5 jeśli kolejność
-była zaburzona).
+Schema scope: `VectorizedEvaluator` ma 5-obj F-vector mapowane na kolumny
+`final_objective_f1_trajectory / f2_height_angle / total_threat_cost /
+total_turn_penalty / total_coordination_cost`. **Te pola NIE są wpisywane
+przez ten populator** — domena `populate_offline_objectives` (UPDATE z
+h5 F-vector). Wiersz powstaje tutaj z NULL'ami w tych kolumnach, eliminując
+ordering dependency (poprzednie wersje wpisywały jawne NULL'e i nadpisywały
+wartości z h5 gdy kolejność populatorów była zaburzona).
 """
 import json
 import sqlite3
@@ -177,9 +166,9 @@ def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
 
     convergence_speed_gen, auc_best_so_far = _convergence_speed_and_auc(conn, run_id)
 
-    # Decyzja 2026-05-08 (#9): `final_objective`, `total_threat_cost`,
-    # `total_turn_penalty` NIE są w tym INSERT — domena `populate_offline_objectives`.
-    # Schema dopuszcza NULL → wiersz powstaje tutaj BEZ tych pól.
+    # `final_objective`, `total_threat_cost`, `total_turn_penalty`,
+    # `total_coordination_cost`, `final_objective_f*` NIE są w tym INSERT —
+    # domena `populate_offline_objectives` (UPDATE z h5).
     conn.execute(
         """
         INSERT INTO run_metrics (

@@ -44,10 +44,6 @@ LOW_POWER_N_THRESHOLD = 6
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------------------------------------------------
-# Konfiguracja: które metryki są "higher=better"
-# ----------------------------------------------------------------------
-
 # Lower is better dla większości MOO indicator-ów (GD/IGD+/spread/spacing/R2).
 # Higher is better dla HV i success rate.
 HIGHER_IS_BETTER = {
@@ -157,19 +153,9 @@ class ExperimentAnalyzer:
         # Compute is_failure flag używany w summary tables i bar plots.
         df_run = _compute_failure_flag(df_run)
 
-        # ============================================================
-        # 1. Tabele zbiorcze
-        # ============================================================
         self._build_tables(df_run, df_online, tables_dir)
-
-        # ============================================================
-        # 2. Wykresy
-        # ============================================================
         self._build_plots(df_run, df_iter, df_pareto, plots_dir)
 
-        # ============================================================
-        # 3. Raport zbiorczy (PDF + Markdown)
-        # ============================================================
         from src.analysis.analyzer.report_generator import ReportGenerator
 
         try:
@@ -181,10 +167,6 @@ class ExperimentAnalyzer:
 
         logger.info(f"ExperimentAnalyzer: wygenerowano analizę w {out_dir}")
         return out_dir
-
-    # ------------------------------------------------------------------
-    # Helpery
-    # ------------------------------------------------------------------
 
     def _build_tables(
         self,
@@ -408,11 +390,6 @@ class ExperimentAnalyzer:
             )
 
 
-# ----------------------------------------------------------------------
-# Module-level helpery
-# ----------------------------------------------------------------------
-
-
 def _dedup_offline(df_run: pd.DataFrame) -> pd.DataFrame:
     """Dedup DataFrame per (environment, optimizer, seed). Wartości metryk
     offline (HV, IGD+, GD, ...) zależą TYLKO od (opt, env, seed) — `avoidance`
@@ -441,11 +418,10 @@ def _compute_failure_flag(df_run: pd.DataFrame) -> pd.DataFrame:
 
     ONLINE failure ⟺ `collision_count > 0`.
 
-    Powody splitu (Kamień 2): plan analizy raportował q25=0 dla HV msffoa
-    urban → tail-failure offline phase (algorytm nie znalazł żadnych
-    feasible-ND rozwiązań pokrywających r*). Online collisions to inny
-    failure mode (avoidance phase) — łączenie obu obscure'owałoby root
-    cause.
+    Powody splitu: HV q25=0 oznacza tail-failure offline phase (algorytm
+    nie znalazł żadnych feasible-ND rozwiązań pokrywających r*); online
+    collisions to inny failure mode (avoidance phase). Łączenie obu
+    obscure'owałoby root cause.
 
     Reference: Liefooghe & Verel (2014). Failure rate to standardowy
     proxy tail-risk algorytmu, uzupełniający mean/median (które maskują

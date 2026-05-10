@@ -1,4 +1,4 @@
-"""Buduje reference Pareto sets cross-run (Faza 3 plan.md).
+"""Buduje reference Pareto sets cross-run dla porównania algorytmów MOO.
 
 W absencji prawdziwego "true Pareto front" (typowo używanego w benchmarkach
 ZDT/DTLZ z znaną postacią analityczną) standard literaturowy dla problemów
@@ -26,12 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 # Margin ε w `r* = nadir + ε · (nadir − ideal)` (Ishibuchi 2018, Eq. 4).
-# Re-kalibracja 2026-05-09 z 0.1 → 0.5 po analizie exp_20260508_f3f718f8:
-#   - 67 % runów NSGA-III miało HV=0 przy ε=0.1 (wąskie reference points
-#     prowadzily do front'ów leżących całkowicie poza r*-box).
-#   - Ishibuchi 2018 §4: dla benchmarków z wąskimi front'ami zalecane
-#     ε ∈ [0.5, 1.0]; ε=0.5 zachowuje porównywalność HV między cellami
-#     (NSGA-III i SOO obojętnie szerokość frontu).
+# Wartość 0.5 zgodna z zaleceniem Ishibuchi 2018 §4 dla benchmarków z
+# wąskimi front'ami (ε ∈ [0.5, 1.0]) — niższe ε powoduje że front'y leżą
+# całkowicie poza r*-box i HV degeneruje do 0.
 DEFAULT_REF_POINT_MARGIN = 0.5
 
 
@@ -235,13 +232,11 @@ def backfill_moo_quality_with_reference(
             compute_baseline_metrics=False,
         )
 
-    # Re-trigger iteration_metrics + run_metrics dla wszystkich runów,
-    # żeby pochwycić nowe GD/IGD+/HV. Po refaktorze 2026-05-08:
-    # `populate_run_metrics` NIE odnosi się do `final_objective`/`total_threat_cost`/
-    # `total_turn_penalty` (domena `populate_offline_objectives`), więc re-run
-    # tej funkcji jest bezpieczny — nie wymazuje F-vector z poprzedniego cyklu.
-    # `populate_offline_objectives` jest tu wywoływany ponownie żeby gwarantować
-    # poprawne wartości po backfill (defensive idempotent re-write).
+    # Re-trigger iteration_metrics + run_metrics dla wszystkich runów, żeby
+    # pochwycić nowe GD/IGD+/HV. `populate_run_metrics` NIE pisze do kolumn
+    # F-vector (domena `populate_offline_objectives`), więc re-run jest
+    # bezpieczny — nie wymazuje F z poprzedniego cyklu. `populate_offline_objectives`
+    # wołany ponownie jako defensive idempotent re-write.
     from src.analysis.db.populate_iteration_metrics import populate_iteration_metrics
     from src.analysis.db.populate_run_metrics import populate_run_metrics
     from src.analysis.db.populate_offline_objectives import populate_offline_objectives
@@ -255,11 +250,6 @@ def backfill_moo_quality_with_reference(
         h5_path_run = Path(source_path) / "optimization_history" / "optimization_history.h5"
         if h5_path_run.exists():
             populate_offline_objectives(conn, run_id, h5_path_run)
-
-
-# ---------------------------------------------------------------------------
-# Helpery
-# ---------------------------------------------------------------------------
 
 
 def _peek_n_obj(h5_path: Path) -> Optional[int]:

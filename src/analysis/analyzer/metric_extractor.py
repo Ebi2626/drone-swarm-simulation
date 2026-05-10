@@ -26,10 +26,6 @@ class MetricExtractor:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Brak bazy: {self.db_path}")
 
-    # ------------------------------------------------------------------
-    # Per-run (offline + online aggregates)
-    # ------------------------------------------------------------------
-
     def run_summary(self) -> pd.DataFrame:
         """Per-run zestawienie: jedna obserwacja per run_id.
 

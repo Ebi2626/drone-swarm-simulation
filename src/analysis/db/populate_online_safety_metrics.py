@@ -1,4 +1,4 @@
-"""Post-hoc kalkulator metryk online z `trajectory_samples` (notatki.md).
+"""Post-hoc kalkulator metryk online z `trajectory_samples`.
 
 Liczy 3 grupy metryk per UAV i zapisuje do `uav_online_metrics`:
 
@@ -28,19 +28,10 @@ import numpy as np
 
 
 # Domyślny próg bezpieczeństwa pomiędzy dronami (m).
-#
-# Naprawa 2026-05-07: poprzednia wartość 1.0 m była ustalona dla
-# `collision_radius=0.4` × 2.5 ≈ 1.0 m. Aktualne configi (CF2X w
-# pyBullet) mają `collision_radius=2.0` w `configs/config.yaml:16` —
-# co daje realistyczny próg `2 × collision_radius = 4.0 m`.
-#
-# Stary próg 1.0 m był ZAWSZE niższy niż realne min_inter_uav_distance
-# (obserwowane min ~1.9 m), stąd `inter_uav_safety_violation_count`
-# zawsze 0 w analizach — naruszenia były niewykrywalne.
-#
-# 4.0 m = 2× collision sphere radius (każdy dron ma 2 m wokół siebie,
-# dwa drony stykają się przy odległości środków = 2×2 m). Empiryczny
-# floor — drony bliżej niż 4 m mają collision sphere overlap.
+# 4.0 m = 2× collision_radius (CF2X w pyBullet, `configs/config.yaml`):
+# dwa drony stykają się collision spheres przy odległości środków = 2 × 2 m.
+# Próg 1.0 m był wcześniej zawsze poniżej realnego min_inter_uav (~1.9 m)
+# — skutkował zerowym `inter_uav_safety_violation_count` w analizach.
 DEFAULT_INTER_UAV_SAFETY_THRESHOLD_M = 4.0
 
 
@@ -57,14 +48,11 @@ def populate_online_safety_metrics(
     """
     samples = _fetch_trajectory_samples(conn, run_id)
     if not samples:
-        # Run bez trajectory_samples — nic do liczenia. Czyścimy tabelę
-        # idempotentnie.
         conn.execute(
             "DELETE FROM uav_online_metrics WHERE run_id = ?", (run_id,)
         )
         return
 
-    # Per-drone numpy struktury — 1 dron = 1 wiersz w tabeli wynikowej.
     per_drone = _split_per_drone(samples)
     drone_ids = sorted(per_drone.keys())
 
@@ -132,11 +120,6 @@ def populate_online_safety_metrics(
         """,
         rows,
     )
-
-
-# --------------------------------------------------------------------------- #
-# Implementacja                                                               #
-# --------------------------------------------------------------------------- #
 
 
 def _fetch_trajectory_samples(

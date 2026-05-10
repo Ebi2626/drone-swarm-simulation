@@ -29,10 +29,6 @@ from src.analysis.analyzer.plots._common import apply_style
 logger = logging.getLogger(__name__)
 
 
-# ======================================================================
-# Data container
-# ======================================================================
-
 @dataclass
 class _PlotRef:
     """Reference to a plot file for report embedding."""
@@ -77,10 +73,6 @@ class ReportData:
     offline_plots: list[_PlotRef] = field(default_factory=list)
     online_plots: list[_PlotRef] = field(default_factory=list)
 
-
-# ======================================================================
-# ReportGenerator
-# ======================================================================
 
 class ReportGenerator:
     """Generates experiment summary reports in PDF and Markdown."""
@@ -140,10 +132,6 @@ class ReportGenerator:
         pdf_path = self._generate_pdf(data)
         logger.info("Report generated: %s, %s", md_path, pdf_path)
         return md_path, pdf_path
-
-    # ------------------------------------------------------------------
-    # Data collection
-    # ------------------------------------------------------------------
 
     def _collect_data(self) -> ReportData:
         """Read existing CSV tables and plot PNGs into ReportData."""
@@ -435,10 +423,6 @@ class ReportGenerator:
 
         return findings
 
-    # ------------------------------------------------------------------
-    # Markdown generation
-    # ------------------------------------------------------------------
-
     def _generate_markdown(self, data: ReportData) -> Path:
         """Render jinja2 template to Markdown."""
         import jinja2
@@ -480,10 +464,6 @@ class ReportGenerator:
         md_path.write_text(rendered, encoding="utf-8")
         logger.info("Markdown report: %s", md_path)
         return md_path
-
-    # ------------------------------------------------------------------
-    # PDF generation (matplotlib PdfPages)
-    # ------------------------------------------------------------------
 
     def _generate_pdf(self, data: ReportData) -> Path:
         """Compile multi-page PDF report using matplotlib PdfPages."""
@@ -561,10 +541,6 @@ class ReportGenerator:
 
         logger.info("PDF report: %s", pdf_path)
         return pdf_path
-
-    # ------------------------------------------------------------------
-    # PDF page renderers
-    # ------------------------------------------------------------------
 
     def _pdf_title_page(self, data: ReportData) -> matplotlib.figure.Figure:
         fig = plt.figure(figsize=(8.27, 11.69))  # A4
@@ -731,11 +707,6 @@ class ReportGenerator:
             fontfamily="serif", color="gray",
         )
         return fig
-
-
-# ======================================================================
-# Helpers
-# ======================================================================
 
 
 def _wrap_text(text: str, max_chars: int = 85) -> str:

@@ -32,23 +32,21 @@ _NAN = float("nan")
 
 
 class GenericOptimizingAvoidance(BaseAvoidance):
-    """Strategy implementujący `BaseAvoidance` przez kompozycję 4 sub-strategii.
-
-    Architektura zgodna ze specyfikacją z `plan.md` (Faza 1):
+    """Strategy implementujący `BaseAvoidance` przez kompozycję 4 sub-strategii:
       - `IObstaclePredictor` — model przyszłej pozycji przeszkody.
       - `IPathRepresentation` — konwersja waypointów (lub genów) na BSpline.
-      - `IFitnessEvaluator` — koszt / ocena trajektorii (dla AStara: tylko axis_score).
-      - `IPathOptimizer` — silnik wybierający waypointy (AStar w Fazie 1;
-        NSGA-III/MSFFOA/SSA/OOA w Fazie 2).
+      - `IFitnessEvaluator` — koszt / ocena trajektorii.
+      - `IPathOptimizer` — silnik wybierający waypointy (NSGA3/MSFFOA/SSA/OOA
+        Online).
 
     Wszystkie sub-strategy są instancjowane przez Hydrę (`_target_` w yaml),
     więc podmiana algorytmu nie wymaga ingerencji w żaden plik .py.
 
-    Mechanizm budżetu (zob. `plan.md` → Engineering Notes):
+    Mechanizm budżetu czasu:
       - Cooperative `TimeBudget` przekazywany do `optimize()` — primary defense.
       - SIGALRM `hard_deadline(time_budget_s × hard_kill_factor)` jako outer
         circuit breaker — odpala się gdy cooperative zawiedzie (bug w optimizerze,
-        deadlock w native code). Po stripowaniu zwracamy fallback bez planu
+        deadlock w native code). Po przerwaniu zwracamy fallback bez planu
         (TRACKING kontynuuje), eksperyment się nie wiesza.
     """
 
@@ -92,8 +90,8 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         self, context: EvasionContext
     ) -> Tuple[EvasionPlan | None, OnlineOptimizationRecord]:
         t_plan_start = time.perf_counter()
-        # Convergence trace zerowany na każdy trigger — następny optimizer.optimize
-        # podstawi swój trace przez `result.extra["convergence_trace"]`.
+        # Trace zerowany na każdy trigger — optimizer.optimize podstawi swój
+        # przez `result.extra["convergence_trace"]`.
         self.last_convergence_trace = []
 
         # Pre-generacja populacji ceteris paribus: jeśli optimizer deklaruje
@@ -111,7 +109,7 @@ class GenericOptimizingAvoidance(BaseAvoidance):
                     * (ub - lb)[None, :]
                 )
             except NotImplementedError:
-                pass  # path_repr nie wspiera genów (np. legacy BSplineSmoother)
+                pass  # path_repr nie wspiera genów — pomijamy populację
 
         problem = PathProblem(
             context=context,
@@ -123,7 +121,6 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         budget = TimeBudget.start_now(self.time_budget_s)
         hard_seconds = self.time_budget_s * self.hard_kill_factor
 
-        # Outer circuit breaker — patrz `budget.hard_deadline` docstring.
         try:
             with hard_deadline(hard_seconds):
                 result = self.optimizer.optimize(problem, budget)
@@ -146,7 +143,7 @@ class GenericOptimizingAvoidance(BaseAvoidance):
             return None, record
 
         # Common-contract trace: optimizer może wystawić `convergence_trace`
-        # w `extra` (lista per-gen best_fitness). AStar nie wystawia → pusto.
+        # w `extra` (lista per-gen best_fitness); brak ⇒ pusta lista.
         trace = list(result.extra.get("convergence_trace", []) or [])
         self.last_convergence_trace = [float(x) for x in trace]
 
@@ -203,10 +200,6 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         )
         return plan, record
 
-    # ---------------------------------------------------------------------- #
-    # Common-contract record builder (Krok 3.3)                              #
-    # ---------------------------------------------------------------------- #
-
     def _build_record(
         self,
         *,
@@ -244,10 +237,9 @@ class GenericOptimizingAvoidance(BaseAvoidance):
 
         if plan is not None:
             spline = plan.evasion_spline
-            # `plan.preferred_axis` zwracane przez `AxisChooser._choose`:
-            # {'right','left','up','down'}. Normalizujemy magic string
-            # "unknown" → "" (puste = NULL po stronie ETL/CSV) — pojawia się
-            # gdy avoidance nie wstawił `axis_chosen` do `OptimizationResult.extra`.
+            # `plan.preferred_axis` ∈ {right, left, up, down}; magic "unknown"
+            # (gdy optimizer nie wstawił `axis_chosen` w extra) normalizujemy
+            # do "" → NULL po stronie ETL/CSV.
             chosen_axis = (
                 str(plan.preferred_axis)
                 if plan.preferred_axis in ("right", "left", "up", "down")

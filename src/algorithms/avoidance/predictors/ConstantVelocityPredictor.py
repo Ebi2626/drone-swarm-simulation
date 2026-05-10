@@ -24,12 +24,11 @@ class ConstantVelocityPredictor(IObstaclePredictor):
     """
 
     def predict_state(self, threat: ThreatAlert, t_offset: float) -> KinematicState:
-        # Sequential cooperative planning (2026-05-01): jeśli `threat` ma
-        # przypisaną `trajectory` (np. evasion spline planowanego wcześniej
-        # drona w tym samym ticku), używamy jej dokładnie zamiast liniowej
-        # ekstrapolacji. To jest kluczowe dla cooperative avoidance — bez tego
-        # drone B (planowany później) traktuje drone A jako "lecący prosto"
-        # mimo że A wykonuje już skręt uniku.
+        # Sequential cooperative planning: jeśli `threat` ma przypisaną
+        # `trajectory` (np. evasion spline drona planowanego wcześniej w tym
+        # samym ticku), używamy jej dokładnie zamiast liniowej ekstrapolacji.
+        # Bez tego drone B (planowany później) traktowałby drone A jako
+        # „lecący prosto" mimo że A wykonuje już skręt uniku.
         traj = threat.trajectory
         if traj is not None and hasattr(traj, "get_state_at_time"):
             t_local = threat.trajectory_start_offset + float(t_offset)

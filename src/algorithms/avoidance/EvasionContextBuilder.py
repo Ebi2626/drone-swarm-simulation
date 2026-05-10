@@ -5,9 +5,6 @@ from src.algorithms.avoidance.ThreatAnalyzer.ThreatAnalyzer import KinematicStat
 from src.trajectory.BSplineTrajectory import BSplineTrajectory
 from src.algorithms.avoidance.BaseAvoidance import EvasionContext
 
-# --------------------------------------------------------------------------- #
-# KERNELS NUMBA                                                                #
-# --------------------------------------------------------------------------- #
 
 @njit(cache=True, fastmath=True)
 def jit_compute_flyby_arc(drone_pos_x: float, drone_pos_y: float, drone_pos_z: float,
@@ -125,7 +122,6 @@ def jit_build_dynamic_search_space(current_pos: np.ndarray, rejoin_point: np.nda
 
     return bbox_min, bbox_max
 
-# --------------------------------------------------------------------------- #
 
 class EvasionContextBuilder:
     """
@@ -146,11 +142,11 @@ class EvasionContextBuilder:
         self.lateral_margin = lateral_margin
         self.margin_velocity_gain = margin_velocity_gain
         self.rejoin_flyby_safety_m = rejoin_flyby_safety_m
-        # Hard cap na lateralną odchyłkę BBOX-u uniku od drona (Bug #2 plan,
-        # Krok 3c). Bez tego BBOX rośnie z VO + obs_future, AStar wybiera
-        # waypointy odlegające o dziesiątki metrów → ostre zakrzywienia.
-        # Cap działa w osi lateralnej (XY ⊥ forward) i osi Z. Forward NIE
-        # jest cap'owany — drone musi sięgnąć rejoin pointu. `<= 0` wyłącza.
+        # Hard cap na lateralną odchyłkę BBOX-u uniku od drona. Bez tego BBOX
+        # rośnie z VO + obs_future, optimizer wybiera waypointy odlegające
+        # o dziesiątki metrów → ostre zakrzywienia. Cap działa w osi lateralnej
+        # (XY ⊥ forward) i osi Z. Forward NIE jest cap'owany — drone musi
+        # sięgnąć rejoin pointu. `<= 0` wyłącza.
         self.lateral_max_offset_m = float(lateral_max_offset_m)
 
     def build(self,
@@ -224,7 +220,7 @@ class EvasionContextBuilder:
             np.asarray(world_max, dtype=np.float64)
         )
 
-        # Hard cap na lateralną odchyłkę BBOX-u (Bug #2 Krok 3c). Cap'ujemy:
+        # Hard cap na lateralną odchyłkę BBOX-u. Cap'ujemy:
         #  - oś Z (zawsze prostopadła do forward),
         #  - dominującą oś XY lateralnej (X jeśli |lateral_xy.x| > |lateral_xy.y|,
         #    inaczej Y) — przybliżenie axis-aligned bbox-u do pełnej rotacji.
@@ -242,8 +238,8 @@ class EvasionContextBuilder:
             lat_axis = 0 if abs(lateral_xy[0]) > abs(lateral_xy[1]) else 1
             search_min[lat_axis] = max(search_min[lat_axis], cur[lat_axis] - cap)
             search_max[lat_axis] = min(search_max[lat_axis], cur[lat_axis] + cap)
-            # Re-inkluzja kluczowych punktów (rejoin/threat) z marginesem 1m,
-            # żeby AStar miał gdzie zakończyć ścieżkę.
+            # Re-inkluzja kluczowych punktów (drone/rejoin) z marginesem 1m,
+            # żeby optimizer miał gdzie zakończyć ścieżkę.
             for keep_pt in (cur, rejoin_point):
                 search_min = np.minimum(search_min, keep_pt - 1.0)
                 search_max = np.maximum(search_max, keep_pt + 1.0)

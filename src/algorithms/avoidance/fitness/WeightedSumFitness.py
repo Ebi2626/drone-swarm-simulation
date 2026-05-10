@@ -1,6 +1,6 @@
-"""IFitnessEvaluator dla optymalizatorów ewolucyjnych (Faza 2).
+"""IFitnessEvaluator dla optymalizatorów ewolucyjnych w fazie online avoidance.
 
-Skalarna ważona suma 4 składowych zgodnie ze specyfikacją:
+Skalarna ważona suma 4 składowych:
     cost = w_safety · C_safety + w_energy · C_energy
          + w_jerk · C_jerk + w_symmetry · C_symmetry
 
@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 
 class WeightedSumFitness(IFitnessEvaluator):
     """Skalarna ważona suma — `IFitnessEvaluator.evaluate` dla optymalizatorów
-    ewolucyjnych. AStar tej klasy NIE używa (`axis_score` zaimplementowane
-    minimalnie dla zgodności kontraktu z `IPathOptimizer._pick_preferred_axis`).
+    ewolucyjnych. `axis_score` zaimplementowane minimalnie dla zgodności
+    kontraktu z `IPathOptimizer._pick_preferred_axis`.
     """
 
     def __init__(
@@ -55,9 +55,8 @@ class WeightedSumFitness(IFitnessEvaluator):
         w_symmetry: float = 1.0,
         safe_clearance_m: float = 1.5,
         n_samples: int = 32,
-        # Parametry AxisBiasFitness-style — używane TYLKO przez `axis_score`
-        # (gdyby evolutionary fitness był wymieniony jako axis-picker). W
-        # praktyce rzadko aktywowane — domyślne wartości jak w AxisBiasFitness.
+        # Parametry AxisBiasFitness-style używane TYLKO przez `axis_score`
+        # (gdy evolutionary fitness wpięty jako axis-picker — rzadkie).
         prefer_axis_order: list[str] | tuple[str, ...] = ("right", "left", "up", "down"),
         bias_preferred: float = 1.0,
         bias_perpendicular: float = 1.4,
@@ -81,8 +80,6 @@ class WeightedSumFitness(IFitnessEvaluator):
             a: (n - i) / (10.0 * n) for i, a in enumerate(self.prefer_axis_order)
         }
 
-    # -------------------------- Evolutionary --------------------------------- #
-
     def evaluate(
         self,
         candidate: "BSplineTrajectory | None",
@@ -97,8 +94,6 @@ class WeightedSumFitness(IFitnessEvaluator):
         :param predictor: `IObstaclePredictor` do estymacji pozycji przeszkody w czasie.
         """
         components = self.evaluate_components(candidate, context, predictor)
-        # Ekstremalna kara dla niezdekodowalnych — `evaluate_components` zwraca
-        # wektor sentinelowy (1e9, 1e9, 1e9, 1e9), więc skalar też jest ekstremalny.
         return float(
             self.w_safety * components[0]
             + self.w_energy * components[1]
@@ -135,8 +130,8 @@ class WeightedSumFitness(IFitnessEvaluator):
             duration = float(candidate.total_duration)
             t_samples = u * duration
 
-            # Multi-threat c_safety: primary threat + secondary_threats (other drones).
-            # Bez secondary_threats (back-compat) liczymy tylko primary.
+            # Multi-threat c_safety: primary threat + secondary_threats (inne
+            # drony). Pusta lista secondary ⇒ liczymy tylko primary.
             all_threats = [context.threat] + list(getattr(context, "secondary_threats", []))
             c_safety = 0.0
             for threat in all_threats:
@@ -180,36 +175,30 @@ class WeightedSumFitness(IFitnessEvaluator):
             return 0.0
 
         start = np.asarray(context.drone_state.position, dtype=np.float64)
-        # Centrum manewru — punkty względem startu.
-        rel = pos - start[None, :]  # (N, 3)
+        rel = pos - start[None, :]
 
-        # Definicje osi w lokalnym frame:
-        # - "up" / "down": Z-axis
-        # - "right" / "left": kierunek prostopadły do v_drone w XY (zgodny z AStar)
+        # Lokalne osie: up/down = Z; right/left = perpendicular do v_drone w XY.
         v = np.asarray(context.drone_state.velocity, dtype=np.float64)
         v_xy = np.array([v[0], v[1], 0.0])
         v_xy_norm = float(np.linalg.norm(v_xy))
         if v_xy_norm > 1e-6:
             forward = v_xy / v_xy_norm
-            lateral = np.array([-forward[1], forward[0], 0.0])  # +90° rotation in XY
+            lateral = np.array([-forward[1], forward[0], 0.0])  # +90° CCW = "right"
         else:
             lateral = np.array([0.0, 1.0, 0.0])
 
         if hint in ("up", "down"):
             sign = 1.0 if hint == "up" else -1.0
-            # Projekcja na Z; karzemy projekcję o przeciwnym znaku do hintu.
-            proj = rel[:, 2] * sign  # >0 zgodne z hintem, <0 przeciwne
+            proj = rel[:, 2] * sign
         elif hint in ("right", "left"):
             sign = 1.0 if hint == "right" else -1.0
             proj = (rel @ lateral) * sign
         else:
             return 0.0
 
-        # Kara = suma kwadratów części „przeciwnej" do hintu.
+        # Kara = Σ|projekcji przeciwnej do hintu|² (positive proj = zgodne z hintem).
         wrong_side = np.maximum(0.0, -proj)
         return float(np.sum(wrong_side ** 2))
-
-    # -------------------------- A* axis_score (cooperative kontrakt) -------- #
 
     def order_score(self, axis_name: str) -> float:
         return self._order_scores.get(axis_name, 0.0)
@@ -222,10 +211,9 @@ class WeightedSumFitness(IFitnessEvaluator):
         obs_vel_hat: NDArray[np.float64] | None,
         order_score: float,
     ) -> float:
-        """Cooperative axis-score (analogicznie jak `AxisBiasFitness`) — używane
-        WYŁĄCZNIE jeśli `WeightedSumFitness` byłby wpięty jako axis-picker do
-        `AStarOptimizer` (mało prawdopodobne; AStar w yaml-ach Fazy 2 zwykle
-        ma wpięty `AxisBiasFitness`). Zachowane dla type-safety kontraktu.
+        """Cooperative axis-score (analog `AxisBiasFitness`). Używane tylko
+        jeśli `WeightedSumFitness` byłby wpięty jako axis-picker — w praktyce
+        rzadko, ale zachowane dla type-safety kontraktu `IFitnessEvaluator`.
         """
         axis_hat = axis_dir / (np.linalg.norm(axis_dir) + 1e-9)
         if obs_vel_hat is not None:

@@ -1,9 +1,9 @@
 """AxisChooser — deterministyczna heurystyka wyboru osi uniku.
 
-Refactor 2026-05-02 (Single-Arc Deflection): hierarchical decomposition problemu.
-Pytanie "którędy uciec?" (dyskretne: right/left/up/down) jest oddzielone od
-"jak daleko?" (ciągłe: magnitude). Dyskretną decyzję podejmujemy analitycznie
-przed search'em — nie ma sensu eksplorować jej przez evolutionary algos.
+Hierarchical decomposition: pytanie „którędy uciec?" (dyskretne: right/left/
+up/down) jest oddzielone od „jak daleko?" (ciągłe: magnitude). Dyskretną
+decyzję podejmujemy analitycznie przed search'em — eksploracja jej przez
+evolutionary algos byłaby nieefektywna.
 
 Score per oś:
     score = w_clearance * clearance_norm
@@ -88,7 +88,6 @@ class AxisChooser:
         :return: `(axis_name, axis_unit_vector_3d)`. `axis_unit_vector_3d` jest
             znormalizowany do długości 1.0 (zawsze).
         """
-        # Compute forward (drone heading XY) i lateral_xy (perpendicular).
         v = np.asarray(context.drone_state.velocity, dtype=np.float64)
         v_xy = np.array([v[0], v[1], 0.0], dtype=np.float64)
         v_xy_norm = float(np.linalg.norm(v_xy))
@@ -96,7 +95,7 @@ class AxisChooser:
             forward_xy = v_xy / v_xy_norm
         else:
             forward_xy = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        # +90° rotation in XY plane (matches sign convention of dawnego A*).
+        # +90° CCW rotation in XY plane → „right" relative to drone heading.
         lateral_xy = np.array(
             [-forward_xy[1], forward_xy[0], 0.0], dtype=np.float64
         )
@@ -108,7 +107,6 @@ class AxisChooser:
             "down": np.array([0.0, 0.0, -1.0], dtype=np.float64),
         }
 
-        # Threat velocity unit (None jeśli zagrożenie stoi/quasi-stoi).
         t_vel = np.asarray(
             context.threat.obstacle_state.velocity, dtype=np.float64
         )
@@ -122,7 +120,6 @@ class AxisChooser:
         bbox_max = np.asarray(context.search_space_max, dtype=np.float64)
         secondary_threats = list(getattr(context, "secondary_threats", []))
 
-        # Score every axis.
         clearances: dict[str, float] = {}
         scores_raw: dict[str, dict[str, float]] = {}
         for name in _AXES_NAMES:
@@ -158,7 +155,6 @@ class AxisChooser:
         best_name = max(scores.keys(), key=lambda n: scores[n])
         best_score = scores[best_name]
 
-        # Sticky hint (anti-flip-flop).
         hint = getattr(context, "preferred_axis_hint", None)
         if (
             hint in scores

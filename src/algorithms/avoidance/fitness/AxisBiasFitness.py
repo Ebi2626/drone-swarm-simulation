@@ -7,23 +7,14 @@ from src.algorithms.avoidance.interfaces import IFitnessEvaluator
 
 
 class AxisBiasFitness(IFitnessEvaluator):
-    """Heurystyka wyboru osi uniku — używana wyłącznie przez `AStarOptimizer`.
-
-    Heurystyka wyboru osi uniku (right/left/up/down) na podstawie:
+    """Heurystyka wyboru osi uniku (right/left/up/down) na podstawie:
       - dostępnej przestrzeni wzdłuż osi (`space`),
       - anty-prędkościowego bias z progiem szumu (`anti_threshold`),
       - tie-breaku po `prefer_axis_order`.
 
-    Sticky-axis (utrzymanie osi z poprzedniego planu) jest realizowany
-    przez `AStarOptimizer._pick_preferred_axis` — to fitness wybierany
-    jest TYLKO gdy nie ma poprzedniego hintu lub jest niewykonalny.
-
-    `evaluate(spline, …)` celowo zostawione jako `NotImplementedError` z
-    klasy bazowej — `AStarOptimizer` nie potrzebuje skalarnego fitness pełnej
-    trajektorii (jego heurystyka kosztu jest wbudowana w bias gridowy w
-    `UAV3DGridSearch.distance_between`). Ewolucyjne optymalizatory (Faza 2)
-    dostaną `WeightedSumFitness` jako osobną klasę z pełną implementacją
-    `evaluate()`.
+    Skalarny `evaluate(spline, …)` z bazowej `IFitnessEvaluator` celowo
+    zostaje `NotImplementedError` — ten fitness wybiera tylko oś, nie ocenia
+    pełnej trajektorii. Pełną ocenę robi `WeightedSumFitness`.
     """
 
     def __init__(
@@ -40,9 +31,9 @@ class AxisBiasFitness(IFitnessEvaluator):
         self.bias_perpendicular = float(bias_perpendicular)
         self.bias_oppose = float(bias_oppose)
         self.axis_anti_obsvel_gain = float(axis_anti_obsvel_gain)
-        # Próg szumu w składowej anty-obs_vel — patrz regresja Fazy 6 (incydent
-        # „dron 0 → ziemia" z 2026-04-22, test:
-        # `test_pick_preferred_axis_noise_level_obs_vz_does_not_override_prefer_axis_order`).
+        # Próg szumu w składowej anty-obs_vel — bez niego mikro-fluktuacje
+        # `obs_vz` nadpisują `prefer_axis_order` i wpychają drona w ziemię
+        # (test: `test_pick_preferred_axis_noise_level_obs_vz_does_not_override_prefer_axis_order`).
         self.anti_threshold = float(anti_threshold)
 
         # Tie-break score per oś (0…0.1) — preferowana oś z `prefer_axis_order`

@@ -1,13 +1,12 @@
 """Numba-jitted kernele wspólne dla ścieżki avoidance.
 
-Wszystkie funkcje są bezstanowe, deterministyczne, `@njit(cache=True, fastmath=True)`.
-Używane przez `AStarOptimizer` (fallback path, space-in-direction) i `BSplineSmoother`
-(DP simplification, tangent leads, uniform resampling).
+Wszystkie funkcje są bezstanowe, deterministyczne,
+`@njit(cache=True, fastmath=True)`.
 
 Kontrakt:
-  - `jit_douglas_peucker`: redukcja gęstości waypointów A* (preserves endpoints).
-  - `jit_resample_uniform`: równomierne resampling po długości łuku do `n` punktów.
-  - `jit_fallback_path`: 5-waypointowa awaryjna trajektoria objazdu (gdy A* zawiódł).
+  - `jit_douglas_peucker`: redukcja gęstości waypointów (preserves endpoints).
+  - `jit_resample_uniform`: równomierne resampling po długości łuku do `n` pkt.
+  - `jit_fallback_path`: 5-waypointowa awaryjna trajektoria objazdu.
   - `jit_insert_tangent_leads`: lead-in / lead-out styczne do v_drone i base-spline.
   - `jit_space_in_xy_dir`: dystans od pos do najbliższej ściany BBOX-u w XY.
 """

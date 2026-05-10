@@ -18,7 +18,7 @@ Adaptacje vs paper:
     wokół 0).
   - Brak smell-space transform (Sec. 3) — operujemy bezpośrednio na YZ-deltach
     BSplineYZGenes. Skalowanie kroku rekompensuje brak smell-to-physical mappingu.
-  - Threshold ADAPTACYJNY per generacja (zob. core_msffoa analog 2026-05-09):
+  - Threshold ADAPTACYJNY per generacja (analog jak w `core_msffoa`):
     `threshold = best_feasible_swarm_fit × (1 + threshold_ratio)`. Paper podaje
     stały próg, ale `WeightedSumFitness` z sentinel 1e9 dla niezdekodowalnych
     wprowadza nieciągłość rzędu 1e9 między infeasible a feasible. Statyczny
@@ -134,9 +134,8 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             K = int(path_repr.gene_dim(ctx))
             assert lb.shape == (K,) and ub.shape == (K,), "gene_bounds shape mismatch"
 
-            # === Inicjalizacja populacji (ceteris paribus) ==========================
-            # Jeśli `GenericOptimizingAvoidance` wygenerował wspólną populację,
-            # używamy jej bezpośrednio. Fallback: wewnętrzna U(lb, ub).
+            # Ceteris paribus: gdy GenericOptimizingAvoidance wygenerował
+            # wspólną populację, używamy jej; inaczej fallback U(lb, ub).
             if (
                 problem.initial_population is not None
                 and problem.initial_population.shape == (self.pop_size, K)
@@ -158,8 +157,8 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             global_best_fit = float(swarm_best_fit[global_best_idx])
             global_best_pos = swarm_best_pos[global_best_idx].copy()
 
-            # Convergence trace: po każdej generacji append'ujemy global_best_fit
-            # (Krok 3.3b plan.md). Index 0 = stan po inicjalizacji (pre-loop).
+            # Convergence trace: index 0 = stan po inicjalizacji (pre-loop),
+            # kolejne wpisy = global_best_fit po każdej generacji.
             convergence_trace: list[float] = [global_best_fit]
 
             # Threshold ADAPTACYJNY — `best_feasible × (1 + threshold_ratio)`.
@@ -181,9 +180,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
 
             generations_completed = 0
 
-            # === Pętla generacji =================================================
             for gen in range(self.max_generations):
-                # COOPERATIVE BUDGET CHECK
                 budget.check_or_raise()
 
                 # ---- Phase 1: search around swarm_best (Eq. 7-8) ----
@@ -249,10 +246,9 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                 generations_completed = gen + 1
                 convergence_trace.append(global_best_fit)
 
-            # === Wynik ===========================================================
-            # Filtr sentinel-cost (regression fix 2026-05-02): jeśli global_best_fit
-            # > sentinel threshold → wszystkie candidates infeasible (decode_genes
-            # zwracał None), wracamy `no_feasible` zamiast próbować decode best.
+            # Filtr sentinel-cost: gdy global_best_fit > sentinel, wszystkie
+            # candidates były infeasible (decode_genes → None) — wracamy
+            # `no_feasible` zamiast próbować decode'ować best.
             if global_best_fit > self._SENTINEL_THRESHOLD:
                 return OptimizationResult(
                     waypoints=None,
@@ -278,7 +274,6 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     extra={"reason": "best_decode_returned_none"},
                 )
 
-            # Common-contract `extra` dict (Krok 4 fairness 2026-05-03).
             elapsed = time.perf_counter() - t_start
             return OptimizationResult(
                 waypoints=np.asarray(best_spline.waypoints, dtype=np.float64),
@@ -303,10 +298,10 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                 f"MSFFOAOnlineOptimizer: d{ctx.drone_id} — BudgetExceeded "
                 f"po {elapsed:.3f}s ({e})"
             )
-            # Best-so-far recovery (regression fix 2026-05-03): zwracamy
-            # `status="ok"` jeśli mamy feasible best — `GenericOptimizingAvoidance`
-            # odrzuca wszystko poza "ok", więc bez tego poprawne best-so-far
-            # waypoints były marnowane. Sentinel filter odrzuca infeasible.
+            # Best-so-far recovery: zwracamy `status="ok"` gdy mamy feasible
+            # best — `GenericOptimizingAvoidance` odrzuca wszystko poza "ok",
+            # bez tego poprawne best-so-far waypoints byłyby marnowane przy
+            # timeoutcie. Sentinel filter odrzuca infeasible.
             try:
                 if global_best_fit < self._SENTINEL_THRESHOLD:
                     best_spline = path_repr.decode_genes(global_best_pos, ctx)

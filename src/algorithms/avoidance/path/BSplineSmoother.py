@@ -28,8 +28,7 @@ class BSplineSmoother(IPathRepresentation):
       3. Klamp Z do `[world_min_z, world_max_z]`.
       4. Dla osi lateralnych (right/left) liniowa interpolacja Z między skrajami
          — zapobiega dziedziczeniu Z-oscylacji z gridu A* przy `constant_speed=True`
-         (regresja Fazy 8.1 — incydent „drone 2 z=6.5→0.12 m w 1 s podczas
-         axis=right" w eksperymencie 21-24-21, test:
+         (drone 2 spadał z=6.5→0.12 m w 1 s podczas axis=right; test:
          `test_lateral_evasion_forces_horizontal_z_profile_in_smoother`).
       5. Wstawienie lead-in / lead-out (styczne do v_drone na starcie i do
          tangensu base_spline na rejoin) — gładki powrót do trasy bazowej.
@@ -165,7 +164,7 @@ class BSplineSmoother(IPathRepresentation):
                 evasion_spline = spline_try
                 final_cos = cos_theta
             if cos_theta >= cos_threshold:
-                break  # wystarczająco dobry — przerywamy
+                break
 
         if evasion_spline is None:
             logger.warning(

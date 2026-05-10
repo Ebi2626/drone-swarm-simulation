@@ -5,16 +5,12 @@ from numba import njit
 
 from src.trajectory.BSplineTrajectory import BSplineTrajectory
 
-# --------------------------------------------------------------------------- #
-# KERNELS NUMBA (Prekompilowane jądra matematyczne)                           #
-# --------------------------------------------------------------------------- #
 
 @njit(cache=True, fastmath=True)
 def jit_evaluate_collision_risk(cx: float, cy: float, cz: float,
                                 ox: float, oy: float, oz: float,
                                 ovx: float, ovy: float, ovz: float,
                                 time_offset: float) -> float:
-    # Błyskawiczna dystans metryki Euklidesowej bez narzutu np.linalg.norm
     fx = ox + ovx * time_offset
     fy = oy + ovy * time_offset
     fz = oz + ovz * time_offset
@@ -59,7 +55,6 @@ def jit_analyze_hits(distances: np.ndarray,
         dy = hy - drone_pos[1]
         dz = hz - drone_pos[2]
 
-        # Skalarny iloczyn skalarny / dystans
         closing_speed = (rvx * dx + rvy * dy + rvz * dz) / dist
 
         if closing_speed > 0.1:
@@ -74,9 +69,6 @@ def jit_analyze_hits(distances: np.ndarray,
 
     return best_idx, best_ttc, best_rvx, best_rvy, best_rvz
 
-# --------------------------------------------------------------------------- #
-# KLASY DOMENOWE                                                              #
-# --------------------------------------------------------------------------- #
 
 @dataclass(slots=True)
 class KinematicState:
@@ -91,14 +83,13 @@ class ThreatAlert:
     distance: float
     time_to_collision: float
     relative_velocity: np.ndarray
-    # Sequential cooperative planning (2026-05-01): jeśli zagrożenie to znany
-    # dron z planowaną trajektorią (base lub evasion spline), predyktor może
-    # wykorzystać dokładną ścieżkę zamiast liniowej ekstrapolacji prędkości.
-    # `trajectory` MUSI mieć metodę `get_state_at_time(t) -> (pos, vel)` —
-    # `BSplineTrajectory` i `NumbaTrajectoryProfile` spełniają kontrakt.
-    # `trajectory_start_offset` to bieżący czas-na-splajnie celu (offset od
-    # początku jego trajektorii). Predykcja punktu w czasie t to:
-    # `trajectory.get_state_at_time(trajectory_start_offset + t)`.
+    # Sequential cooperative planning: gdy zagrożenie to znany dron z
+    # planowaną trajektorią (base lub evasion spline), predyktor używa
+    # dokładnej ścieżki zamiast liniowej ekstrapolacji prędkości.
+    # Kontrakt `trajectory`: metoda `get_state_at_time(t) -> (pos, vel)` —
+    # spełniają ją `BSplineTrajectory` i `NumbaTrajectoryProfile`.
+    # `trajectory_start_offset` = bieżący czas-na-splajnie celu; predykcja
+    # punktu w czasie t to `trajectory.get_state_at_time(start_offset + t)`.
     trajectory: Optional[object] = None
     trajectory_start_offset: float = 0.0
 
@@ -119,12 +110,11 @@ class EvasionContext:
     # Planner preferuje tę oś, o ile nadal ma wystarczającą przestrzeń,
     # eliminując flip-flopping up↔right↔left w korytarzu z wieloma przeszkodami.
     preferred_axis_hint: Optional[str] = None
-    # Multi-threat awareness (regression fix 2026-05-01 #3): secondary threats
-    # to inne drony / obiekty w zasięgu które NIE są primary threat ale ich
-    # przewidziana pozycja musi być uwzględniona w fitness c_safety. Bez tego
-    # optymalizator omijał drone B i wpadał w drone C (34/80 kolizji w eksp.
-    # użytkownika 16 runs). Lista MOŻE BYĆ pusta (back-compat) — wtedy fitness
-    # uwzględnia tylko primary threat.
+    # Multi-threat awareness: inne drony / obiekty w zasięgu które NIE są
+    # primary threat ale ich przewidziana pozycja musi wejść do fitness
+    # `c_safety`. Bez tego optymalizator omijał drone B i wpadał w drone C
+    # (regresja kolizji obserwowana w wieloagentowych runach urban).
+    # Pusta lista (default) ⇒ fitness uwzględnia tylko primary threat.
     secondary_threats: list[ThreatAlert] = field(default_factory=list)
 
     def evaluate_collision_risk(self, candidate_pos: np.ndarray, time_offset: float) -> float:
@@ -147,12 +137,11 @@ class ThreatAnalyzer:
         self.critical_dist = critical_dist
 
     def analyze(self, hits: list, drone_state: KinematicState) -> Optional[ThreatAlert]:
-        if not hits: 
+        if not hits:
             return None
-        
-        # Ekstrakcja danych obiektowych do ciągłych tablic C/NumPy.
-        # Takie liniowe przepisanie jest wielokrotnie szybsze od 
-        # wywoływania metod numpy i tworzenia obiektów wewnątrz pętli.
+
+        # Linearne przepisanie do ciągłych tablic C/NumPy jest wielokrotnie
+        # szybsze niż wywoływanie metod numpy w pętli na obiektach Pythona.
         n = len(hits)
         distances = np.empty(n, dtype=np.float64)
         positions = np.empty((n, 3), dtype=np.float64)

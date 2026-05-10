@@ -1,12 +1,11 @@
-"""SingleArcDeflection — minimal-DOF path representation dla evolutionary avoidance.
+"""SingleArcDeflection — minimal-DOF path representation dla evolutionary
+avoidance. Geometryczne wymuszenie single-hump shape: drone wybiera JEDNĄ oś
+(przez `AxisChooser`), JEDEN punkt peak deflection (gen `magnitude`), JEDNĄ
+pozycję wzdłuż trasy (gen `peak_position`). Zigzag, multi-bend, kombinacje
+Y+Z są **niemożliwe geometrycznie**.
 
-Refactor 2026-05-02 (zastępuje `BSplineYZGenes`). Geometryczne wymuszenie
-single-hump shape: drone wybiera JEDNĄ oś (przez `AxisChooser`), JEDEN punkt
-peak deflection (gen `magnitude`), JEDNĄ pozycję wzdłuż trasy (gen `peak_position`).
-Zigzag, multi-bend, kombinacje Y+Z są **niemożliwe geometrycznie**.
-
-Search space: gene_dim = 2 (zamiast 10 z BSplineYZGenes):
-    magnitude     ∈ [magnitude_min_m, magnitude_max_m]   [m]
+Search space: gene_dim = 2:
+    magnitude     ∈ [magnitude_min_m, magnitude_max_m]    [m]
     peak_position ∈ [peak_position_min, peak_position_max] [u along start→rejoin]
 
 Mapowanie genów → spline (5 waypoints):
@@ -14,16 +13,15 @@ Mapowanie genów → spline (5 waypoints):
     2. start  = context.drone_state.position
     3. rejoin = context.rejoin_point
     4. peak   = lerp(start, rejoin, peak_position) + magnitude × axis_unit
-    5. q1     = lerp(start, peak, 0.5)   ← pomocnicze
-    6. q3     = lerp(peak, rejoin, 0.5)  ← pomocnicze
-    7. waypoints = [start, q1, peak, q3, rejoin]   (5 pkt — wystarczy dla cubic spline)
-    8. floor/ceiling clamp na peak.z
-    9. BSplineTrajectory(constant_speed=True, decel_at_end=True)
-   10. min_applied_cruise_ratio filter (regression fix 2026-05-01)
+    5. q1, q3 = punkty pomocnicze przez lerp 0.5 między [start, peak] / [peak, rejoin]
+    6. waypoints = [start, q1, peak, q3, rejoin]
+    7. floor/ceiling clamp na peak.z
+    8. BSplineTrajectory(constant_speed=True, decel_at_end=True)
+    9. min_applied_cruise_ratio filter (drop severely clamped splines)
 
-Reference: similar prioritized-axis decomposition w klasycznych collision
-avoidance papers (Fiorini-Shiller VO 1998), z analytical trajectory shape
-zamiast full optimization (Mehdi et al. 2017 "Reactive Avoidance for UAVs").
+Reference: prioritized-axis decomposition w klasycznych collision avoidance
+papers (Fiorini-Shiller VO 1998), z analytical trajectory shape zamiast
+full optimization (Mehdi et al. 2017 "Reactive Avoidance for UAVs").
 """
 from __future__ import annotations
 
@@ -87,8 +85,6 @@ class SingleArcDeflection(IPathRepresentation):
         self.ceiling_safe_margin = float(ceiling_safe_margin_m)
         self.min_applied_cruise_ratio = float(min_applied_cruise_ratio)
 
-    # ---------------------- Evolutionary contract ---------------------- #
-
     def gene_dim(self, context: "EvasionContext") -> int:
         return 2
 
@@ -141,8 +137,6 @@ class SingleArcDeflection(IPathRepresentation):
 
         return self._build_spline(waypoints, context)
 
-    # ------------------- A*-style contract (legacy) ------------------- #
-
     def waypoints_to_spline(
         self,
         waypoints: NDArray[np.float64],
@@ -161,8 +155,6 @@ class SingleArcDeflection(IPathRepresentation):
             )
             return None
         return self._build_spline(np.asarray(waypoints, dtype=np.float64), context)
-
-    # --------------------------- helpers ------------------------------ #
 
     def _build_spline(
         self,
@@ -189,7 +181,9 @@ class SingleArcDeflection(IPathRepresentation):
             )
             return None
 
-        # Filter kinematycznej wykonalności (regression fix 2026-05-01 #2).
+        # Filter kinematycznej wykonalności: odrzuć spline'y które po
+        # kinematic clamping mają applied_cruise znacznie mniejszą niż
+        # requested — drone i tak nie nadąży za nimi w kontrolerze.
         clamp = getattr(spline, "kinematic_clamp", None)
         if clamp is not None:
             req = float(clamp.get("requested_cruise", evasion_cruise))

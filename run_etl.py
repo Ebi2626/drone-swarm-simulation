@@ -29,11 +29,9 @@ def main(experiment_dir: str) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # 1. Agregacja danych
     agg = ExperimentAggregator()
     agg.aggregate(str(path))
 
-    # 2. Analiza danych
     anl = ExperimentAnalyzer()
     anl.analyze(str(path))
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""
-Subprocess-based experiment runner — workaround dla H1'' (plan.md, Krok 5c).
+"""Subprocess-based experiment runner — workaround dla globalnego stanu PyBullet.
 
 Multi-run w jednym procesie Python (Hydra multirun + joblib, niezależnie od
-backend / n_jobs / `reuse=False`) prowadzi do patologii "drony stoją
+backend / n_jobs / `reuse=False`) prowadzi do patologii „drony stoją
 w PyBullet" w drugim i kolejnych jobach. Force-cleanup `p.resetSimulation` /
 `p.disconnect` / `gc.collect` nie pomaga — globalny stan akumuluje się
 w libbullet C-level lub innym module zewnętrznym (gym-pybullet-drones,
@@ -70,7 +69,6 @@ def run_one_job(args: Dict[str, str]) -> tuple[Dict[str, str], int]:
         "hydra.mode=RUN",
         f"hydra.run.dir=results/{exp_id}/{subdir}",
     ]
-    # extra_overrides przekazane przez --override z CLI
     cmd.extend(args.get("extra_overrides", []))
 
     proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT))

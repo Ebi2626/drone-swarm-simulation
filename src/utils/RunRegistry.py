@@ -57,12 +57,11 @@ class RunRegistry:
         if row is None:
             # Sygnał diagnostyczny: job-key z main.py nie pasuje do żadnego
             # wpisu PENDING. Najczęstsza przyczyna — niespójność między
-            # `prepare_experiment.populate(...)` a `_get_registry_job_key`,
+            # `prepare_experiment.populate(...)` a `_get_registry_job_key`
             # albo wczytanie eksperymentu z innym `experiment_meta.id`.
             # Job się uruchomi (zachowanie wsteczne), a UPSERT w mark_started
-            # utworzy wiersz — ale brak ostrzeżenia byłby przyczyną „registry
-            # niespójny z parquet" (patrz plan.md, Krok 6, dawna patologia
-            # exp_20260426_b9b56922_complex_test).
+            # utworzy wiersz — ale brak ostrzeżenia byłby przyczyną
+            # „registry niespójny z parquet".
             logger.warning(
                 f"[RunRegistry] Brak wpisu dla klucza "
                 f"(optimizer={optimizer!r}, environment={environment!r}, "
@@ -126,8 +125,8 @@ class RunRegistry:
         nowy wiersz z domyślnymi NULL-ami dla pominiętych pól.
 
         Niezbędne gdy `populate()` nie został wywołany albo job-key z main.py
-        nie pasuje do żadnego wpisu PENDING (poprzednia wersja używała UPDATE,
-        który był no-op i registry zostawał pusty — patrz plan.md, Krok 6).
+        nie pasuje do żadnego wpisu PENDING (UPDATE-only fallback skutkował
+        no-op i pustym registry).
         """
         # INSERT zawiera 4 unique cols + status + przekazane pola.
         insert_cols = ["optimizer", "environment", "avoidance", "seed", "status"] + list(fields.keys())

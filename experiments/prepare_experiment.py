@@ -341,10 +341,9 @@ hydra:
     n_jobs: 6
     # backend `loky` (zamiast `multiprocessing`) używa fork-and-exec
     # (czysty Python interpreter per-worker), co eliminuje współdzielenie
-    # globalnego stanu C++ PyBullet między workerami. Patologia "drony stoją
-    # w PyBullet mimo poprawnie wygenerowanej trajektorii" (plan.md, Krok 2,
-    # H1 potwierdzona reprodukcją n_jobs=1) była efektem fork-share state z
-    # `backend: multiprocessing`.
+    # globalnego stanu C++ PyBullet między workerami. `multiprocessing` z
+    # default fork-share state powodował patologię „drony stoją w PyBullet
+    # mimo poprawnej trajektorii" w drugim+ jobie multirun.
     backend: loky
     prefer: processes
   sweeper:
@@ -441,12 +440,11 @@ def main():
     else:
         total_runs = runs_count * len(job_matrix) * len(avoid_names)
 
-    # --- Sweep params dla RunRegistry: generowane DOKŁADNIE z definicji
-    # eksperymentu YAML, nie z hardcoded list. Liczba wpisów PENDING musi się
-    # zgadzać z liczbą wystartowanych jobów, inaczej `mark_started/completed`
-    # (UPDATE w RunRegistry) trafią w nieistniejące wiersze i registry pozostanie
-    # niespójny z parquet-em. Patrz plan.md, Krok 6 — bug z 0 wpisami w
-    # results/exp_20260426_b9b56922_complex_test/registry.db.
+    # Sweep params dla RunRegistry generowane DOKŁADNIE z definicji eksperymentu
+    # (nie z hardcoded list) — liczba wpisów PENDING musi się zgadzać z liczbą
+    # wystartowanych jobów, inaczej `mark_started/completed` (UPDATE w
+    # RunRegistry) trafiają w nieistniejące wiersze i registry rozjeżdża się
+    # z parquetem.
     runs = int(definition.get("runs_per_configuration", 1))
 
     # Bazowe nazwy optymalizatorów — spójne ze sposobem, w jaki

@@ -47,10 +47,6 @@ class SwarmBaseWorld(BaseAviary):
             initial_rpys=initial_rpys,
             **filtered_kwargs
         )
-    # ------------------------------------------------------------------ #
-    # Reset & render                                                     #
-    # ------------------------------------------------------------------ #
-
     def reset(self, seed=None, options=None):
         print("[DEBUG]: SwarmBaseWorld Reset()")
         obs, info = super().reset(seed=seed, options=options)
@@ -68,10 +64,6 @@ class SwarmBaseWorld(BaseAviary):
         print("[DEBUG]: SwarmBaseWorld finalize_render()")
         if self.GUI:
             p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
-
-    # ------------------------------------------------------------------ #
-    # Helpers: role / indexing                                           #
-    # ------------------------------------------------------------------ #
 
     def get_primary_agent_indices(self):
         return list(range(self.primary_num_drones))
@@ -99,10 +91,6 @@ class SwarmBaseWorld(BaseAviary):
         if body_id == self.ceiling_body_id:
             return "ceiling"
         return "static_obstacle"
-
-    # ------------------------------------------------------------------ #
-    # Building world geometry                                            #
-    # ------------------------------------------------------------------ #
 
     def _clear_default_plane(self):
         print("[DEBUG] Deleting default plane...")
@@ -166,10 +154,7 @@ class SwarmBaseWorld(BaseAviary):
             self._create_ceiling()
         print("[DEBUG] Environment setup complete.")
 
-    # ------------------------------------------------------------------ #
-    # Needed by BaseAviary / Gymnasium                                   #
-    # ------------------------------------------------------------------ #
-
+    # BaseAviary / Gymnasium hook.
     def _addObstacles(self):
         self._clear_default_plane()
         self._setup_environment()
@@ -220,17 +205,9 @@ class SwarmBaseWorld(BaseAviary):
     def _computeInfo(self):
         return {"answer": 42}
 
-    # ------------------------------------------------------------------ #
-    # ABSTRAKCJA                                                         #
-    # ------------------------------------------------------------------ #
-
     @abstractmethod
     def draw_obstacles(self) -> None:
         raise NotImplementedError
-
-    # ------------------------------------------------------------------ #
-    # COLLISIONS                                                         #
-    # ------------------------------------------------------------------ #
 
     def get_detailed_collisions(self, include_dynamic_obstacles: bool = False):
         """
@@ -274,18 +251,13 @@ class SwarmBaseWorld(BaseAviary):
                 collisions.append((agent_idx, other_agent_idx))
         return list(set(collisions))
 
-    # ------------------------------------------------------------------ #
-    # PROXIMITY-BASED inter-drone collision detection (2026-05-07)       #
-    # ------------------------------------------------------------------ #
-    # Threshold rozszerzony 0.15m → 0.5m (2026-05-07, decyzja A z
-    # "near-miss" anomalii — zob. test_near_miss_drones_must_log_inter_drone
-    # _event_not_ground). Geneza:
-    # - Empirycznie (`/tmp/measure_repulsion_threshold.py`) PyBullet LCP
-    #   solver generuje contact impulse BINARNIE przy dist≤0.12m (cylinder
-    #   collision shape r=0.06m).
-    # - 0.15m (1.25× contact) łapał TYLKO scenariusze fizycznego styku.
-    #   Tracił "near-miss" gdzie drony są blisko (0.5-2m), nie dotykają,
-    #   ale przy zbliżeniu PID wpada w niestabilność i drone spada
+    # PROXIMITY-BASED inter-drone collision detection.
+    # Threshold 0.5m derivowany z PyBullet LCP solver: contact impulse
+    # generuje się BINARNIE przy dist≤0.12m (cylinder collision shape r=0.06m).
+    # 0.15m (1.25× contact) łapał tylko fizyczny styk; tracił „near-miss"
+    # gdzie drony są blisko (0.5-2m), nie dotykają, ale przy zbliżeniu PID
+    # wpada w niestabilność i drone spada (test:
+    # `test_near_miss_drones_must_log_inter_drone_event_not_ground`).
     #   ("Te '0' to kolizje między dronami" — user 2026-05-07).
     # - 0.5m (~4.2× contact) łapie również near-miss, dodaje ~70ms
     #   wyprzedzenia przy v=5m/s, vs 30ms dla 0.15m. Generuje minimalne

@@ -51,7 +51,7 @@ class BSplineTrajectory:
         self.arc_length = self._calculate_arc_length()
 
         if constant_speed and decel_at_end:
-            # Kinematic safety (Bug #2 plan, Krok 5): klamruje cruise_speed do
+            # Kinematic safety: klamruje cruise_speed do
             # `sqrt(0.5 · max_accel / κ_max)` żeby na cruise lateral_accel = v²·κ
             # ≤ 0.5·max_accel; dec rate dostosowany żeby total ≤ max_accel.
             safe_cruise, safe_decel = self._kinematic_safe_profile_params(

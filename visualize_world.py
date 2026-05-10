@@ -33,11 +33,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle
 
 
-# --------------------------------------------------------------------------- #
-# Modele danych                                                                #
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class WorldBounds:
     x_min: float
@@ -72,11 +67,6 @@ class BoxObstacle:
 
 
 Obstacle = CylinderObstacle | BoxObstacle
-
-
-# --------------------------------------------------------------------------- #
-# Loadery                                                                      #
-# --------------------------------------------------------------------------- #
 
 
 def read_world_bounds(path: Path) -> WorldBounds:
@@ -167,12 +157,7 @@ def detect_environment(run_dir: Path) -> str:
     return "unknown"
 
 
-# --------------------------------------------------------------------------- #
-# Renderowanie                                                                 #
-# --------------------------------------------------------------------------- #
-
-
-# Paleta dla 5 dronow (default), dopasowana do swarm-friendly wizualizacji
+# Paleta dla 5 dronów (default) — swarm-friendly kolory wysokoprzeciwstawne.
 _DRONE_COLORS = ["#1976d2", "#388e3c", "#f57c00", "#7b1fa2", "#00838f",
                  "#c62828", "#5d4037", "#455a64", "#e65100", "#33691e"]
 
@@ -342,11 +327,6 @@ def render_world(
     else:
         plt.show()
     plt.close(fig)
-
-
-# --------------------------------------------------------------------------- #
-# CLI                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

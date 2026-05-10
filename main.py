@@ -87,12 +87,8 @@ class ExperimentRunner:
         # wewnętrznych węzłów kontrolnych optymalizowanych przez metaheurystykę.
         # Wcześniej oba pola dzieliły wartość, więc kontroler dostawał ~28
         # punktów na trajektorię ~600m → ~21 m między próbkami, za rzadko dla
-        # PID 48 Hz (patrz plan.md, Krok 4). Default 200 daje ~3 m / próbkę.
+        # PID 48 Hz wymaga ~3 m między próbkami przy track ~600m. Default 200.
         self.number_of_waypoints = cfg.simulation.get("dense_samples", 200)
-
-    # =========================================================================
-    # PRZYGOTOWANIE EKSPERYMENTU
-    # =========================================================================
 
     def prepare_experiment(self, seeds: SeedRegistry):
         """Przygotowuje wszystkie wymagane dane i komponenty dla symulacji."""
@@ -165,10 +161,6 @@ class ExperimentRunner:
                 },
             )
 
-    # =========================================================================
-    # INICJALIZACJA ŚWIATA
-    # =========================================================================
-
     def initialize_world(self):
         """Tworzy środowisko PyBullet z odpowiednią liczbą agentów."""
         if self.use_dynamic_obstacles:
@@ -201,10 +193,6 @@ class ExperimentRunner:
             num_dynamic_obstacles=self.num_dynamic_obstacles
         )
 
-    # =========================================================================
-    # POMOCNICZE METODY PĘTLI
-    # =========================================================================
-
     def _update_camera(self, drone_states: list):
         """Aktualizuje pozycję kamery podążając za wybranym dronem."""
         if not self.cfg.visualization.camera_follow:
@@ -229,11 +217,11 @@ class ExperimentRunner:
         Trzy źródła kolizji:
         1. Fizyczne kontakty PyBullet'a (`get_detailed_collisions`) — drone
            styka się z ground/ceiling/obstacle/drugim dronem.
-        2. Proximity-based inter-drone (`get_inter_drone_proximity_collisions`,
-           Krok 2 plan.md 2026-05-07) — drony są ≤ INTER_DRONE_COLLISION_THRESHOLD_M
-           od siebie. Łapie scenariusz w którym drony nie zdążyły się zetknąć
-           fizycznie, bo PID się nasyca + downwash bayli i obie spadają na
-           ziemię (kolizja maskowana jako ground hit).
+        2. Proximity-based inter-drone (`get_inter_drone_proximity_collisions`)
+           — drony są ≤ INTER_DRONE_COLLISION_THRESHOLD_M od siebie. Łapie
+           scenariusz w którym drony nie zdążyły się zetknąć fizycznie, bo
+           PID się nasyca + downwash i obie spadają na ziemię (kolizja
+           maskowana jako ground hit).
 
         Po kolizji: dron usunięty z `active_drones`, silniki + LiDAR
         wyłączone w `trajectory_controller.disable_drone(d_id)`.
@@ -267,8 +255,8 @@ class ExperimentRunner:
         if self.logger:
             already_crashed = d_id in self.logger.crashed_drones
             self.logger.log_collision(sim_time, d_id, o_id)
-            # Krok 3.4 plan.md: zamknij ewentualny otwarty rekord uniku
-            # outcome'em `collided_*` (klasyfikacja po `env.get_body_role`).
+            # Zamknij ewentualny otwarty rekord uniku outcome'em `collided_*`
+            # (klasyfikacja po `env.get_body_role`).
             self._update_evasion_collision_outcome(d_id, o_id)
             # Disable silniki + LiDAR ZARAZ po pierwszej kolizji
             # (idempotentne — `disable_drone` może być wołane wielokrotnie).
@@ -359,10 +347,6 @@ class ExperimentRunner:
         if obstacle_actions is None:
             return drone_actions
         return np.vstack((drone_actions, obstacle_actions))
-
-    # =========================================================================
-    # GŁÓWNA PĘTLA SYMULACJI
-    # =========================================================================
 
     def run(self):
         print("Running experiment...")
@@ -472,9 +456,6 @@ class ExperimentRunner:
         self.environment.close()
 
 
-# =============================================================================
-# PUNKTY WEJŚCIA
-# =============================================================================
 
 
 def _get_registry_job_key(cfg: DictConfig) -> dict | None:

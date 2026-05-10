@@ -79,12 +79,12 @@ class SimulationLogger:
         # Nowy bufor na logi z sensorów LiDAR
         self._lidar_writer = LidarHDF5Writer(output_dir)
 
-        # Bufor dla diagnostyki uniku (Faza 0 planu). Rekordy są słownikami,
-        # zapisywane jako CSV z _EVASION_HEADERS w save().
+        # Bufor dla diagnostyki uniku — rekordy są słownikami zapisywanymi jako
+        # CSV z `_EVASION_HEADERS` w `save()`.
         self.evasion_buffer: List[Dict[str, Any]] = []
 
-        # Bufory metryk online optymalizacji (Krok 3.2 plan.md). Każdy wiersz
-        # jest dictem zgodnym ze schema dataclass'ów z `optimization_metrics`.
+        # Bufory metryk online optymalizacji — każdy wiersz to dict zgodny
+        # ze schema dataclass'ów z `optimization_metrics`.
         self.online_optimization_buffer: List[Dict[str, Any]] = []
         self.convergence_traces_buffer: List[Dict[str, Any]] = []
 
@@ -161,9 +161,9 @@ class SimulationLogger:
         vel_error_at_rejoin: float = float("nan"),
         planning_wall_time_s: float = float("nan"),
         notes: str = "",
-        # Backward-compat alias: starsze callsity przekazują `astar_success`.
-        # `astar_success = NOT fallback_used` (semantycznie redundantne) —
-        # konwertujemy gdy `fallback_used` nie podane. Wycofane 2026-05-07.
+        # Backward-compat alias: starsze callsity przekazują `astar_success`,
+        # które semantycznie = `NOT fallback_used`. Konwertujemy gdy
+        # `fallback_used` nie podane.
         astar_success: Optional[bool] = None,
     ) -> None:
         """

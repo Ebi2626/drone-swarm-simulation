@@ -35,8 +35,6 @@ from mealpy.utils.target import Target
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
-
-# Wspólne komponenty z OOA / MSFFOA / NSGA-III
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
     SwarmOptimizationProblem,
 )
@@ -61,10 +59,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     pass
 
-
-# ---------------------------------------------------------------------------
-# Adapter problemu SSA — Hard Bounding (analogiczny do OOAProblemAdapter)
-# ---------------------------------------------------------------------------
 
 class SSAProblemAdapter(MealpyProblem):
     """
@@ -140,10 +134,6 @@ class SSAProblemAdapter(MealpyProblem):
         return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
 
 
-# ---------------------------------------------------------------------------
-# Subklasa SSA z generacyjnym logowaniem historii
-# ---------------------------------------------------------------------------
-
 class LoggedOriginalSSA(OriginalSSA):
     """SSA z logowaniem per-gen + batchowaniem ewaluacji.
 
@@ -178,10 +168,6 @@ class LoggedOriginalSSA(OriginalSSA):
         self._history_writer = history_writer
         self._history_problem = history_problem
 
-    # ------------------------------------------------------------------
-    # Wewnętrzny helper: zaczepia F/G na targetach z batcha.
-    # ------------------------------------------------------------------
-
     def _attach_FG_to_agents(self, pop: List[Any], F: Optional[np.ndarray],
                              G: Optional[np.ndarray]) -> None:
         """Przyklejamy F/G do `agent._F_row/_G_row` (NIE do target).
@@ -206,10 +192,6 @@ class LoggedOriginalSSA(OriginalSSA):
                     agent._G_row = G[idx].copy()
                 except Exception:
                     pass
-
-    # ------------------------------------------------------------------
-    # Override 1: ewaluacja całej populacji w 1 batchu.
-    # ------------------------------------------------------------------
 
     def update_target_for_population(self, pop: List[Any] = None) -> List[Any]:  # type: ignore[override]
         # Fallback do mealpy'owej implementacji jeśli brak adaptera lub adapter
@@ -244,12 +226,6 @@ class LoggedOriginalSSA(OriginalSSA):
         self._attach_FG_to_agents(pop, F_arr, G_arr)
         self.nfe_counter += len(pop)
         return pop
-
-    # ------------------------------------------------------------------
-    # Override 2: ścieżka pojedynczego osobnika (initial pop, fallbacki).
-    # Po policzeniu Targetu doczytujemy F/G z cache scalar_adaptera (shape
-    # (1, M)) i przykleja je do `target._F_row/_G_row`.
-    # ------------------------------------------------------------------
 
     def generate_agent(self, solution: np.ndarray = None) -> Any:  # type: ignore[override]
         """Po standardowym `generate_agent` doczepia F/G z cache scalar_adapter
@@ -331,10 +307,6 @@ class LoggedOriginalSSA(OriginalSSA):
         except Exception as e:
             logger.warning(f"[SSA] Warning: history logging failed at epoch {epoch}: {e}")
 
-
-# ---------------------------------------------------------------------------
-# Główna strategia SSA
-# ---------------------------------------------------------------------------
 
 def ssa_swarm_strategy(
     *,

@@ -45,25 +45,18 @@ class UrbanWorld(SwarmBaseWorld):
             **kwargs
         )
 
-    # ------------------------------------------------------------------ #
-    # Implementacja rysowania przeszkód                                  #
-    # ------------------------------------------------------------------ #
     def draw_obstacles(self):
         print("[DEBUG]: Drawing obstacles")
-        self._create_city(self.obstacles.data) 
-      
-    # ------------------------------------------------------------------ #
-    # Geometria przeszkód                                                #
-    # ------------------------------------------------------------------ #
+        self._create_city(self.obstacles.data)
 
     def _create_building(self, obstacle: np.ndarray) -> None:
-        shade = np.random.uniform(0.6, 0.9) # Zmienna losowa niekontorlowana seedem - to tylko kolor
+        # Kolor losowany ad-hoc — niekontrolowany seedem (wpływa wyłącznie na render).
+        shade = np.random.uniform(0.6, 0.9)
         x, y, z = obstacle[0], obstacle[1], obstacle[2]
         length, width, height = obstacle[3], obstacle[4], obstacle[5]
         base_z = z + height / 2
         print("[DEBUG]: x,y,z", x, y, z)
         print("[DEBUG]: length, width, height", length, width, height)
-
 
         col_shape = p.createCollisionShape(
             p.GEOM_BOX, halfExtents=[length/2, width/2, height/2]

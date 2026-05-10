@@ -2,23 +2,13 @@
 MSFOA Swarm Strategy.
 
 Single-objective trajectory optimization using the Multiple Swarm Fruit Fly
-Optimization Algorithm based strictly on the scientific paper:
-Shi, K., Zhang, X., & Xia, S. (2020).
+Optimization Algorithm (Shi, Zhang & Xia, 2020).
 
-Pipeline:
-1. The MSFFOAOptimizer explores the space of sparse inner waypoints (Polylines).
-2. The TrajectorySOOAdapter aggregates multi-objective collisions linearly (O(N) complexity).
-3. The final best polyline is smoothed using B-Spline post-processing via
-   generate_bspline_batch.
-
-REFACTORING NOTE (Rygor Naukowy i Porównywalność z NSGA-III):
-- Inicjalizacja populacji: Wykorzystuje StraightLineNoiseSampling oraz dokładnie
-  tę samą klasę SwarmOptimizationProblem co NSGA-III. Gwarantuje to identyczne
-  wymiary, granice (clipping) oraz rozkład szumu początkowego.
-- Pomiary czasu: Używa TimingCollector z identycznymi nazwami faz co NSGA-III.
-- Historia optymalizacji: Zapisuje macierze decyzji/celów per generacja w formacie 
-  identycznym do NSGA-III (OptimizationHistoryWriter).
-- Wygładzanie: Zastąpiono dedykowany kod B-Spline wspólną funkcją generate_bspline_batch.
+Ceteris paribus z NSGA-III: ta sama ``SwarmOptimizationProblem`` (clipping
+bounds), ten sam ``StraightLineNoiseSampling`` (initial population), ten sam
+``OptimizationHistoryWriter`` (per-gen logging), ta sama
+``generate_bspline_batch`` (post-processing). Co się różni: scalar fitness
+przez ``TrajectorySOOAdapter`` zamiast Pareto frontu.
 """
 
 import logging
@@ -29,7 +19,6 @@ import numpy as np
 from numpy.typing import NDArray
 from hydra.core.hydra_config import HydraConfig
 
-# Strategie MSFOA i Adapter SOO
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import SwarmOptimizationProblem
 from src.algorithms.abstraction.trajectory.strategies.core_msffoa import (
     MSFFOAOptimizer,
@@ -38,14 +27,10 @@ from src.algorithms.abstraction.trajectory.strategies.soo_adapter import (
     HARD_INFEASIBLE_BASE,
     TrajectorySOOAdapter,
 )
-
-# Ewaluator i dane świata
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
 from src.environments.abstraction.generate_world_boundaries import WorldData
-
-# Współdzielone komponenty (wspólne z NSGA-III)
 from src.algorithms.abstraction.trajectory.strategies.shared.bspline_utils import (
     generate_bspline_batch,
 )
@@ -80,7 +65,6 @@ def msffoa_strategy(
     """
     params = algorithm_params or {}
 
-    # --- Konfiguracja pomiaru czasu (wzorzec z NSGA-III) ---
     local_timing = False
     if timing is None:
         try:
@@ -94,8 +78,6 @@ def msffoa_strategy(
 
     try:
         with _measure("total_optimization"):
-
-            # 1. Konfiguracja parametrów
             pop_size: int          = params.get("pop_size", 200)
             max_generations: int   = params.get("epochs", 500)
             n_inner: int           = params.get("n_inner_waypoints", max(5, int(number_of_waypoints * 0.1)))
@@ -126,7 +108,6 @@ def msffoa_strategy(
                 output_dir=os.path.join(output_dir, "optimization_history")
             )
 
-            # 2. Inicjalizacja środowiska i populacji
             with _measure("initialization"):
                 evaluator = VectorizedEvaluator(
                     obstacles=obstacles_data,
@@ -164,8 +145,8 @@ def msffoa_strategy(
                 threshold_ratio = float(params.get("threshold_ratio", 0.1))
                 logger.info(f"[MSFOA] Initial Straight-Line Fitness: {initial_fitness:.4f}")
 
-                # --- INSTANCJONOWANIE TEGO SAMEGO PROBLEMU CO NSGA-III ---
-                # Gwarantuje to identyczne limity clippingu (xl, xu)
+                # Identyczna definicja problemu co NSGA-III gwarantuje te same
+                # limity clippingu (xl, xu) — ceteris paribus.
                 problem = SwarmOptimizationProblem(
                     n_drones=drone_swarm_size,
                     n_inner_points=n_inner,
@@ -190,24 +171,15 @@ def msffoa_strategy(
                     rng=seeds.rng("sampling")
                 )
 
-                # Generowanie i formatowanie zaszumionej linii z clippingiem Pymoo
                 initial_population_flat = sampling._do(problem, pop_size)
                 initial_population = initial_population_flat.reshape(
                     pop_size, drone_swarm_size, n_inner, 3
                 )
 
-                # --- Wstępny threshold (Shi et al. 2020 Eq. 5-8) ---
-                # WAŻNE: ta wartość jest tylko *początkową* wartością przed
-                # pierwszą adaptacją. Optimizer przeliczy threshold po
-                # `_initialize_swarms` używając `threshold_ratio` (adaptacyjny
-                # tryb relatywny do best feasible). Jeśli `threshold_ratio is
-                # None`, ta wartość zostaje na stałe (paperowy tryb statyczny).
-                #
-                # Dla trybu adaptacyjnego ten wstępny anchor i tak nie wpłynie
-                # na dynamikę — _update_adaptive_threshold() w pierwszej
-                # iteracji nadpisze go na podstawie liderów po init. Ale
-                # zachowujemy go jako sensowny default dla edge-case'ów
-                # (np. gdy adaptacja jest wyłączona).
+                # Wstępny anchor threshold (Shi et al. 2020 Eq. 5-8). Jeśli
+                # `threshold_ratio is None` (paperowy tryb statyczny) ta wartość
+                # zostaje na stałe; w trybie adaptacyjnym jest nadpisywana po
+                # _initialize_swarms na podstawie liderów.
                 THRESHOLD_FLOOR = 0.01
                 if initial_fitness < HARD_INFEASIBLE_BASE:
                     # Straight-line feasible — Big-M nie wpływa, oryginalna kalibracja
@@ -237,19 +209,14 @@ def msffoa_strategy(
                     f"po init populacji w optimizerze"
                 )
 
-                # Granice clippingu zgodne z NSGA-III i OOA: bierzemy je
-                # bezpośrednio z SwarmOptimizationProblem, który buduje je z
-                # marginesem świata (XY) oraz Z-range wyznaczonym przez
-                # min/max endpoint_z. Dzięki temu wszystkie trzy optymalizatory
-                # pracują na dokładnie tej samej przestrzeni poszukiwań.
-                # problem.xl / problem.xu mają kształt (N_drones * N_inner * 3,),
-                # a każda trójka jest identyczna — wystarczy pierwsza.
+                # problem.xl / problem.xu są (N_drones * N_inner * 3,) z trójkami
+                # identycznymi per-waypoint — wystarczy pierwsza. Identyczne
+                # bounds u NSGA-III i OOA.
                 xl_point = np.asarray(problem.xl[:3], dtype=np.float64)
                 xu_point = np.asarray(problem.xu[:3], dtype=np.float64)
 
-                # Konfigurowalne kroki perturbacji (paper Sec. 1 — R jako parametr).
-                # YAML pozwala podać listę 3-elementową; przekazujemy None gdy
-                # nie ma override'u, żeby konstruktor użył paper-tuned defaults.
+                # paper Sec. 1 — R jako parametr; None → paper-tuned defaults
+                # w konstruktorze MSFFOAOptimizer.
                 sg_frac = params.get("step_global_frac")
                 sl_frac = params.get("step_local_frac")
                 step_global_frac = (
@@ -259,7 +226,6 @@ def msffoa_strategy(
                     np.asarray(sl_frac, dtype=np.float64) if sl_frac is not None else None
                 )
 
-                # Przekazanie wspólnej populacji inicjalnej
                 optimizer = MSFFOAOptimizer(
                     pop_size=pop_size,
                     n_drones=drone_swarm_size,
@@ -282,17 +248,14 @@ def msffoa_strategy(
                     initial_population=initial_population,
                 )
 
-            # 3. Optymalizacja
             with _measure("optimization"):
                 try:
-                    # MSFFOAOptimizer.optimize() zwraca parę (best_pos, best_fitness).
                     _, best_fitness = optimizer.optimize()
                 finally:
                     writer.close()
 
             logger.info(f"[MSFOA] Optimization Finished. Best Polyline Fitness: {best_fitness:.4f}")
 
-            # 4. Rekonstrukcja trajektorii i wygładzanie
             with _measure("decision_and_reconstruction"):
                 sparse_trajectory = optimizer.get_best_dense_trajectory()
                 control_points_batch = sparse_trajectory[np.newaxis, ...]
@@ -315,7 +278,6 @@ def msffoa_strategy(
             except Exception as e:
                 logger.warning(f"[MSFOA] Nie udało się zapisać logów czasowych: {e}")
 
-    # 5. Fallback w przypadku błędu
     with _measure("fallback", success=False):
         logger.warning("[MSFOA] Fallback: generating straight-line trajectory.")
         t_line = np.linspace(0, 1, number_of_waypoints)

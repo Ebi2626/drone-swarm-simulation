@@ -13,9 +13,10 @@ def bspline_basis_cubic(t: float):
 
 @njit(cache=True)
 def build_clamped_control_points(free_cp, start_pos, goal_pos):
-    # free_cp: (PopSize, NDrones, N_free, 3)
+    """Wstawia start_pos/goal_pos jako 4-krotnie powtórzone końce control polygon
+    (rep=4 dla cubic B-Spline → krotność końców 3, krzywa interpoluje endpointy)."""
     pop_size, n_drones, n_free, _ = free_cp.shape
-    rep = 4  # cubic B-spline, gdy start/cel nie są w free_cp
+    rep = 4
 
     cp = np.empty((pop_size, n_drones, n_free + 2 * rep, 3), dtype=np.float64)
 
@@ -43,21 +44,18 @@ def clamp_control_points_batch(control_points):
               [P0, P0, P0, P1, ..., Pn-1, Pn, Pn, Pn]
     """
     pop_size, n_drones, n_ctrl, dims = control_points.shape
-    # Każdy koniec powtarzamy 2x extra (raz już istnieje), łącznie krotność = 3
+    # Krotność końców = 3 → P[0] i P[-1] dwukrotnie ekstra (raz już istnieją).
     n_clamped = n_ctrl + 4
     out = np.zeros((pop_size, n_drones, n_clamped, dims), dtype=np.float64)
 
     for p in range(pop_size):
         for d in range(n_drones):
-            # Pierwsze 3 pozycje = P[0] (krotność 3)
             for rep in range(3):
                 for dim in range(dims):
                     out[p, d, rep, dim] = control_points[p, d, 0, dim]
-            # Środkowe punkty bez zmian
             for i in range(1, n_ctrl - 1):
                 for dim in range(dims):
                     out[p, d, 2 + i, dim] = control_points[p, d, i, dim]
-            # Ostatnie 3 pozycje = P[-1] (krotność 3)
             for rep in range(3):
                 for dim in range(dims):
                     out[p, d, n_clamped - 1 - rep, dim] = control_points[p, d, n_ctrl - 1, dim]
@@ -235,10 +233,6 @@ def generate_bspline_batch(control_points, num_samples):
     return out_points
 
 
-# ---------------------------------------------------------------------------
-# Funkcje dynamiki lotu — bez zmian
-# ---------------------------------------------------------------------------
-
 @njit(cache=True)
 def calculate_trapezoidal_profile(total_distance, cruise_speed, max_accel):
     ta = cruise_speed / max_accel
@@ -313,41 +307,30 @@ def calculate_dynamic_max_node_distance(
     k_factor: float = 2.0,
     absolute_min: float = 5.0
 ) -> float:
-    """
-    Oblicza dynamiczny, maksymalny dozwolony dystans między węzłami kontrolnymi (Numba).
-    Działa ekstremalnie szybko unikając wywołań osiowych numpy.
-    
-    start_pos, target_pos: tablice (NDrones, 3)
-    n_inner_points: liczba węzłów pomiędzy hover_start a hover_target
+    """Maksymalny dozwolony dystans między sąsiednimi węzłami kontrolnymi:
+    ``k_factor × avg_segment_length`` lub ``absolute_min`` (większe).
+
+    Liczba segmentów = ``n_inner_points + 3`` z konwencji doklejania
+    [starts, starts_hover, inner..., targets_hover, targets].
     """
     n_drones = start_pos.shape[0]
-    
-    # Szukamy najdłuższej trasy euklidesowej
+
     max_route_length = 0.0
-    
     for d in range(n_drones):
         dx = target_pos[d, 0] - start_pos[d, 0]
         dy = target_pos[d, 1] - start_pos[d, 1]
         dz = target_pos[d, 2] - start_pos[d, 2]
-        
         dist = np.sqrt(dx*dx + dy*dy + dz*dz)
         if dist > max_route_length:
             max_route_length = dist
 
-    # Liczba segmentów = (węzły wewnętrzne) + (hover_start) + (hover_target) + (cel) - 1
-    # Ponieważ po start idzie hover, a przed cel hover, łącznie węzłów zależy od 
-    # implementacji doklejania. W Rozwiązaniu A mieliśmy:
-    # starts, starts_hover, inner, targets_hover, targets 
-    # czyli n_inner_points + 4 punkty -> n_inner_points + 3 segmenty
     n_segments = n_inner_points + 3
-    
-    # Aby uniknąć dzielenia przez zero przy dziwnych parametrach:
     if n_segments < 1:
         n_segments = 1
-        
+
     avg_segment_length = max_route_length / n_segments
     dynamic_limit = avg_segment_length * k_factor
-    
+
     return max(absolute_min, dynamic_limit)
 
 
@@ -424,7 +407,6 @@ def evaluate_bspline_trajectory_sync(
 
                     lengths[p, d] += np.sqrt((cx - px)**2 + (cy - py)**2 + (cz - pz)**2)
 
-                    # Kolizje z przeszkodami liczymy tylko, gdy przeszkody istnieją
                     if use_obstacles:
                         for obs_idx in range(n_obstacles):
                             ox = obstacles_xy[obs_idx, 0]
@@ -461,7 +443,7 @@ def compute_max_observed_acceleration(
     boundary_segments_skip: int = 0,
 ):
     """Twardy fizyczny constraint na **LATERAL** acceleration drona podążającego
-    za B-spline'em (Kamień 2026-05-07, refactor v2).
+    za B-spline'em.
 
     Mierzy wyłącznie składową lateralną (perpendicular do kierunku ruchu) bo:
     - **Tangencjalna** acceleration (along velocity) jest bounded przez

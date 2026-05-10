@@ -17,8 +17,6 @@ from mealpy.utils.target import Target  # noqa: F401  # re-export-safe; not stri
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
-
-# Wspólne komponenty z MSFFOA / NSGA-III
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
     SwarmOptimizationProblem,
 )
@@ -43,10 +41,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     pass
 
-
-# ---------------------------------------------------------------------------
-# Adapter problemu OOA - Rygorystyczny Strażnik Granic (Hard Bounding)
-# ---------------------------------------------------------------------------
 
 class OOAProblemAdapter(MealpyProblem):
     """
@@ -76,8 +70,7 @@ class OOAProblemAdapter(MealpyProblem):
 
         self._starts_bc = start_pos[np.newaxis, :, np.newaxis, :]
         self._targets_bc = target_pos[np.newaxis, :, np.newaxis, :]
-        
-        # Wypakowane granice do łatwego clipowania w obj_func
+
         self._lb = np.asarray(bounds.lb, dtype=np.float64)
         self._ub = np.asarray(bounds.ub, dtype=np.float64)
 
@@ -120,14 +113,9 @@ class OOAProblemAdapter(MealpyProblem):
         }
 
     def obj_func(self, x: np.ndarray) -> float:
-        # Bezwzględne sprawdzenie na wejściu (fail-safe)
         x_safe = np.clip(np.nan_to_num(x, nan=self._ub), self._lb, self._ub)
         return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
 
-
-# ---------------------------------------------------------------------------
-# Subklasa OOA z generacyjnym logowaniem historii
-# ---------------------------------------------------------------------------
 
 class LoggedOriginalOOA(OriginalOOA):
     """OOA z logowaniem per-gen + cache F/G na targetach.
@@ -236,10 +224,6 @@ class LoggedOriginalOOA(OriginalOOA):
             logger.warning(f"[OOA] Warning: history logging failed at epoch {epoch}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Główna strategia OOA
-# ---------------------------------------------------------------------------
-
 def osprey_swarm_strategy(
     *,
     start_positions: NDArray[np.float64],
@@ -319,8 +303,6 @@ def osprey_swarm_strategy(
                 )
 
                 scalar_adapter._f_ref = np.maximum(scalar_adapter._f_ref, 1.0)
-
-                # Wydruk kontrolny F_ref - powinny być sensowne wartości wokół 1.0 dla linii prostej
                 logger.info(f"[OOA] F_ref (normalization scales): {scalar_adapter._f_ref}")
 
                 problem_ref = SwarmOptimizationProblem(
@@ -347,7 +329,7 @@ def osprey_swarm_strategy(
                     rng=seeds.rng("sampling")
                 )
 
-                # Konwersja do List[1D array], aby Mealpy poprawnie potraktowało każdy wektor bazowy
+                # Mealpy oczekuje listy 1D wektorów per starting solution.
                 starting_solutions_raw = np.asarray(sampling._do(problem_ref, pop_size), dtype=np.float64)
                 starting_solutions = [sol for sol in starting_solutions_raw]
 
@@ -385,7 +367,6 @@ def osprey_swarm_strategy(
                     seed=seeds.seed("optimizer")
                 )
 
-                # Bezpieczne pobranie z klipowaniem
                 best_x = mealpy_problem.amend_position(np.asarray(best_agent.solution, dtype=np.float64))
                 best_fitness = float(best_agent.target.fitness)
 

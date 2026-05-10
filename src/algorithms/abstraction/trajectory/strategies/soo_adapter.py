@@ -27,7 +27,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 from numpy.typing import NDArray
 
-# Zmiana nazwy importu zgodnie z fizyczną nazwą w projekcie
 from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
 
 
@@ -62,8 +61,11 @@ class TrajectorySOOAdapter:
         target_positions: (N_drones, 3) fixed target positions.
         n_drones: Number of drones.
         n_inner: Number of inner waypoints per drone.
-        weights: (M,) objective weights [w_path_length, w_smoothness, w_collision_risk].
-        penalty_weight: Multiplier for the weakest-link constraint penalty.
+        weights: (M=5,) objective weights for the 5 objectives produced by
+            :class:`VectorizedEvaluator`: ``[w_f1_trajectory, w_f2_height_angle,
+            w_f3_threat, w_f4_turn, w_f5_coordination]``.
+        penalty_weight: Multiplier for the violation magnitude inside the
+            Big-M infeasibility bucket (Golden Rule #2).
         history_writer: Optional logger for saving generational data.
     """
 
@@ -96,10 +98,6 @@ class TrajectorySOOAdapter:
         self.last_objectives: NDArray[np.float64] | None = None
         self.last_constraints: NDArray[np.float64] | None = None
         self._debug_printed: bool = False
-
-    # ------------------------------------------------------------------
-    # Reference scale computation (Golden Rule #1)
-    # ------------------------------------------------------------------
 
     def _compute_reference_scales(self) -> NDArray[np.float64]:
         """Evaluate a straight-line trajectory to obtain F_ref for normalization.
@@ -149,10 +147,6 @@ class TrajectorySOOAdapter:
         else:
             self._zero_ref_components = []
         return np.where(zero_ref_mask, 1.0, f_ref)
-
-    # ------------------------------------------------------------------
-    # Callable interface
-    # ------------------------------------------------------------------
 
     def __call__(self, inner_waypoints: NDArray[np.float64]) -> NDArray[np.float64]:
         """Evaluate a batch of inner-waypoint populations.

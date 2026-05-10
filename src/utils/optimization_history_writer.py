@@ -39,10 +39,6 @@ class OptimizationHistoryWriter:
         )
         self._thread.start()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def put_generation_data(self, data: dict) -> None:
         """Enqueue a generation snapshot without blocking the caller longer
         than necessary.
@@ -60,10 +56,6 @@ class OptimizationHistoryWriter:
         any remaining buffered data."""
         self._queue.put(_SENTINEL)
         self._thread.join()
-
-    # ------------------------------------------------------------------
-    # Consumer internals
-    # ------------------------------------------------------------------
 
     def _consumer_loop(self) -> None:
         buffer: list[dict] = []
@@ -96,16 +88,14 @@ class OptimizationHistoryWriter:
         else:
             self._flush_npz(buffer, chunk_name)
 
-    # ---- HDF5 backend ------------------------------------------------
-
     def _flush_hdf5(self, buffer: list[dict], chunk_name: str) -> None:
         path = os.path.join(self.output_dir, "optimization_history.h5")
         keys = buffer[0].keys()
 
         with h5py.File(path, "a") as f:
             for key in keys:
-                # ZMIANA: Używamy np.stack zamiast np.concatenate, aby zachować 
-                # wymiar generacji (Generacja x Osobnik x Cechy)
+                # np.stack (nie concatenate) zachowuje wymiar generacji →
+                # finalny shape (Gen × Pop × Features).
                 stacked = np.stack([entry[key] for entry in buffer], axis=0)
 
                 if key in f:
@@ -126,14 +116,11 @@ class OptimizationHistoryWriter:
                     )
         print(f"[HISTORY] Flushed {len(buffer)} generations to HDF5.")
 
-    # ---- NPZ backend ------------------------------------------------
-
     def _flush_npz(self, buffer: list[dict], chunk_name: str) -> None:
         npz_dir = os.path.join(self.output_dir, "optimization_history_npz")
         os.makedirs(npz_dir, exist_ok=True)
 
         keys = buffer[0].keys()
-        # ZMIANA: Używamy np.stack również w fallbacku
         arrays = {
             key: np.stack([entry[key] for entry in buffer], axis=0)
             for key in keys

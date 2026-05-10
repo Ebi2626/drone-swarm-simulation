@@ -10,8 +10,8 @@ except ImportError:
     _HAS_H5PY = False
 
 _LIDAR_SENTINEL = None
-_LIDAR_FLUSH_SIZE = 100000  # Większy bufor niż dla historii optymalizacji,
-                          # bo rekordy są dużo mniejsze (7 liczb vs macierze)
+_LIDAR_FLUSH_SIZE = 100000  # Większy bufor niż dla optimization history —
+                          # rekordy LiDAR to 7 floatów, nie macierze.
 
 
 class LidarHDF5Writer:
@@ -40,26 +40,19 @@ class LidarHDF5Writer:
         )
         self._thread.start()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def put(self, record: tuple) -> None:
-        """Wrzuca pojedynczy rekord do kolejki bez blokowania na długo."""
+        """Wrzuca pojedynczy rekord do kolejki bez blokowania na długo.
+        Pełna kolejka → drop (lepiej stracić sample LiDAR niż blokować sim).
+        """
         try:
             self._queue.put(record, block=True, timeout=2.0)
         except queue.Full:
-            # Upuszczamy dane zamiast blokować wątek symulacji
             pass
 
     def close(self) -> None:
         """Wysyła token kończący, czeka na drain kolejki i flush reszty."""
         self._queue.put(_LIDAR_SENTINEL)
         self._thread.join()
-
-    # ------------------------------------------------------------------
-    # Consumer internals
-    # ------------------------------------------------------------------
 
     def _consumer_loop(self) -> None:
         buffer: list = []
@@ -91,8 +84,7 @@ class LidarHDF5Writer:
             self._flush_npz(buffer)
 
     def _flush_hdf5(self, buffer: list, path: str) -> None:
-        # Konwersja listy krotek → macierz float32 (7 kolumn)
-        # dtype float32 zamiast float64: ~2x mniej miejsca na dysku
+        # float32 zamiast float64 → ~2× mniej miejsca, wystarczająca precyzja.
         chunk = np.array(buffer, dtype=np.float32)  # shape: (N, 7)
 
         with h5py.File(path, "a") as f:
@@ -106,12 +98,11 @@ class LidarHDF5Writer:
                 ds = f.create_dataset(
                     "hits",
                     data=chunk,
-                    maxshape=(None, 7),    # rozszerzalny wzdłuż osi wierszy
-                    chunks=(4096, 7),      # chunk na ~28 KB przy float32
+                    maxshape=(None, 7),
+                    chunks=(4096, 7),  # ~28 KB per chunk @ float32
                     compression="gzip",
                     compression_opts=4,
                 )
-                # Dokumentacja kolumn jako atrybut HDF5
                 ds.attrs["columns"] = self.COLUMNS
 
         print(f"[LIDAR] Flushed {len(buffer)} hits to HDF5 (chunk #{self._flush_counter}).")

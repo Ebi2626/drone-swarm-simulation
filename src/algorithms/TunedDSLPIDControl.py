@@ -1,7 +1,7 @@
-"""Tuned DSL PID control + anti-tilt safety dla CF2X drone (Kamień 2026-05-07).
+"""Tuned DSL PID control + anti-tilt safety dla CF2X drone.
 
-Diagnoza realnego runa (forest+ssa, 2026-05-07): default `DSLPIDControl`
-podczas sharp lateral maneuver wpada w **death-spiral**:
+Default `DSLPIDControl` podczas sharp lateral maneuver może wpaść w
+**death-spiral**:
 1. Trajectory wymaga lateral acc → drone tilts (kąt θ od pionu)
 2. Vertical thrust component = `T·cos(θ)` spada
 3. Gdy `T·cos(θ) < m·g`, drone traci altitude
@@ -152,10 +152,10 @@ class TunedDSLPIDControl(DSLPIDControl):
     DEFAULT_INTEGRAL_CLAMP_XY = 0.5
     DEFAULT_INTEGRAL_CLAMP_Z = 0.05
 
-    # Torque gains — yaw damping match do roll/pitch (Kamień follow-up
-    # 2026-05-07): drone 2 panic miał yaw spin (0→75° w 1s) tuż przed fall.
-    # Default DSLPIDControl D_COEFF_TOR=[20000, 20000, 12000] — yaw 40%
-    # niższy niż RP. Tuned: match RP (12000→20000) → stable yaw control.
+    # Yaw damping match do roll/pitch: default DSLPIDControl
+    # `D_COEFF_TOR=[20000, 20000, 12000]` (yaw 40% niższy niż RP) pozwala
+    # drone'owi wpaść w yaw spin (0→75° w 1s) podczas extreme lateral
+    # maneuver tuż przed fall. Tuned matchuje yaw do RP → stable yaw control.
     # P/I_COEFF_TOR defaults zostawiamy (działają dobrze dla roll/pitch).
     DEFAULT_D_COEFF_TOR = np.array([20000.0, 20000.0, 20000.0])
 
@@ -184,8 +184,6 @@ class TunedDSLPIDControl(DSLPIDControl):
             d_coeff_for if d_coeff_for is not None else self.DEFAULT_D_COEFF_FOR,
             dtype=np.float64,
         )
-        # Yaw damping match: D_COEFF_TOR[2] z 12000→20000 default
-        # (eliminuje yaw spin podczas extreme maneuvers).
         self.D_COEFF_TOR = np.array(
             d_coeff_tor if d_coeff_tor is not None else self.DEFAULT_D_COEFF_TOR,
             dtype=np.float64,

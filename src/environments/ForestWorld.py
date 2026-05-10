@@ -41,16 +41,9 @@ class ForestWorld(SwarmBaseWorld):
             **kwargs
         )
 
-    # ------------------------------------------------------------------ #
-    # Implementacja rysowania przeszkód (drzew)                          #
-    # ------------------------------------------------------------------ #
     def draw_obstacles(self):
         print("[DEBUG]: Drawing obstacles")
-        self._create_forrest(self.obstacles.data) 
-
-    # ------------------------------------------------------------------ #
-    # Geometria przeszkód (bez zmian)                                    #
-    # ------------------------------------------------------------------ #
+        self._create_forrest(self.obstacles.data)
 
     def _create_forrest(self, obstacles: np.ndarray):
         for i in range(obstacles.shape[0]):
@@ -59,8 +52,8 @@ class ForestWorld(SwarmBaseWorld):
     def _create_tree(self, obstacle: np.ndarray):
         x, y, z = obstacle[0], obstacle[1], obstacle[2]
         radius, height = obstacle[3], obstacle[4]
-        color = [0.5, 0.8, 0.3, 1.0]  # Zielony kolor dla drzewa
-                
+        color = [0.5, 0.8, 0.3, 1.0]
+
         base_z = z + height / 2
 
         collision_shape = p.createCollisionShape(

@@ -67,9 +67,6 @@ def count_trajectories(
                         W - amount of waypoints (n_waypoints)\n
                         3 - coordinates x, y, z
     """
-
-    # TODO: implement methods to validate input
-
     trajectories = counting_protocol(
         start_positions=start_positions,
         target_positions=target_positions,

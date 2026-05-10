@@ -16,15 +16,13 @@ if TYPE_CHECKING:
 class GenerationDataStrategy(ExperimentDataStrategy):
     def prepare_data(self, runner: "ExperimentRunner", seeds: SeedRegistry):
         print("[INFO] Generowanie nowego środowiska i optymalizacja trajektorii (Offline Path-Planning)...")
-        # 1. Generowanie granic świata
         runner.world_data = generate_world_boundaries(
-            width=runner.track_width, 
+            width=runner.track_width,
             length=runner.track_length,
-            height=runner.track_height, 
+            height=runner.track_height,
             ground_height=runner.ground_position
         )
-        
-        # 2. Generowanie przeszkód
+
         if runner.placement_strategy_name is not None:
             runner.obstacles_data = generate_obstacles(
                 runner.world_data,
@@ -41,10 +39,7 @@ class GenerationDataStrategy(ExperimentDataStrategy):
                 safe_radius=runner.safe_radius,
                 rng=seeds.rng("environment")
             )
-        
-        # 3. Zgodnie z oryginałem - wstrzykujemy DOKŁADNIE 6 argumentów do strategii.
-        # Wcześniejsze dodanie "algorithm_params" uaktywniło inny tryb obliczeniowy kary 
-        # i spowodowało przekazanie 5 argumentów zamiast 4 do funkcji `_dist_segment_to_box`.
+
         counting_strategy = instantiate(runner.cfg.optimizer)
         counting_protocol = functools.partial(
             counting_strategy,
@@ -70,7 +65,6 @@ class GenerationDataStrategy(ExperimentDataStrategy):
             label=opt_label,
         )
 
-        # 4. Archiwizacja stanu początkowego
         if runner.logger is not None:
             runner.logger.log_chosen_trajectories(runner.drones_trajectories)
             runner.logger.log_world_dimensions(runner.world_data)

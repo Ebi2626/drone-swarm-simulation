@@ -139,7 +139,6 @@ class MSFFOAOptimizer:
         self.n_inner = n_inner
         self.max_generations = max_generations
 
-        # MSFOA Specific Parameters
         self.G = n_swarms
         self.coe1 = coe1
         self.coe2 = coe2
@@ -184,7 +183,6 @@ class MSFFOAOptimizer:
         self.world_max = np.asarray(world_max_bounds, dtype=np.float64)
         self.world_size = self.world_max - self.world_min
 
-        # Endpoints
         self.start_pos = np.asarray(start_positions, dtype=np.float64)
         self.target_pos = np.asarray(target_positions, dtype=np.float64)
         self._starts_bc = self.start_pos[np.newaxis, :, np.newaxis, :]
@@ -251,16 +249,12 @@ class MSFFOAOptimizer:
 
         self._measure = self._timing.measure if self._timing else lambda *a, **kw: nullcontext()
 
-        # Swarm memory
         self.swarm_best_pos: NDArray[np.float64] = np.empty((self.G, self.n_drones, self.n_inner, 3))
         self.swarm_best_fit: NDArray[np.float64] = np.full(self.G, np.inf)
 
-        # Persistent F/G dla każdego z G liderów. Logowane per-gen do history_writer
-        # zamiast offspring (new_pop) — spójne z NSGA-III/OOA/SSA, które logują
-        # populację po selekcji (current state), nie eksplorację.
-        # Lazy-init w `_initialize_swarms` gdy znamy M, K z adaptera (lub None,
-        # gdy fitness_fn nie wystawia last_objectives/last_constraints — wówczas
-        # fallback do skalarnego fitness w bloku logowania).
+        # Lazy-init w `_initialize_swarms` gdy znamy M, K z adaptera (None gdy
+        # fitness_fn nie wystawia last_objectives/last_constraints → fallback
+        # do skalarnego fitness w bloku logowania).
         self.swarm_best_F: NDArray[np.float64] | None = None
         self.swarm_best_G: NDArray[np.float64] | None = None
 
@@ -408,8 +402,6 @@ class MSFFOAOptimizer:
             with self._measure("total_optimization"):
                 with self._measure("population_initialization"):
                     self._initialize_swarms()
-                    # Adaptacyjna kalibracja threshold na podstawie liderów po
-                    # selekcji w _initialize_swarms. No-op gdy threshold_ratio is None.
                     self._update_adaptive_threshold()
 
                 source = "external (ceteris paribus)" if self._initial_population is not None else "internal"

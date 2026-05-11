@@ -6,25 +6,27 @@ from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 class SizeParams(TypedDict):
+    """Wymiary przeszkody — `height` i `width` wymagane, `length` opcjonalny (BOX)."""
     height: float
     width: float
     length: NotRequired[float]
 
+
 class ObstaclesData(NamedTuple):
-    """
-    Math abstraction of obstacles
-    
+    """Macierzowa reprezentacja przeszkód `(N, 6)` z typem kształtu.
+
     Attributes:
-        data (np.ndarray): Matrix (N, 6)  conatining coordinates of obstacles and their dimensions.\n
-            One obstacles row: [x, y, z, dim1, dim2, dim3]\n
-            For CYLINDER: [x, y, z, radius, height, 0.0]\n
-            For BOX:      [x, y, z, length_x, width_y, height_z]
-        shape_type (str): 'CYLINDER' or 'BOX'
+        data: `(N, 6)` z wierszami `[x, y, z, dim1, dim2, dim3]`:
+              - CYLINDER: `[x, y, z, radius, height, 0.0]`,
+              - BOX:      `[x, y, z, length_x, width_y, height_z]`.
+        shape_type: `ObstacleShape.CYLINDER` lub `ObstacleShape.BOX`.
     """
-    data: NDArray[np.float64] 
+    data: NDArray[np.float64]
     shape_type: ObstacleShape
+
     @property
     def count(self) -> int:
+        """Liczba przeszkód (`N`)."""
         return self.data.shape[0]
 
 class PlacementStrategy(Protocol):
@@ -58,29 +60,26 @@ class PlacementStrategy(Protocol):
         ...
 
 def strategy_random_uniform(
-    min_b: np.ndarray, 
-    max_b: np.ndarray, 
-    count: int, 
+    min_b: np.ndarray,
+    max_b: np.ndarray,
+    count: int,
     start_positions: Optional[np.ndarray] = None,
     target_positions: Optional[np.ndarray] = None,
     safe_radius: float = 30.0,
     rng: np.random.Generator | int | None = None,
     *args
 ) -> np.ndarray:
-    """
-    Simple strategy to generate obstacles in a completely random way,
-    excluding safe zones around start and target positions.
+    """Wygeneruj `count` losowych pozycji `(N, 3)` z odrzucaniem stref bezpiecznych start/target.
 
     Args:
-        min_b (np.ndarray): minimal values of x, y, z - np.ndarray [min_x, min_y, min_z]
-        max_b (np.ndarray): maximum values of x, y, z - np.ndarray [max_x, max_y, max_z]
-        count (int): int - number of obstacles
-        start_positions (Optional[np.ndarray]): Start positions of the drone swarm
-        target_positions (Optional[np.ndarray]): Target positions of the drone swarm
-        safe_radius (float): Minimum allowed distance from obstacles to start/target points
+        min_b, max_b: `(3,)` granice świata `[min/max_x, _y, _z]`.
+        count: Wymagana liczba pozycji.
+        start_positions, target_positions: `(N, 3)` punkty chronione (lub `None`).
+        safe_radius: Minimalna odległość od dowolnego punktu chronionego.
+        rng: Ziarno deterministyczne dla `np.random.default_rng`.
 
     Returns:
-        np.ndarray: positions of obstacles (N, 3) [x, y, z]
+        `(count, 3)` macierz pozycji `[x, y, z]`.
     """
 
     # 0. Usawienie seeda
@@ -127,26 +126,26 @@ def strategy_random_uniform(
     return positions
 
 def strategy_grid_jitter(
-    min_b: np.ndarray, 
-    max_b: np.ndarray, 
+    min_b: np.ndarray,
+    max_b: np.ndarray,
     count: int,
     start_positions: Optional[np.ndarray] = None,
     target_positions: Optional[np.ndarray] = None,
     safe_radius: float = 15.0,
     rng: np.random.Generator | int | None = None,
-
 ) -> np.ndarray:
-    """
-    Generates obstacles in a grid pattern preserving aspect ratio,
-    while excluding areas around start and target positions.
-    
+    """Wygeneruj pozycje na siatce zachowującej proporcje + jitter; wyklucza strefy chronione.
+
     Args:
-        min_b (np.ndarray): [min_x, min_y, min_z]
-        max_b (np.ndarray): [max_x, max_y, max_z]
-        count (int): exact number of obstacles required
-        start_positions (np.ndarray, optional): Array of start points (N, 3) to protect.
-        target_positions (np.ndarray, optional): Array of target points (N, 3) to protect.
-        safe_radius (float): Radius around start/target where no obstacles can exist.
+        min_b, max_b: `(3,)` granice świata.
+        count: Wymagana liczba pozycji.
+        start_positions, target_positions: `(N, 3)` punkty chronione (lub `None`).
+        safe_radius: Promień strefy bezpieczeństwa.
+        rng: Ziarno deterministyczne.
+
+    Returns:
+        `(≤count, 3)` pozycje. Gdy filtr odrzuci za dużo punktów, zwraca
+        mniej niż `count` z `WARN` w stdout.
     """
     # 0. Ustawienie seeda
     rng = np.random.default_rng(rng)
@@ -237,18 +236,15 @@ def strategy_grid_jitter(
     return final_positions
 
 def strategy_empty(
-    min_b: NDArray[np.float64], 
-    max_b: NDArray[np.float64], 
+    min_b: NDArray[np.float64],
+    max_b: NDArray[np.float64],
     count: int,
     start_positions: Optional[NDArray[np.float64]] = None,
     target_positions: Optional[NDArray[np.float64]] = None,
     safe_radius: float = 15.0,
     rng: np.random.Generator | int | None = None,
 ) -> NDArray[np.float64]:
-    """
-    Dummy strategy for an empty environment.
-    Celowo ignoruje parametr 'count' i zwraca pusty tensor pozycji.
-    """
+    """No-op strategia dla pustego środowiska — zwraca `(0, 3)` macierz."""
     # Zwraca pustą macierz o poprawnym kształcie (0 wierszy, 3 kolumny: X, Y, Z)
     return np.empty((0, 3), dtype=np.float64)
 
@@ -263,20 +259,21 @@ def generate_obstacles(
     safe_radius: float = 15.0,
     rng: np.random.Generator | int | None = None,
 ) -> ObstaclesData:
-    """
-    Generating obstacles of given type, size and amount with given strategy 
+    """Wygeneruj `ObstaclesData` zadanego kształtu i ilości wybraną strategią rozmieszczenia.
 
     Args:
-        world (WorldData): WorldData - named tuple with information about world boundaries
-        n_obstacles (int): amount of obstacles to generate
-        shape_type (Literal['CYLINDER', 'BOX'], optional): type of obstacle - cylinder or box. Defaults to 'CYLINDER'.
-        placement_strategy (PlacementStrategy, optional): strategy for placing obstacles in the world. Defaults to strategy_random_uniform.
-        size_params (_type_, optional): _description_. Defaults to {'radius': 5.0, 'height': 20.0, 'width': 5.0, 'length': 5.0}.
+        world: `WorldData` z granicami świata.
+        n_obstacles: Liczba przeszkód do wygenerowania.
+        shape_type: `ObstacleShape.CYLINDER` lub `ObstacleShape.BOX`.
+        placement_strategy: Strategia rozmieszczania (sygnatura `PlacementStrategy`).
+        size_params: Wymiary przeszkód (`width`/`height`/opcjonalnie `length`).
+        start_positions, target_positions: Punkty chronione przekazywane do strategii.
+        safe_radius: Promień strefy bezpieczeństwa.
+        rng: Ziarno deterministyczne.
 
     Returns:
-        ObstaclesData: object with information about obstacles \n
-            data (np.ndarray): Matrix (N, 6)  conatining coordinates of obstacles and their dimensions. \n
-            shape_type (str): 'CYLINDER' lub 'BOX'
+        `ObstaclesData(data=(N, 6), shape_type=…)`; faktyczne `N` może być
+        mniejsze niż `n_obstacles`, gdy strategia nie zmieściła wszystkich punktów.
     """
     # Seeding
     rng = np.random.default_rng(rng)

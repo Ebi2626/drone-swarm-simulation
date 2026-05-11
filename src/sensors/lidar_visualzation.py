@@ -6,6 +6,7 @@ import pybullet_data
 from LidarSensor import LidarSensor
 
 def main():
+    """Manualny smoke-test LiDAR — ładuje cube + plane w PyBullet GUI i rysuje promienie."""
     # 1. Inicjalizacja środowiska fizycznego z GUI
     client_id = p.connect(p.GUI)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())

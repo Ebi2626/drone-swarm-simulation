@@ -41,17 +41,16 @@ _EMPTY = ""
 
 @dataclass
 class OnlineOptimizationRecord:
-    """Per-trigger summary metryki optymalizacji online.
+    """Per-trigger summary online avoidance — pól identyfikacja + status + outcome.
 
-    Wypełniany w 2 etapach:
-    1. **Przy plan_built** (przez `BaseAvoidance.compute_evasion_plan`):
-       wszystkie pola identyfikacji (run_id, drone_id, trigger_time,
-       algorithm), grupy A (optimizer summary), grupy B (decision).
-       Pola grupy D (outcome) inicjalizowane na sentinel `pending`.
-    2. **Przy BLEND_END / collision** (przez `update_online_optimization_outcome`):
-       wypełnia grupę D na podstawie obserwowanego rezultatu.
+    Wypełniany dwustopniowo:
+    1. Przy `plan_built` (z `BaseAvoidance.compute_evasion_plan`) —
+       identyfikacja, grupa A (optimizer summary), grupa B (decision).
+       Outcome inicjalizowany na `OUTCOME_PENDING`.
+    2. Przy BLEND_END / collision (`update_online_optimization_outcome`) —
+       wypełnia grupę D z obserwowanego rezultatu.
 
-    PK = (drone_id, trigger_time). Update po PK znajduje wiersz w buforze.
+    Klucz `(drone_id, trigger_time)` umożliwia update wiersza w buforze.
     """
     # === Identyfikacja ===
     run_id: str
@@ -83,11 +82,10 @@ class OnlineOptimizationRecord:
 
 @dataclass
 class ConvergenceSample:
-    """Pojedyncza próbka konwergencji (1 generacja jednego trigger'a).
+    """Pojedyncza próbka konwergencji (1 generacja 1 triggera) w formacie long-form.
 
-    Long-format: dla 1 trigger'a o N generacjach mamy N rekordów. PK kompozytowe
-    = (drone_id, trigger_time, generation). FK do OnlineOptimizationRecord
-    przez (drone_id, trigger_time).
+    Klucz kompozytowy `(drone_id, trigger_time, generation)`; FK do
+    `OnlineOptimizationRecord` przez `(drone_id, trigger_time)`.
     """
     run_id: str
     drone_id: int

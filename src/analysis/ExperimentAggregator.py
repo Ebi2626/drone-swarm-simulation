@@ -31,7 +31,24 @@ logger = logging.getLogger(__name__)
 
 
 class ExperimentAggregator:
+    """Orkiestrator ETL — populuje bazę SQLite analiz dla całego eksperymentu."""
+
     def aggregate(self, experiment_dir: str | Path) -> Path:
+        """Zbuduj kompletną bazę `analysis.db` dla `experiment_dir`.
+
+        Uruchamia 4 fazy: inicjalizację schematu, populację surowych tabel
+        i metryk MOO bez referencji, budowę cross-run reference Pareto sets
+        oraz backfill GD/IGD+ względem nowo zbudowanej referencji. Drugi
+        etap jest atomowy — wyjątek powoduje jawny `rollback` (bez tego
+        częściowe `DELETE` zostawia pustą tabelę po commicie).
+
+        Args:
+            experiment_dir: Katalog eksperymentu zawierający per-run
+                podkatalogi z CSV/h5.
+
+        Returns:
+            Ścieżkę do utworzonej (lub zaktualizowanej) bazy `analysis.db`.
+        """
         experiment_dir = Path(experiment_dir).expanduser().resolve()
         db_path = initialize_database(experiment_dir)
         populate_database(experiment_dir)

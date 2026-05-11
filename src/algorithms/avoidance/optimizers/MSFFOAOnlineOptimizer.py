@@ -82,6 +82,32 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
         min_compute_time_s: float = 0.05,
         rng: np.random.Generator | int | None = None,
     ) -> None:
+        """Skonfiguruj parametry MSFOA i waliduj zgodność z paperem Shi et al. 2020.
+
+        Args:
+            n_inner_waypoints: K — liczba waypointów wewnątrz B-spline
+                (spójnie z `path_representation`).
+            pop_size: Łączny rozmiar populacji; musi dzielić się przez
+                `n_swarms`.
+            n_swarms: Liczba podrojów `G`; `pop_size / G = P` osobników na rój.
+            max_generations: Górny limit iteracji (cooperative budget zwykle
+                przerywa wcześniej).
+            coe1, coe2: Wagi krzyżowania międzyrojowego (Eq. 14); muszą
+                spełniać `coe1 + coe2 = 1`.
+            threshold_ratio: Tolerancja względna wokół best feasible —
+                `threshold = best × (1 + ratio)`. Sterowanie podziałem
+                GLOBAL/LOCAL (Eq. 5-8).
+            step_global_frac, step_local_frac: Skala kroku jako ułamek
+                zakresu genu (`ub - lb`); ustawiana wyższa niż w offline
+                z uwagi na krótki budżet online.
+            min_compute_time_s: Minimalny budżet [s] do uruchomienia
+                optymalizacji; poniżej zwracany `timed_out`.
+            rng: Ziarno deterministyczne dla `np.random.default_rng`.
+
+        Raises:
+            ValueError: Gdy parametry naruszają warunki paperu (suma `coe`,
+                podzielność `pop_size` przez `n_swarms`, dodatniość kroków).
+        """
         if abs((coe1 + coe2) - 1.0) > 1e-6:
             raise ValueError(
                 f"MSFOA paper (Shi et al. 2020) wymaga coe1 + coe2 = 1, "
@@ -112,9 +138,27 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
 
     @property
     def population_size(self) -> int:
+        """Łączny rozmiar populacji `G × P`."""
         return self.pop_size
 
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
+        """Uruchom MSFOA na YZ-genach w ramach `budget` i zwróć najlepsze waypointy.
+
+        Args:
+            problem: `PathProblem` z fitness, predyktorem i opcjonalną
+                populacją startową `(pop_size, K)`.
+            budget: Kooperatywny budżet czasu — sprawdzany na początku każdej
+                generacji.
+
+        Returns:
+            `OptimizationResult`:
+              - `"ok"` z `waypoints` i `extra` (algorytm `"MSFOA"`,
+                `convergence_trace`, `n_swarms`),
+              - `"timed_out"`, gdy budżet < `min_compute_time_s` albo
+                `BudgetExceeded` (wtedy próbujemy zwrócić best-so-far),
+              - `"failed"`, gdy populacja nie miała feasible kandydata albo
+                wystąpił nieoczekiwany wyjątek.
+        """
         t_start = time.perf_counter()
 
         if budget.remaining < self.min_compute_time_s:
@@ -393,10 +437,15 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
         pop: NDArray[np.float64],
         problem: PathProblem,
     ) -> NDArray[np.float64]:
-        """Ocena batcha — sekwencyjna (online: pop_size~20, koszt znikomy).
+        """Oceń `(N, K)` batch genów sekwencyjnie (online: `N ≈ 20`, koszt znikomy).
 
-        :param pop: (N, K) macierz genów.
-        :return: (N,) fitness wartości (lower = better, 1e9 dla niezdekodowalnych).
+        Args:
+            pop: `(N, K)` macierz genów.
+            problem: `PathProblem` z `path_repr` i `fitness`.
+
+        Returns:
+            `(N,)` wartości fitness; mniej = lepiej, `1e9` dla
+            niezdekodowalnych.
         """
         out = np.empty(len(pop), dtype=np.float64)
         for i, x in enumerate(pop):

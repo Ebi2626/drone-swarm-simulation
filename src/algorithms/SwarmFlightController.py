@@ -1,5 +1,4 @@
 import numpy as np
-import pybullet as p
 from src.algorithms.abstraction.trajectory.strategies.shared.NumbaTrajectoryProfile import NumbaTrajectoryProfile
 
 
@@ -40,11 +39,41 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 
 class SwarmFlightController():
+    """Sterownik lotu roju — utrzymuje per-drona stan {TRACKING, EVASION, BLEND}.
+
+    Każdy dron przechodzi przez maszynę stanów: TRACKING (śledzenie bazowego
+    splajnu) ⇄ EVASION (wykonanie planu uniku z `avoidance_algorithm`) →
+    REJOIN_BLEND (mostek mieszający komendy z powrotem do splajnu bazowego).
+
+    Triggery uniku pochodzą z dwóch źródeł: deterministycznego oracle
+    (`_oracle_threat_check`) i analizy LiDAR (`_analyze_lidar_for_threat`).
+    Sterowanie PID realizowane przez `TunedDSLPIDControl` (lub
+    `DSLPIDControl`, gdy `params.use_tuned_pid=False`).
+
+    Instancja działa w dwóch wariantach (parametr `is_obstacle`):
+      - rojem głównym (śledzą bazowe splajny i unikają),
+      - dynamicznych przeszkód (śledzą odwrócone splajny, brak uniku).
+    """
+
     MODE_TRACKING = 0
     MODE_EVASION = 1
     MODE_REJOIN_BLEND = 2  # Mostek EVASION→TRACKING (mieszanie komend PID).
 
     def __init__(self, parent, num_drones, is_obstacle: bool, avoidance_algorithm=None, params=None):
+        """Skonfiguruj sterownik roju, kontrolery PID i progi wyzwalania uniku.
+
+        Args:
+            parent: Obiekt nadrzędny (`SwarmBaseWorld`) dostarczający
+                splajny, środowisko i logger.
+            num_drones: Liczba dronów (każdy ma własny PID, LiDAR i stan).
+            is_obstacle: `True` ⇒ instancja steruje rojem dynamicznych
+                przeszkód (bez avoidance, splajny odwrócone).
+            avoidance_algorithm: Strategia online avoidance
+                (`BaseAvoidance`); progi `trigger_*` i `*_cooldown` czytane
+                z `avoidance_algorithm.params`.
+            params: Hydra `cfg.simulation` — `cruise_speed`, `max_accel`,
+                `collision_radius`, `enable_avoidance`, `use_tuned_pid` itd.
+        """
         self._trajectory_start_times = np.zeros(num_drones)
         self.is_obstacle = is_obstacle
         self.avoidance_algorithm = avoidance_algorithm
@@ -199,6 +228,12 @@ class SwarmFlightController():
         )
 
     def init_lidars(self, physics_client_id: int) -> None:
+        """Utwórz po jednym `LidarSensor` na drona (no-op dla `is_obstacle`).
+
+        Args:
+            physics_client_id: Identyfikator klienta PyBullet, w którym
+                LiDARy mają wystawiać promienie raycast.
+        """
         if self.is_obstacle:
             return
         self._physics_client_id: int = physics_client_id
@@ -207,6 +242,14 @@ class SwarmFlightController():
         ]
 
     def draw_lidar_rays(self, current_states: list, tracked_drone_idx: int) -> None:
+        """Narysuj wiązkę debug-LiDAR dla śledzonego drona; pozostałe wyczyść.
+
+        Args:
+            current_states: Lista stanów z `BaseAviary._getDroneStateVector`
+                (slice `0:3` to pozycja).
+            tracked_drone_idx: Indeks drona, którego wiązka ma być widoczna;
+                spoza zakresu ⇒ no-op.
+        """
         if self.is_obstacle or self._lidars is None:
             return
         if not (0 <= tracked_drone_idx < self.num_drones):
@@ -217,6 +260,7 @@ class SwarmFlightController():
                 self._lidars[i].clear_debug_lines()
 
     def clear_lidar_rays(self) -> None:
+        """Skasuj wszystkie debug-linie LiDAR (no-op gdy LiDARy nie zainicjalizowane)."""
         if self._lidars is None:
             return
         for lidar in self._lidars:
@@ -533,6 +577,21 @@ class SwarmFlightController():
         return float(spline.ta + spline.tc + dt)
 
     def compute_actions(self, current_states, current_time):
+        """Wylicz komendy PWM dla każdego drona zgodnie z bieżącym trybem lotu.
+
+        Lazy-init bazowych splajnów na pierwszym wywołaniu. Disabled drony
+        (po kolizji) dostają RPM=0 (lot balistyczny). Pozostałe są kierowane
+        do `_step_tracking` / `_step_evasion` / `_step_blend` zależnie od
+        `_flight_modes[i]`. `clip_target_lookahead` ogranicza skok PID.
+
+        Args:
+            current_states: Lista stanów z PyBullet (slice `0:3` pozycja,
+                `10:13` prędkość).
+            current_time: Bieżący czas symulacji [s].
+
+        Returns:
+            `(num_drones, 4)` macierz komend PWM (RPM dla 4 silników CF2X).
+        """
         if self._base_trajectories is None:
             self._base_trajectories = self._prepare_trajectories()
             self._trajectory_start_times.fill(self.hover_duration)
@@ -1337,6 +1396,7 @@ class SwarmFlightController():
 
     @property
     def all_finished(self) -> bool:
+        """`True`, gdy wszystkie drony są w `finish_radius` od końca swojego splajnu."""
         if self._base_trajectories is None:
             return False
         return all(

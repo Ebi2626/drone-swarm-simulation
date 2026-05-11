@@ -38,16 +38,19 @@ def per_gen_metrics_from_FG(
     elapsed_s: float,
     eval_count_cumulative: int,
 ) -> Dict[str, np.ndarray]:
-    """Składa dict-słownik gotowy do `put_generation_data` z F+G (już policzone).
+    """Złóż per-gen payload do `put_generation_data` z gotowych F + G.
 
     Args:
-        objectives: F z `VectorizedEvaluator.evaluate(...)`, shape (pop, n_obj).
-        constraints: G z `VectorizedEvaluator.evaluate(...)`, shape (pop, n_g)
-            lub None (brak ograniczeń → feasibility=True dla wszystkich).
-        decisions: macierz decyzyjna w postaci do zapisu, shape (pop, n_var).
-        elapsed_s: czas wallclock tej generacji (sekundy).
-        eval_count_cumulative: NFE kumulatywna (zwykle
-            `evaluator.individuals_evaluated`).
+        objectives: `(pop, n_obj)` F-vector z `VectorizedEvaluator.evaluate`.
+        constraints: `(pop, n_g)` G; `None` ⇒ feasibility = True dla wszystkich.
+        decisions: `(pop, n_var)` macierz decyzyjna do zapisu.
+        elapsed_s: Wallclock generacji [s].
+        eval_count_cumulative: Kumulatywna NFE.
+
+    Returns:
+        Słownik `{objectives_matrix, decisions_matrix, constraint_violation,
+        feasible_mask, elapsed_s, eval_count_cumulative}` gotowy do
+        `OptimizationHistoryWriter.put_generation_data`.
     """
     F = np.asarray(objectives, dtype=np.float64)
     pop = F.shape[0]
@@ -80,19 +83,22 @@ def per_gen_metrics_re_evaluate(
     elapsed_s: float,
     eval_count_cumulative: int,
 ) -> Dict[str, np.ndarray]:
-    """Wariant gdy F/G nie są zacache'owane — re-ewaluuje populację via
-    `evaluator.evaluate(...)`.
+    """Re-ewaluuj populację `evaluator.evaluate(...)` i zwróć payload per-gen.
 
-    Uwaga: re-eval zwiększa `evaluator.individuals_evaluated` — przekazuj
-    `eval_count_cumulative` ZE SNAPSHOTU PRZED re-evalem, by liczba
-    odzwierciedlała tylko optymalizację, nie instrumentację.
+    Re-eval zwiększa `evaluator.individuals_evaluated` — przekazuj
+    `eval_count_cumulative` SPRZED re-evalu, by NFE odzwierciedlała tylko
+    optymalizację, a nie instrumentację.
 
     Args:
-        evaluator: VectorizedEvaluator instance.
-        decisions_for_eval: dane wejściowe dla `evaluator.evaluate(...)`,
-            shape (pop, n_drones, n_inner+2, 3) zwykle.
-        decisions_for_log: macierz do zapisu w `decisions_matrix`,
-            zwykle reshape do (pop, n_var).
+        evaluator: `VectorizedEvaluator` z metodą `evaluate(X, out)`.
+        decisions_for_eval: Dane wejściowe dla evaluatora (zwykle
+            `(pop, n_drones, n_inner+2, 3)`).
+        decisions_for_log: `(pop, n_var)` decyzje do zapisu.
+        elapsed_s: Wallclock generacji [s].
+        eval_count_cumulative: NFE pre-eval.
+
+    Returns:
+        Słownik per-gen jak w `per_gen_metrics_from_FG`.
     """
     out: Dict[str, Any] = {}
     evaluator.evaluate(decisions_for_eval, out)

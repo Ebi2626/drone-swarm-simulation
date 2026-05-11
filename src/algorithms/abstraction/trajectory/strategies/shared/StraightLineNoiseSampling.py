@@ -16,18 +16,20 @@ class StraightLineNoiseSampling(Sampling):
                  noise_std_z: float | None = None,
                  rng: np.random.Generator | int | None = None
                 ):
-        """
-        :param start_pos: Pozycje startowe dronów (Kształt: [n_drones, 3])
-        :param target_pos: Pozycje docelowe dronów (Kształt: [n_drones, 3])
-        :param n_inner_points: Liczba węzłów kontrolnych pomiędzy startem a celem
-        :param n_drones: Liczba dronów w roju (wielkość wektora wielo-agentowego)
-        :param noise_std: Odchylenie standardowe szumu Gaussa w XY.
-        :param noise_std_z: Odchylenie standardowe szumu Gaussa w Z; jeśli None,
-                            używamy ``noise_std`` (zachowanie izotropowe, wstecznie
-                            kompatybilne). Dla planowania nisko-poziomowego (start
-                            i cel w tym samym przedziale wysokości) warto dać
-                            mniejszą wartość, by nie rozsypać całej populacji Z
-                            o zakres większy niż realna geometria lotu.
+        """Skonfiguruj parametry geometrii roju i charakterystyki szumu.
+
+        Args:
+            start_pos: `(n_drones, 3)` pozycje startowe [m].
+            target_pos: `(n_drones, 3)` pozycje docelowe [m].
+            n_inner_points: Liczba wewnętrznych węzłów kontrolnych między
+                startem a celem (bez endpointów).
+            n_drones: Rozmiar roju (zgodny z liczbą wierszy w pozycjach).
+            noise_std: Odchylenie standardowe szumu Gaussa dla osi X i Y [m].
+            noise_std_z: Odchylenie dla osi Z; `None` ⇒ użyj `noise_std`
+                (izotropowo, kompatybilność wsteczna). W planowaniu
+                nisko-poziomowym lepiej podać mniejszą wartość, żeby nie
+                rozsypać populacji Z poza realną geometrię lotu.
+            rng: Generator losowości albo seed; `None` ⇒ świeży `default_rng`.
         """
         super().__init__()
         self.rng = np.random.default_rng(rng)
@@ -39,6 +41,21 @@ class StraightLineNoiseSampling(Sampling):
         self.noise_std_z = float(noise_std_z) if noise_std_z is not None else float(noise_std)
 
     def _do(self, problem, n_samples: int, **kwargs) -> NDArray:
+        """Wygeneruj `n_samples` osobników populacji startowej.
+
+        Każdy osobnik to interpolacja linii prostej `start → target` per dron
+        + anizotropowy szum Gaussa, finalnie spłaszczony i klipowany do
+        `problem.xl`/`problem.xu`.
+
+        Args:
+            problem: Instancja `pymoo.Problem` — używana są tylko pola
+                `xl` i `xu` (granice klipowania).
+            n_samples: Liczba osobników do wygenerowania.
+
+        Returns:
+            `(n_samples, n_drones * n_inner_points * 3)` populacja
+            spłaszczona do formatu pymoo (zgodnego z `n_var` problemu).
+        """
         t_vals = np.linspace(0, 1, self.n_inner_points + 2)[1:-1]
         t = t_vals.reshape(1, 1, self.n_inner_points, 1)
 

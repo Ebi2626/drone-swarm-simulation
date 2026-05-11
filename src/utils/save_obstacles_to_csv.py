@@ -6,15 +6,15 @@ from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.obstacles.ObstacleShape import ObstacleShape
 
 def save_obstacles_to_csv(obstacles_data: ObstaclesData, filename: str = "obstacles_scenario.csv"):
-    """
-    Function to save obstacles data to a CSV file with Hydra.
+    """Zapisz `obstacles_data` do CSV w katalogu wyjściowym Hydry.
 
     Args:
-        obstacles_data (ObstaclesData): object with information about obstacles 
-        filename: name of csv file with obstacles postions and dimensions
+        obstacles_data: Macierz przeszkód `(N, 6)` z typem kształtu.
+        filename: Nazwa pliku CSV w `HydraConfig.runtime.output_dir`.
 
-    Returns:
-        None
+    Efekty uboczne:
+        Tworzy plik CSV z kolumnami zależnymi od `shape_type`
+        (CYLINDER usuwa nieużywaną 6. kolumnę).
     """
     data_matrix = obstacles_data.data
     shape_type = obstacles_data.shape_type

@@ -5,6 +5,8 @@ from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.utils.config_parser import sanitize_init_params
 
 class EmptyWorld(SwarmBaseWorld):
+    """Środowisko bez przeszkód — sanity check dla pipeline'u (offline + online)."""
+
     def __init__(
             self,
             world_data: WorldData,        # ← wymiary świata
@@ -44,4 +46,5 @@ class EmptyWorld(SwarmBaseWorld):
 
         
     def draw_obstacles(self) -> None:
-        print("[DEBUG] Generating empty environment...") 
+        """No-op: środowisko jest puste (przeszkody nie są tworzone w PyBullet)."""
+        print("[DEBUG] Generating empty environment...")

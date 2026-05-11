@@ -43,8 +43,11 @@ if TYPE_CHECKING:
 
 
 class OOAProblemAdapter(MealpyProblem):
-    """
-    Problem mealpy dla OOA z bezwzględnym wymuszaniem granic (Hard Clipping).
+    """Adapter `mealpy.Problem` dla OOA z twardym clippingiem granic.
+
+    Bez clippingu OOA bywa numerycznie niestabilne — `amend_position`
+    wywoływane przez mealpy po każdej aktualizacji wektora decyzyjnego
+    zabezpiecza przed wartościami `±∞`/`NaN`.
     """
 
     def __init__(
@@ -75,9 +78,13 @@ class OOAProblemAdapter(MealpyProblem):
         self._ub = np.asarray(bounds.ub, dtype=np.float64)
 
     def amend_position(self, position: np.ndarray, *args: Any, **kwargs: Any) -> np.ndarray:
-        """
-        NADRYWANIE MEALPY: Gwarantuje, że przy każdej aktualizacji wektora decyzyjnego,
-        agent nie wyleci w nieskończoność. Bez tego OOA bywa numerycznie niestabilne.
+        """Hook mealpy — wymuś `position ∈ [lb, ub]` z zastąpieniem `NaN` przez `ub`.
+
+        Args:
+            position: Wektor decyzyjny po ruchu agenta.
+
+        Returns:
+            Bezpieczna pozycja w obrębie granic problemu.
         """
         return np.clip(np.nan_to_num(position, nan=self._ub), self._lb, self._ub)
 
@@ -236,7 +243,28 @@ def osprey_swarm_strategy(
     timing: Optional["TimingCollector"] = None,
     seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
-    
+    """Wygeneruj trajektorię roju algorytmem OOA (Trojovský & Dehghani 2023, mealpy).
+
+    Implementacja `TrajectoryStrategyProtocol` używająca `mealpy.OriginalOOA`
+    przez adapter `OOAProblemAdapter` (twardy clipping granic) i skalaryzator
+    `TrajectorySOOAdapter`.
+
+    Args:
+        start_positions: `(N, 3)` pozycje startowe [m].
+        target_positions: `(N, 3)` pozycje docelowe [m].
+        obstacles_data: Geometria przeszkód statycznych.
+        world_data: Granice świata symulacji.
+        number_of_waypoints: Docelowa liczba punktów `W` po B-spline.
+        drone_swarm_size: Rozmiar roju `N`.
+        algorithm_params: Hiperparametry — `pop_size`, `epochs` (lub `n_gen`),
+            `n_inner_waypoints`, `objective_weights`, `penalty_weight`,
+            `noise_std_xy/_z`, `n_workers`.
+        timing: Opcjonalny `TimingCollector` faz.
+        seeds: `SeedRegistry` z subseedami `sampling` i `optimizer`.
+
+    Returns:
+        `(N, W, 3)` wygładzona trajektoria; w razie błędu — linia prosta.
+    """
     params = algorithm_params or {}
 
     local_timing = False

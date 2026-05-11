@@ -1,3 +1,9 @@
+"""Pivotuje long-form `optimization_generation_stats` do `iteration_metrics`.
+
+Per generacja zbiera wszystkie metryki SOO / MOO i wstawia jeden rekord
+do tabeli `iteration_metrics`, gdzie nieobsłużone metryki trafiają do
+kolumny JSON `extra`.
+"""
 from __future__ import annotations
 
 import json
@@ -6,6 +12,16 @@ from collections import defaultdict
 
 
 def populate_iteration_metrics(conn: sqlite3.Connection, run_id: str) -> None:
+    """Zbuduj `iteration_metrics` dla `run_id` ze szczegółowych statystyk per generacja.
+
+    Args:
+        conn: Aktywne połączenie do `analysis.db`.
+        run_id: Identyfikator runa.
+
+    Efekty uboczne:
+        Wstawia / nadpisuje rekordy w tabeli `iteration_metrics` dla
+        wszystkich generacji `run_id`.
+    """
     cur = conn.execute(
         """
         SELECT

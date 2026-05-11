@@ -3,39 +3,34 @@ import numpy as np
 
 @dataclass
 class WorldData:
-    """
-    World data class.
+    """Dane geometryczne świata: wymiary, granice min/max, bounds (`(3, 2)`) i środek.
 
-    Args:
-       dimensions (np.ndarray): world dimensions (x, y, z)
-       min_bounds (np.ndarray): minimum bounds of the world (x, y, z)
-       max_bounds (np.ndarray): maximum bounds of the world (x, y, z)
-       bounds (np.ndarray): world bounds [[xmin, xmax], [ymin, ymax], [zmin, zmax]]
-       center (np.ndarray[np.float64]): center of the world
-    Returns:
-        WordlData: (dimensions: np.ndarray, min_bounds: np.ndarray, max_bounds: np.ndarray, center: np.ndarray[np.float64])
+    Attributes:
+        dimensions: `(3,)` `[x, y, z]` w metrach.
+        min_bounds: `(3,)` `[min_x, min_y, min_z]`.
+        max_bounds: `(3,)` `[max_x, max_y, max_z]`.
+        bounds: `(3, 2)` `[[xmin, xmax], [ymin, ymax], [zmin, zmax]]`.
+        center: `(3,)` środek świata.
     """
-    dimensions: np.ndarray # x, y, z
-    min_bounds: np.ndarray # min x, min y, min z
-    max_bounds: np.ndarray # max x, max y, max z
-    bounds: np.ndarray # World bounds [[xmin, xmax], [ymin, ymax], [zmin, zmax]]
+    dimensions: np.ndarray
+    min_bounds: np.ndarray
+    max_bounds: np.ndarray
+    bounds: np.ndarray
     center: np.ndarray[np.float64]
 
 
 
 def generate_world_boundaries(width: float, length: float, height: float, ground_height: float) -> WorldData:
-    """ 
-    Ground, ceiling and side world boundaries generation.
-    World should start from (0, 0, 0) and end at (width, length, height). 
+    """Wygeneruj granice świata `(0, 0, ground_height) → (width, length, height)`.
 
     Args:
-        width (float): area width in meters (float)
-        length (float): area length in meters (float)
-        height (float): area height in meters (float)
-        ground_height (float): ground location height in meters (float) - assuming we are creating overlay above default pybullet ground
+        width: Szerokość obszaru [m].
+        length: Długość obszaru [m].
+        height: Wysokość świata [m].
+        ground_height: Wysokość podłogi [m] (overlay nad domyślnym ground PyBullet).
 
     Returns:
-        WorldData: (dimensions: np.ndarray, min_bounds: np.ndarray, max_bounds: np.ndarray)
+        `WorldData` z policzonymi `dimensions / min_bounds / max_bounds / bounds / center`.
     """
 
     dtype = np.float64

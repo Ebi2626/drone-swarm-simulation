@@ -30,31 +30,60 @@ from scipy import stats
 
 @dataclass
 class FriedmanResult:
+    """Wynik testu Friedmana z post-hoc Nemenyi.
+
+    Args:
+        statistic: Statystyka χ² Friedmana.
+        p_value: p-value testu Friedmana.
+        n_datasets: Liczba „dataset"-ów (`env × seed`).
+        n_algorithms: Liczba porównywanych algorytmów.
+        average_ranks: Średnia ranga per algorytm.
+        cd_nemenyi: Critical difference Nemenyi (α=0.05) lub `None`,
+            gdy `k` poza tablicą.
+    """
     statistic: float
     p_value: float
-    n_datasets: int        # liczba (env × seed) "dataset"-ów
+    n_datasets: int
     n_algorithms: int
     average_ranks: dict[str, float]
-    cd_nemenyi: Optional[float]   # critical difference dla Nemenyi α=0.05
+    cd_nemenyi: Optional[float]
 
 
 @dataclass
 class WilcoxonPair:
+    """Wynik testu Wilcoxon signed-rank dla pary algorytmów.
+
+    Args:
+        alg_a, alg_b: Nazwy porównywanych algorytmów.
+        statistic: Statystyka Wilcoxon `W`.
+        p_value: Surowe p-value (two-sided).
+        p_value_holm: p-value po korekcji Holm-Bonferroni (monotoniczne).
+        n: Liczba sparowanych obserwacji.
+        median_diff: Mediana z różnic `x − y`.
+    """
     alg_a: str
     alg_b: str
     statistic: float
     p_value: float
-    p_value_holm: float    # po korekcji Holm-Bonferroni
-    n: int                 # liczba par
+    p_value_holm: float
+    n: int
     median_diff: float
 
 
 @dataclass
 class A12Result:
+    """Effect size Vargha-Delaney A12 dla pary algorytmów.
+
+    Args:
+        alg_a, alg_b: Nazwy porównywanych algorytmów.
+        a12: Wartość A12 ∈ `[0, 1]`; `0.5` oznacza brak efektu.
+        magnitude: Klasyfikacja `negligible / small / medium / large`
+            (Vargha & Delaney 2000).
+    """
     alg_a: str
     alg_b: str
     a12: float
-    magnitude: str         # negligible/small/medium/large per Vargha-Delaney
+    magnitude: str
 
 
 # ----------------------------------------------------------------------
@@ -70,19 +99,21 @@ def friedman_with_nemenyi(
     block_cols: Iterable[str] = ("environment", "seed"),
     alpha: float = 0.05,
 ) -> FriedmanResult:
-    """Friedman test + Nemenyi post-hoc.
+    """Wykonaj test Friedmana z post-hoc Nemenyi (Demšar 2006).
 
     Args:
-        df: long-form DataFrame z kolumnami `group_col`, `block_cols`, `metric`.
-        higher_is_better: jeśli True, ranking odwracamy (większe = lepsze rank).
-        block_cols: kolumny definiujące "datasets" (Demšar 2006 nomenclature).
+        df: Long-form DataFrame z kolumnami `group_col`, `block_cols`, `metric`.
+        metric: Kolumna metryki.
+        higher_is_better: `True` ⇒ ranking odwracamy (większe = lepsza ranga).
+        group_col: Kolumna identyfikująca algorytm.
+        block_cols: Kolumny definiujące „datasets".
+        alpha: Poziom istotności dla Nemenyi (`0.05` lub `0.10`).
 
     Returns:
-        FriedmanResult z statistic, p_value, average ranks per algorytm,
-        oraz critical difference (Nemenyi α=0.05).
+        `FriedmanResult` ze statystyką, p-value, średnimi rangami i CD Nemenyi.
 
     Raises:
-        ValueError gdy < 2 algorytmów lub brak kompletnego bloku.
+        ValueError: Gdy mniej niż 2 algorytmy lub mniej niż 2 datasety.
     """
     block_cols = list(block_cols)
     pivot = df.pivot_table(
@@ -137,6 +168,7 @@ _NEMENYI_Q_ALPHA_10 = {
 
 
 def _nemenyi_q_alpha(k: int, alpha: float) -> Optional[float]:
+    """Zwróć stałą `q_alpha` Nemenyi dla `k` algorytmów; `None` poza tablicą."""
     table = _NEMENYI_Q_ALPHA_05 if abs(alpha - 0.05) < 1e-6 else (
         _NEMENYI_Q_ALPHA_10 if abs(alpha - 0.10) < 1e-6 else None
     )
@@ -156,10 +188,17 @@ def wilcoxon_pairwise(
     group_col: str = "optimizer",
     block_cols: Iterable[str] = ("environment", "seed"),
 ) -> list[WilcoxonPair]:
-    """Wilcoxon signed-rank dla każdej pary algorytmów + Holm correction.
+    """Wykonaj Wilcoxon signed-rank dla każdej pary algorytmów z korekcją Holma.
+
+    Args:
+        df: Long-form DataFrame z kolumnami `group_col`, `block_cols`, `metric`.
+        metric: Kolumna metryki.
+        group_col: Kolumna identyfikująca algorytm.
+        block_cols: Kolumny definiujące „datasets" (parowanie obserwacji).
 
     Returns:
-        Lista par posortowana po surowym p-value (najmniejszy najpierw).
+        Lista `WilcoxonPair` posortowana po surowym p-value rosnąco; `p_value_holm`
+        jest monotoniczne w tej kolejności.
     """
     block_cols = list(block_cols)
     pivot = df.pivot_table(
@@ -220,17 +259,20 @@ def vargha_delaney_a12(
     group_col: str = "optimizer",
     higher_is_better: bool = False,
 ) -> list[A12Result]:
-    """Vargha-Delaney A12 — non-parametric effect size.
+    """Wylicz Vargha-Delaney A12 dla każdej pary algorytmów.
 
-    A12 = P(X > Y) + 0.5 · P(X = Y).
-    Jeśli `higher_is_better=False`, wynik interpretujemy względem reverse:
-      A12(A vs B) = P(A < B) + 0.5·P(A = B) — A jest "lepszy" gdy A12 > 0.5.
+    `A12 = P(X better than Y) + 0.5·P(X = Y)`. Klasyfikacja magnitude wg
+    Vargha & Delaney (2000): `<0.06` negligible, `<0.14` small, `<0.21`
+    medium, `≥0.21` large.
 
-    Magnitude (Vargha & Delaney 2000):
-      |A12 − 0.5| < 0.06: negligible
-      0.06 ≤ ... < 0.14: small
-      0.14 ≤ ... < 0.21: medium
-      ≥ 0.21:           large
+    Args:
+        df: Long-form DataFrame z `group_col` i `metric`.
+        metric: Kolumna metryki.
+        group_col: Kolumna identyfikująca algorytm.
+        higher_is_better: `True` ⇒ „better" = `>`; `False` ⇒ „better" = `<`.
+
+    Returns:
+        Lista `A12Result` dla wszystkich par algorytmów.
     """
     algs = sorted(df[group_col].unique())
     results: list[A12Result] = []
@@ -245,9 +287,7 @@ def vargha_delaney_a12(
 
 
 def _a12_value(x: np.ndarray, y: np.ndarray, higher_is_better: bool) -> float:
-    """A12 = P(X better than Y) + 0.5 P(X == Y).
-    "Better" = > gdy higher_is_better, < gdy lower_is_better.
-    """
+    """`A12 = P(X better Y) + 0.5·P(X = Y)` — `>` gdy `higher_is_better`, inaczej `<`."""
     n_x, n_y = len(x), len(y)
     if higher_is_better:
         wins = float((x[:, None] > y[None, :]).sum())
@@ -258,6 +298,7 @@ def _a12_value(x: np.ndarray, y: np.ndarray, higher_is_better: bool) -> float:
 
 
 def _a12_magnitude(a12: float) -> str:
+    """Klasyfikuj A12: `negligible / small / medium / large` (Vargha-Delaney 2000)."""
     diff = abs(a12 - 0.5)
     if diff < 0.06:
         return "negligible"
@@ -280,10 +321,18 @@ def bootstrap_ci(
     confidence: float = 0.95,
     rng_seed: int = 42,
 ) -> tuple[float, float, float]:
-    """Bootstrap percentile CI dla `statistic` (default: median).
+    """Wylicz bootstrap percentile CI dla statystyki `statistic` (domyślnie mediana).
+
+    Args:
+        values: Iterable wartości; `NaN` są filtrowane.
+        statistic: Funkcja agregująca (`np.median`, `np.mean`, …).
+        n_resamples: Liczba bootstrap re-sampli.
+        confidence: Poziom ufności w `(0, 1)`.
+        rng_seed: Ziarno generatora dla powtarzalności.
 
     Returns:
-        (point_estimate, ci_low, ci_high). CI używa percentyli z resampli.
+        `(point_estimate, ci_low, ci_high)`; `(NaN, NaN, NaN)` przy pustym
+        wejściu, `(point, point, point)` dla 1 obserwacji.
     """
     arr = np.asarray(list(values), dtype=float)
     arr = arr[~np.isnan(arr)]
@@ -307,11 +356,17 @@ def summary_with_ci(
     group_cols: Iterable[str] = ("environment", "optimizer"),
     n_resamples: int = 10000,
 ) -> pd.DataFrame:
-    """Buduje summary table per group: mean, std, median, IQR, CI95(median).
+    """Zwróć summary table per grupa: `n`, mean, std, median + IQR i CI95(median).
+
+    Args:
+        df: Long-form DataFrame z kolumnami `group_cols` i `metric`.
+        metric: Kolumna metryki.
+        group_cols: Kolumny grupujące (np. `(environment, optimizer)`).
+        n_resamples: Liczba bootstrap re-sampli dla CI95 mediany.
 
     Returns:
-        DataFrame indexed by group_cols, columns:
-        ['n', 'mean', 'std', 'median', 'q25', 'q75', 'ci95_low', 'ci95_high'].
+        DataFrame z kolumnami `[*group_cols, n, mean, std, median, q25, q75,
+        ci95_low, ci95_high]` posortowany rosnąco po `group_cols`.
     """
     group_cols = list(group_cols)
     records = []

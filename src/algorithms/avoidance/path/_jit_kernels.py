@@ -18,6 +18,16 @@ from numba import njit
 
 @njit(cache=True, fastmath=True)
 def jit_douglas_peucker(points: np.ndarray, epsilon: float) -> np.ndarray:
+    """Uprość polilinię algorytmem Ramera-Douglasa-Peuckera (zachowuje endpointy).
+
+    Args:
+        points: `(N, 3)` punkty trasy.
+        epsilon: Próg odchylenia [m] — punkty bliżej prostej `endpoints`
+            niż `epsilon` są usuwane.
+
+    Returns:
+        `(M, 3)`, `M ≤ N` — punkty zachowane przez algorytm.
+    """
     n = len(points)
     if n < 3:
         return points.copy()
@@ -84,6 +94,17 @@ def jit_douglas_peucker(points: np.ndarray, epsilon: float) -> np.ndarray:
 
 @njit(cache=True, fastmath=True)
 def jit_resample_uniform(points: np.ndarray, n: int) -> np.ndarray:
+    """Resampluj polilinię na `n` równomiernie rozłożonych punktów po długości łuku.
+
+    Args:
+        points: `(N_pts, 3)` polilinia źródłowa.
+        n: Docelowa liczba punktów (przy `N_pts ≤ 2` lub `n ≤ 2` zwracane
+           są tylko endpointy).
+
+    Returns:
+        `(n, 3)` punkty z liniową interpolacją wzdłuż łuku; gdy łuk
+        ma zerową długość — `n` kopii pierwszego punktu.
+    """
     n_pts = len(points)
     if n_pts <= 2 or n <= 2:
         if n_pts >= 2:
@@ -134,6 +155,23 @@ def jit_fallback_path(current_pos: np.ndarray, rejoin_point: np.ndarray,
                       preferred_dir: np.ndarray, obs_pos: np.ndarray,
                       obs_radius: float, floor_z: float, ceiling_z: float,
                       obs_vel: np.ndarray) -> np.ndarray:
+    """5-punktowa awaryjna trajektoria objazdu używana, gdy planer główny zawiedzie.
+
+    Próbuje 3 razy zwiększyć offset lateralny, sprawdzając kolizję
+    z `obs_pos`; zwraca najbezpieczniejszy wariant w obrębie limitów Z.
+
+    Args:
+        current_pos, rejoin_point: `(3,)` punkty start/koniec [m].
+        preferred_dir: `(3,)` kierunek lateralny preferowany przez planer.
+        obs_pos: `(3,)` pozycja przeszkody.
+        obs_radius: Promień przeszkody [m].
+        floor_z, ceiling_z: Limity Z [m].
+        obs_vel: `(3,)` prędkość przeszkody — używana do dołożenia
+            anty-prędkościowego komponentu w środkowym punkcie.
+
+    Returns:
+        `(5, 3)` punkty trasy `[start, p1, p2, p3, rejoin]`.
+    """
     diag = rejoin_point - current_pos
     mid = 0.5 * (current_pos + rejoin_point)
     offset_m = obs_radius * 1.5
@@ -191,6 +229,30 @@ def jit_insert_tangent_leads(waypoints: np.ndarray, current_pos: np.ndarray,
                              base_tangent_at_rejoin: np.ndarray,
                              ref_speed: float, obs_pos: np.ndarray,
                              obs_radius: float, lead_mult: float) -> np.ndarray:
+    """Dodaj punkty styczne na początku (do `forward_3d`) i końcu (do tangensu rejoin).
+
+    Lead-in/out gwarantują gładkie przejście prędkości w punkcie startu uniku
+    i punkcie powrotu na trasę bazową — bez tego B-spline produkuje wyraźny
+    kink na granicach.
+
+    Args:
+        waypoints: `(N, 3)` ścieżka po Douglas-Peuckerze i resamplingu.
+        current_pos: `(3,)` aktualna pozycja drona [m].
+        forward_3d: `(3,)` jednostkowy wektor kierunku ruchu drona.
+        rejoin_point: `(3,)` punkt powrotu na trasę bazową [m].
+        base_tangent_at_rejoin: `(3,)` jednostkowy tangens trasy bazowej
+            w punkcie powrotu.
+        ref_speed: Referencyjna prędkość przelotowa [m/s].
+        obs_pos: `(3,)` pozycja przeszkody.
+        obs_radius: Promień przeszkody [m].
+        lead_mult: Mnożnik długości lead-in/out (testowany w pętli wyboru
+            najlepszego wariantu).
+
+    Returns:
+        `(N + lead_count, 3)` ścieżka z dołożonymi punktami stycznymi
+        (`lead_count ∈ {0, 1, 2}` — nieaktywne, gdy lead-point byłby w
+        kolizji z przeszkodą).
+    """
     n_wp = len(waypoints)
     if n_wp < 2:
         return waypoints.copy()
@@ -261,6 +323,12 @@ def jit_insert_tangent_leads(waypoints: np.ndarray, current_pos: np.ndarray,
 @njit(cache=True, fastmath=True)
 def jit_space_in_xy_dir(pos_x: float, pos_y: float, dir_x: float, dir_y: float,
                         wmin_x: float, wmin_y: float, wmax_x: float, wmax_y: float) -> float:
+    """Maksymalny dystans od `(pos_x, pos_y)` w kierunku `(dir_x, dir_y)` w XY bbox [m].
+
+    Returns:
+        Dystans skalowany do jednostkowego wektora kierunku; `0`, gdy
+        `(dir_x, dir_y) ≈ 0` lub bbox nie jest osiągalny.
+    """
     norm = np.sqrt(dir_x**2 + dir_y**2)
     if norm < 1e-6: return 0.0
     dx = dir_x / norm; dy = dir_y / norm

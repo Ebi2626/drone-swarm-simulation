@@ -4,21 +4,29 @@ from dataclasses import dataclass
 from typing import Optional
 
 class CommandType(Enum):
+    """Komendy interaktywne z klawiatury PyBullet GUI."""
     TOGGLE_SIMULATION = auto()
     SWITCH_DRONE_CAMERA = auto()
     TOGGLE_LIDAR_RAYS = auto()
     EXIT = auto()
 
+
 @dataclass
 class SimulationCommand:
+    """Komenda symulacji: typ + opcjonalny payload (np. indeks drona dla SWITCH)."""
     type: CommandType
     payload: Optional[int] = None
 
+
 class InputHandler:
+    """Mapuje klawisze PyBullet (`getKeyboardEvents`) na `SimulationCommand`."""
+
     def __init__(self, num_drones: int):
+        """Skonfiguruj handler dla `num_drones` (limit klawiszy `1..9`/`0`)."""
         self.num_drones = num_drones
 
     def get_command(self) -> Optional[SimulationCommand]:
+        """Sprawdź klawisze; zwróć `SimulationCommand` lub `None`, gdy nic nie naciśnięto."""
         keys = p.getKeyboardEvents()
         
         if ord(' ') in keys and (keys[ord(' ')] & p.KEY_WAS_TRIGGERED):            

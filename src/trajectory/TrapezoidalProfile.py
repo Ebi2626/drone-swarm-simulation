@@ -1,7 +1,16 @@
 import numpy as np
 
 class TrapezoidalProfile:
+    """Trapezoidalny profil prędkości (accel → cruise → decel) z fall-back-iem trójkątnym."""
+
     def __init__(self, total_distance: float, cruise_speed: float, max_accel: float):
+        """Skonfiguruj profil; przy zbyt krótkiej trasie redukuje się do trójkąta.
+
+        Args:
+            total_distance: Łączna długość trasy [m].
+            cruise_speed: Maks. prędkość przelotowa [m/s].
+            max_accel: Maks. akceleracja / deceleracja [m/s²].
+        """
         self.total_distance = total_distance
         self.cruise_speed = cruise_speed
         self.max_accel = max_accel
@@ -17,6 +26,7 @@ class TrapezoidalProfile:
         self._compute_profile()
 
     def _compute_profile(self) -> None:
+        """Wylicz długości faz `(s_a, s_c, s_d)`, `v_peak` i `total_duration` dla trasy."""
         if self.total_distance <= 1e-6:
             return
 
@@ -43,6 +53,7 @@ class TrapezoidalProfile:
         self.total_duration = 2 * self.t_a + self.t_c
 
     def get_state(self, t: float) -> tuple[float, float]:
+        """Zwróć `(distance, speed)` dla czasu `t`; cap do `total_duration / total_distance`."""
         t = np.clip(t, 0.0, self.total_duration)
 
         if self.total_distance <= 1e-6:

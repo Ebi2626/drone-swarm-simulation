@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Standalone wizualizator 3D trajektorii roju z artefaktów runa (CSV)."""
 import argparse
 import os
 import sys
@@ -7,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 def plot_cylinder(ax, x, y, z_start, height, radius, color='red', alpha=0.3):
-    """Rysuje cylinder (przeszkodę) na osiach 3D."""
+    """Narysuj walec (przeszkodę) na osiach 3D `(x, y, z_start..z_start+height, radius)`."""
     z = np.linspace(z_start, z_start + height, 20)
     theta = np.linspace(0, 2 * np.pi, 20)
     theta_grid, z_grid = np.meshgrid(theta, z)
@@ -18,10 +19,12 @@ def plot_cylinder(ax, x, y, z_start, height, radius, color='red', alpha=0.3):
     ax.plot_surface(x_grid, y_grid, z_grid, color=color, alpha=alpha, shade=True)
 
 def set_axes_equal_3d(ax, limits, z_stretch=5.0):
-    """
-    Ustawia rzeczywiste limity danych ze świata i dopasowuje kształt "pudełka" 3D.
-    Parametr z_stretch pozwala sztucznie podwyższyć wizualnie oś Z (np. 5-krotnie), 
-    co jest kluczowe dla map bardzo długich (Y=600m), a płaskich (Z=11m).
+    """Ustaw twarde `xlim/ylim/zlim` z `limits` i wymuś `box_aspect`; `z_stretch` skaluje Z.
+
+    Args:
+        ax: Osie 3D matplotlib.
+        limits: Krotka `((xmin, xmax), (ymin, ymax), (zmin, zmax))`.
+        z_stretch: Mnożnik wizualnej rozpiętości Z (kompensacja płaskich map).
     """
     x_limits, y_limits, z_limits = limits
     
@@ -40,6 +43,7 @@ def set_axes_equal_3d(ax, limits, z_stretch=5.0):
     ax.set_box_aspect((x_range, y_range, z_range * z_stretch))
     
 def main():
+    """CLI: wczytaj CSV-i z katalogu runa i pokaż interaktywny wykres 3D."""
     parser = argparse.ArgumentParser(description="Wizualizacja 3D trajektorii roju dronów.")
     parser.add_argument("directory", type=str, help="Ścieżka do katalogu z plikami CSV.")
     args = parser.parse_args()

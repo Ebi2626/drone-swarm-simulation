@@ -26,6 +26,17 @@ class AxisBiasFitness(IFitnessEvaluator):
         axis_anti_obsvel_gain: float = 1.0,
         anti_threshold: float = 0.15,
     ) -> None:
+        """Skonfiguruj kolejność osi i wagi heurystyki.
+
+        Args:
+            prefer_axis_order: Kolejność preferowanych osi przy remisach.
+            bias_preferred, bias_perpendicular, bias_oppose: Wagi
+                wymagane przez kontrakt `IFitnessEvaluator`.
+            axis_anti_obsvel_gain: Mnożnik komponentu anty-prędkościowego.
+            anti_threshold: Próg szumu — poniżej anty-prędkościowy
+                komponent jest ignorowany (zapobiega oscylacjom przy
+                małych ruchach przeszkody).
+        """
         self.prefer_axis_order = list(prefer_axis_order)
         self.bias_preferred = float(bias_preferred)
         self.bias_perpendicular = float(bias_perpendicular)
@@ -44,6 +55,7 @@ class AxisBiasFitness(IFitnessEvaluator):
         }
 
     def order_score(self, axis_name: str) -> float:
+        """Tie-break score `0…0.1` dla osi `axis_name` zgodnie z `prefer_axis_order`."""
         return self._order_scores.get(axis_name, 0.0)
 
     def axis_score(
@@ -54,6 +66,7 @@ class AxisBiasFitness(IFitnessEvaluator):
         obs_vel_hat: NDArray[np.float64] | None,
         order_score: float,
     ) -> float:
+        """Patrz `IFitnessEvaluator.axis_score`. Wyższy wynik = oś korzystniejsza."""
         axis_hat = axis_dir / (np.linalg.norm(axis_dir) + 1e-9)
         if obs_vel_hat is not None:
             anti = max(0.0, -float(np.dot(axis_hat, obs_vel_hat)))

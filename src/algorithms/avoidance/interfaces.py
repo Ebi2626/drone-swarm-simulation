@@ -1,3 +1,17 @@
+"""Cztery interfejsy abstrakcyjne (Strategy Pattern) dla planera uniku online.
+
+Hierarchia ról:
+- `IObstaclePredictor` — model przyszłej pozycji przeszkody.
+- `IPathRepresentation` — konwersja waypointów / genów na `BSplineTrajectory`.
+- `IFitnessEvaluator` — koszt / ocena trajektorii uniku (`axis_score` lub
+  pełne `evaluate`).
+- `IPathOptimizer` — silnik wybierający waypointy w zadanym budżecie czasu.
+
+Wszystkie implementacje są wstrzykiwane przez Hydra (`_target_` w yaml-u
+strategii uniku) — wymiana komponentu nie wymaga zmian w kodzie.
+`PathProblem` i `OptimizationResult` to dataklasy hermetyzujące I/O
+optymalizatora.
+"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -275,4 +289,16 @@ class IPathOptimizer(ABC):
         problem: PathProblem,
         budget: TimeBudget,
     ) -> OptimizationResult:
+        """Wybierz najlepsze waypointy uniku w ramach `budget`.
+
+        Args:
+            problem: Pakiet danych (kontekst, predyktor, fitness, reprezentacja
+                ścieżki, opcjonalna pre-wygenerowana populacja).
+            budget: Kooperacyjny limit czasu — sprawdzaj
+                `budget.check_or_raise()` w hot-loopie.
+
+        Returns:
+            `OptimizationResult` z `waypoints` (`None` przy `timed_out`/`failed`),
+            `elapsed_s`, `status` i diagnostyką w `extra`.
+        """
         ...

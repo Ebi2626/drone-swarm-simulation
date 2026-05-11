@@ -45,25 +45,28 @@ def populate_moo_quality(
     ideal_point: Optional[np.ndarray] = None,
     compute_baseline_metrics: bool = True,
 ) -> None:
-    """Liczy spread/spacing/r2 (zawsze gdy compute_baseline_metrics) + gd/igd+
-    (gdy reference_set!=None) + hypervolume (gdy reference_point!=None) per
-    generacja i wpisuje do `optimization_generation_stats`.
+    """Wylicz wskaźniki jakości MOO per generacja z `h5_path` i wpisz do `optimization_generation_stats`.
+
+    Liczone wskaźniki:
+      - spread / spacing / r2 — gdy `compute_baseline_metrics` (domyślnie),
+      - GD / IGD+ — gdy podany `reference_set`,
+      - hypervolume (+ normalized) — gdy podany `reference_point` (i `ideal_point`).
 
     Args:
-        reference_set: R per (env, n_obj) dla GD/IGD+. Riquelme et al. 2015.
-        reference_point: r* per (env, n_obj) dla HV. Ishibuchi et al. 2018.
-        ideal_point: z* = min(R, axis=0) per (env, n_obj). Wymagany dla
-            `hypervolume_normalized = HV / Π(r* − z*)` (Riquelme 2015 §3.6,
-            zapewnia cross-env porównywalność HV).
-        compute_baseline_metrics: gdy False, pomija spread/spacing/r2
-            (zakłada że są już w `optimization_generation_stats` z poprzedniego
-            biegu). Używane w `backfill_moo_quality_with_reference` żeby
-            uniknąć ~70% redundantnej pracy. Default True (kompatybilność
-            wsteczna — niezmienione dla bezpośrednich wywołań z populate_database).
+        conn: Aktywne połączenie do bazy.
+        run_id: Identyfikator runa.
+        h5_path: Ścieżka do `optimization_history.h5`.
+        reference_set: `R` per `(env, n_obj)` dla GD / IGD+ (Riquelme 2015).
+        reference_point: `r*` dla hypervolume (Ishibuchi 2018).
+        ideal_point: `z* = min(R, axis=0)` — wymagany dla
+            `hypervolume_normalized = HV / Π(r* − z*)` (cross-env porównywalność).
+        compute_baseline_metrics: `False` ⇒ pomija spread / spacing / r2
+            (używane przez `backfill_moo_quality_with_reference`).
 
-    Idempotentne: re-run nadpisuje (INSERT OR REPLACE).
-    `populate_iteration_metrics` musi być wywołany PO tej funkcji żeby
-    pochwycić nowe metryki do tablicy `iteration_metrics`.
+    Efekty uboczne:
+        Wstawia / zastępuje rekordy w `optimization_generation_stats`.
+        `populate_iteration_metrics` musi być wywołany ZA tym, by pochwycić
+        nowe metryki w `iteration_metrics`.
     """
     if not h5_path.exists():
         return

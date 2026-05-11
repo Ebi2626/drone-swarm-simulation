@@ -62,7 +62,26 @@ _EVASION_HEADERS = [
 ]
 
 class SimulationLogger:
+    """Centralny logger symulacji — bufory RAM dla wszystkich CSV/h5 (flush w `save()`).
+
+    Bufory zapisywane przy `save()` do plików w `output_dir`:
+      - `trajectories.csv`, `collisions.csv`, `evasion_events.csv`,
+      - `optimization_timings.csv`, `online_optimization.csv`,
+      - `convergence_traces.csv`, `world_boundaries.csv`,
+      - `generated_obstacles.csv`, `counted_trajectories.csv`,
+      - `lidar_hits.h5` (asynchroniczny `LidarHDF5Writer`).
+    """
+
     def __init__(self, output_dir, log_freq, ctrl_freq, num_drones, log_lidar_hits: bool = False):
+        """Skonfiguruj bufory, częstotliwości próbkowania i writer LiDAR.
+
+        Args:
+            output_dir: Katalog docelowy artefaktów runa.
+            log_freq: Pożądana częstotliwość logu trajektorii [Hz].
+            ctrl_freq: Częstotliwość symulacji [Hz]; wyznacza `log_step_interval`.
+            num_drones: Liczba dronów (do walidacji).
+            log_lidar_hits: `True` ⇒ logowanie pełnej historii LiDAR do h5.
+        """
         self.output_dir = output_dir
         # `run_id` używane w online_optimization.csv / convergence_traces.csv —
         # default = basename katalogu (zwykle Hydra timestamp). Może być nadpisane
@@ -91,6 +110,7 @@ class SimulationLogger:
         print("[LOGGER] Buffering in RAM. Writing to disk after completion.")
 
     def log_step(self, step_idx, current_time, all_states):
+        """Zaloguj pozycje, RPY i velocity wszystkich dronów co `log_step_interval` kroków."""
         if step_idx % self.log_step_interval == 0:
             for drone_id, state in enumerate(all_states):
                 if drone_id in self.crashed_drones:
@@ -112,6 +132,7 @@ class SimulationLogger:
                 self.trajectory_buffer.append(record)
 
     def log_collision(self, current_time, drone_id, other_body_id):
+        """Zaloguj kolizję `drone_id` z `other_body_id` (raz per dron, ignoruje `t < 1s`)."""
         if current_time < 1:
             return
         
@@ -128,7 +149,7 @@ class SimulationLogger:
             
     # --- NOWA METODA LOGOWANIA LIDARU ---
     def log_lidar_hit(self, current_time: float, drone_id: int, hit):
-        """Zapisuje w buforze konkretne uderzenie promienia LiDARu."""
+        """Asynchronicznie zapisz pojedyncze trafienie LiDAR do `lidar_hits.h5` (gdy włączone)."""
         # Ze względu na ogromną liczbę promieni, zaokrąglamy dla oszczędności pamięci
         if(self.log_lidar_hits is True):
             self._lidar_writer.put((
@@ -166,21 +187,26 @@ class SimulationLogger:
         # `fallback_used` nie podane.
         astar_success: Optional[bool] = None,
     ) -> None:
-        """
-        Rekord diagnostyczny fazy uniku — pozwala mierzyć opóźnienie triggera,
-        skuteczność planowania (`fallback_used`), błędy pozycji/prędkości przy
-        rejoin. Fields mogą być NaN/None jeśli nieznane w danym zdarzeniu.
+        """Dorzuć do bufora rekord diagnostyczny zdarzenia uniku.
 
         Args:
-            ttc_source: 'oracle_discrete' (z deterministycznej predykcji
-                splajnowej, dyskretyzowane) lub 'continuous' (klasyczne
-                `dist / closing_speed`). Pomaga rozpoznać czy ttc jest
-                proporcjonalne do `dist_to_threat`.
-            preferred_axis: 'right' | 'left' | 'up' | 'down' lub None — oś wybrana
-                przez `AxisChooser` w SingleArcDeflection (notacja kierunkowa
-                względem drone forward velocity XY).
-            astar_success: DEPRECATED. Algorytm A* wycofany; używać
-                `fallback_used` (semantycznie odwrotny).
+            current_time: Czas symulacji [s].
+            drone_id: Indeks drona.
+            event_type: `trigger / blend_start / rejoin / fallback / …`.
+            mode: `MODE_*` z `SwarmFlightController`.
+            ttc, dist_to_threat: Time-to-collision i dystans do zagrożenia.
+            ttc_source: `'oracle_discrete'` lub `'continuous'`.
+            threat_pos, threat_vel: Stan zagrożenia (`(3,)` lub `None`).
+            rejoin_point, rejoin_arc: Punkt powrotu i odpowiadający łuk
+                bazowego splajnu.
+            preferred_axis: `right / left / up / down / None` — wybrana oś.
+            fallback_used: `True`, gdy plan z fallbacku zamiast optymalizatora.
+            pos_error_at_rejoin, vel_error_at_rejoin, planning_wall_time_s,
+            notes: Dodatkowe pola diagnostyczne.
+            astar_success: DEPRECATED — używać `fallback_used` (odwrotne).
+
+        Efekty uboczne:
+            Append do `evasion_buffer` (zapisywany w `save`).
         """
         def _xyz(v: Optional[NDArray]) -> tuple:
             if v is None:
@@ -219,11 +245,11 @@ class SimulationLogger:
     def log_online_optimization_trigger(
         self, record: OnlineOptimizationRecord
     ) -> None:
-        """Zapisuje per-trigger summary metryki optymalizacji online.
+        """Dorzuć `record` (per-trigger summary) do bufora online optymalizacji.
 
-        Outcome (grupa D) zostaje na sentinelu `pending` aż do BLEND_END /
-        kolizji — wtedy `update_online_optimization_outcome` znajdzie wpis po
-        PK `(drone_id, trigger_time)` i wypełni grupę D in-place.
+        Outcome (grupa D) pozostaje `OUTCOME_PENDING` aż do BLEND_END /
+        kolizji — wtedy `update_online_optimization_outcome` wypełnia grupę D
+        in-place po PK `(drone_id, trigger_time)`.
         """
         self.online_optimization_buffer.append(record_to_dict(record))
 
@@ -237,13 +263,17 @@ class SimulationLogger:
         vel_err_at_rejoin_mps: float = float("nan"),
         time_to_rejoin_s: float = float("nan"),
     ) -> None:
-        """Wypełnia grupę D dla rekordu z `(drone_id, trigger_time)`.
+        """Uzupełnij grupę D rekordu pasującego do `(drone_id, trigger_time)` z tolerancją 1 µs.
 
-        Match po PK z toleranicją `_PK_FLOAT_TOL_S` (1e-6 s) — zaokrąglenie
-        timestampu w SwarmFlightController nie powinno gubić matchu.
+        Args:
+            drone_id, trigger_time: Klucz wyszukiwania (`_PK_FLOAT_TOL_S`).
+            outcome: `OUTCOME_*` z `optimization_metrics`.
+            pos_err_at_rejoin_m, vel_err_at_rejoin_mps, time_to_rejoin_s:
+                Wartości grupy D do wpisania.
 
-        Jeśli rekord nie znaleziony — drukujemy warning (race condition lub
-        outcome dla triggerowania, które dało plan=None) i kontynuujemy.
+        Efekty uboczne:
+            Aktualizuje rekord in-place. Brak match-a ⇒ `print` z ostrzeżeniem
+            (race lub outcome dla `plan=None`).
         """
         for rec in reversed(self.online_optimization_buffer):
             if rec["drone_id"] != drone_id:
@@ -273,10 +303,12 @@ class SimulationLogger:
         algorithm: str,
         trace: List[float],
     ) -> None:
-        """Append N rekordów long-format dla 1 trigger'a (1 wiersz / generacja).
+        """Append `len(trace)` rekordów long-form (1 wiersz / generacja) dla 1 triggera.
 
-        Pusty trace (np. optimizer wyleciał z BudgetExceeded zanim cokolwiek
-        wyewaluował) → zero rekordów; outer caller nie musi rozróżniać.
+        Args:
+            run_id, drone_id, trigger_time, algorithm: Pola identyfikacyjne
+                (FK do `OnlineOptimizationRecord`).
+            trace: Lista `best_fitness` per generacja; pusta ⇒ zero rekordów.
         """
         for gen, fit in enumerate(trace):
             sample = ConvergenceSample(
@@ -290,6 +322,7 @@ class SimulationLogger:
             self.convergence_traces_buffer.append(record_to_dict(sample))
 
     def _trajectory_to_dataframe(self, trajectory: NDArray) -> pd.DataFrame:
+        """Spłaszcz `(n_drones, n_waypoints, 3)` do tidy DataFrame `(drone_id, waypoint_id, x, y, z)`."""
         n_drones, n_waypoints, _ = trajectory.shape
         drone_ids, waypoint_ids = np.meshgrid(
             np.arange(n_drones),
@@ -305,6 +338,7 @@ class SimulationLogger:
         })
 
     def _obstacles_to_dataframe(self, obstacles: ObstaclesData) -> pd.DataFrame:
+        """Zamień `ObstaclesData` na DataFrame z kolumnami zależnymi od `shape_type`."""
         columns = ['x', 'y', 'z']
         shape_type = obstacles.shape_type
         if shape_type == ObstacleShape.BOX:
@@ -320,6 +354,7 @@ class SimulationLogger:
         return df
     
     def _world_to_dataframe(self, world: WorldData) -> pd.DataFrame:
+        """Zamień `WorldData` na DataFrame z indeksem `[X, Y, Z]` i 4 kolumnami."""
         data = {
             'Dimension': world.dimensions,
             'Min_Bound': world.min_bounds,
@@ -330,18 +365,21 @@ class SimulationLogger:
         return df
 
     def log_chosen_trajectories(self, trajectories: NDArray):
+        """Zapisz wybrane trajektorie offline do `counted_trajectories.csv`."""
         trajectories_data_frame = self._trajectory_to_dataframe(trajectories)
         path = os.path.join(self.output_dir, "counted_trajectories.csv")
         trajectories_data_frame.to_csv(path, index=False, float_format="%.4f")
         print(f"Zapisano {len(trajectories_data_frame)} punktów do: {path}")
 
     def log_world_dimensions(self, world: WorldData):
+        """Zapisz `world` jako `world_boundaries.csv` (do replayu)."""
         world_data_frame = self._world_to_dataframe(world)
         path = os.path.join(self.output_dir, "world_boundaries.csv")
         world_data_frame.to_csv(path, index=True, index_label="Axis", float_format="%.4f")
         print(f"Zapisano {len(world_data_frame)} punktów do: {path}")
 
     def log_obstacles(self, obstacles: ObstaclesData):
+        """Zapisz `obstacles` jako `generated_obstacles.csv`; `None` ⇒ skip z komunikatem."""
         if obstacles is None:
             print("Brak przeszkód - plik z logami dotyczącymi pozycji przeszkód nie zostanie utworzony")
             return
@@ -358,6 +396,7 @@ class SimulationLogger:
         max_generations: Optional[int] = None, extra_params: Optional[Dict[str, Any]] = None,
         created_at_utc: str = "",
     ) -> None:
+        """Dorzuć rekord wall/cpu time fazy `stage_name` (offline) do bufora timings."""
         self.optimization_timing_buffer.append({
             "run_id": run_id, "algorithm_name": algorithm_name, "stage_name": stage_name,
             "wall_time_s": wall_time_s, "cpu_time_s": cpu_time_s, "success": success,
@@ -368,6 +407,14 @@ class SimulationLogger:
         })
 
     def save(self):
+        """Sflushuj wszystkie bufory na dysk i zamknij asynchroniczny LiDAR writer.
+
+        Efekty uboczne:
+            Zapisuje `trajectories.csv`, `collisions.csv`, `evasion_events.csv`,
+            `optimization_timings.csv`, `online_optimization.csv`,
+            `convergence_traces.csv` (gdy odpowiednie bufory niepuste)
+            oraz finalizuje `lidar_hits.h5`.
+        """
         print("[LOGGER] Saving data to disk...")
 
         if self.trajectory_buffer:

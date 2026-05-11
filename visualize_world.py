@@ -35,6 +35,7 @@ from matplotlib.patches import Circle, Rectangle
 
 @dataclass(frozen=True)
 class WorldBounds:
+    """AABB świata symulacji w metrach."""
     x_min: float
     x_max: float
     y_min: float
@@ -44,15 +45,18 @@ class WorldBounds:
 
     @property
     def lx(self) -> float:
+        """Rozpiętość X w metrach."""
         return self.x_max - self.x_min
 
     @property
     def ly(self) -> float:
+        """Rozpiętość Y w metrach."""
         return self.y_max - self.y_min
 
 
 @dataclass(frozen=True)
 class CylinderObstacle:
+    """Cylindryczna przeszkoda w XY (forest); wysokość ignorowana w widoku 2D."""
     x: float
     y: float
     radius: float
@@ -60,6 +64,7 @@ class CylinderObstacle:
 
 @dataclass(frozen=True)
 class BoxObstacle:
+    """Prostopadłościenna przeszkoda w XY (urban); wysokość ignorowana w 2D."""
     x: float
     y: float
     length_x: float
@@ -70,7 +75,17 @@ Obstacle = CylinderObstacle | BoxObstacle
 
 
 def read_world_bounds(path: Path) -> WorldBounds:
-    """Parsuje world_boundaries.csv (kolumny: Axis, Dimension, Min_Bound, Max_Bound, Center)."""
+    """Sparsuj `world_boundaries.csv` (kolumny: Axis, Min_Bound, Max_Bound, ...).
+
+    Args:
+        path: Ścieżka do CSV.
+
+    Returns:
+        WorldBounds z osi X, Y, Z.
+
+    Raises:
+        ValueError: Gdy w CSV brakuje którejś osi.
+    """
     bounds: dict[str, tuple[float, float]] = {}
     with path.open(encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -87,10 +102,20 @@ def read_world_bounds(path: Path) -> WorldBounds:
 
 
 def read_obstacles(path: Path) -> list[Obstacle]:
-    """Parsuje generated_obstacles.csv z auto-detekcja typu (cylinder vs box).
+    """Wczytaj `generated_obstacles.csv` z automatycznym rozpoznaniem typu.
 
-    Cylinder: kolumny x, y, z, radius, height [, unused_dim] (forest).
-    Box:      kolumny x, y, z, length, width, height (urban).
+    Cylinder (forest): kolumny `x, y, z, radius, height [, unused_dim]`.
+    Box (urban): kolumny `x, y, z, length, width, height`.
+
+    Args:
+        path: Ścieżka do pliku CSV.
+
+    Returns:
+        Lista przeszkód — typu `CylinderObstacle` albo `BoxObstacle` w
+        zależności od wykrytego formatu.
+
+    Raises:
+        ValueError: Gdy zestaw kolumn nie pasuje do żadnego ze wzorców.
     """
     obstacles: list[Obstacle] = []
     with path.open(encoding="utf-8") as f:
@@ -115,7 +140,15 @@ def read_obstacles(path: Path) -> list[Obstacle]:
 
 
 def read_trajectories(path: Path) -> dict[int, list[tuple[float, float]]]:
-    """Parsuje counted_trajectories.csv. Zwraca {drone_id: [(x, y), ...]}."""
+    """Wczytaj `counted_trajectories.csv`.
+
+    Args:
+        path: Ścieżka do pliku CSV.
+
+    Returns:
+        Słownik `{drone_id: [(x, y), …]}` z punktami trasy w kolejności
+        wystąpienia w pliku.
+    """
     per_drone: dict[int, list[tuple[float, float]]] = {}
     with path.open(encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -127,7 +160,16 @@ def read_trajectories(path: Path) -> dict[int, list[tuple[float, float]]]:
 
 
 def read_start_end_from_config(run_dir: Path) -> tuple[list, list] | None:
-    """Wyciaga initial_xyzs i end_xyzs z .hydra/config.yaml. None gdy brak yaml."""
+    """Wczytaj `initial_xyzs` i `end_xyzs` z `<run_dir>/.hydra/config.yaml`.
+
+    Args:
+        run_dir: Katalog pojedynczego uruchomienia.
+
+    Returns:
+        Para `(starts, ends)` w postaci list `[[x, y, z], …]`,
+        albo `None` gdy brakuje `config.yaml`, biblioteki `PyYAML`
+        lub wymaganych kluczy.
+    """
     config_path = run_dir / ".hydra" / "config.yaml"
     if not config_path.exists():
         return None
@@ -146,7 +188,14 @@ def read_start_end_from_config(run_dir: Path) -> tuple[list, list] | None:
 
 
 def detect_environment(run_dir: Path) -> str:
-    """Heurystyczna detekcja srodowiska z nazwy katalogu."""
+    """Wykryj typ środowiska po fragmencie nazwy katalogu uruchomienia.
+
+    Args:
+        run_dir: Katalog pojedynczego uruchomienia.
+
+    Returns:
+        Jedna z wartości: `'forest'`, `'urban'`, `'empty'` lub `'unknown'`.
+    """
     name = run_dir.name.lower()
     if "forest" in name:
         return "forest"
@@ -167,21 +216,24 @@ def _compute_layout(
     max_aspect_ratio: float = 5.0,
     target_width_in: float = 12.0,
 ) -> tuple[tuple[float, float], float]:
-    """Liczy figsize i matplotlib aspect dla orientacji poziomej.
+    """Oblicz rozmiar figury i proporcję osi dla układu poziomego.
 
-    Po obrocie 90 stopni: os misji (world Y) lezy poziomo, korytarz (world X)
-    lezy pionowo. Naturalny stosunek danych to L_y/L_x (10:1 dla forest,
-    3,33:1 dla urban). Aby plot miescil sie na stronie A4 i pozostal czytelny,
-    ograniczamy display ratio do `max_aspect_ratio` (default 5:1) — przy
-    wezszych korytarzach wprowadzamy lagodna kompresje osi pionowej (przeszkody
-    cylindryczne staja sie nieznacznie owalne, ale pozostaja czytelne).
+    Naturalna proporcja danych po obrocie wynosi `L_y/L_x` (10:1 dla lasu,
+    3.33:1 dla miasta); powyżej `max_aspect_ratio` stosujemy łagodne
+    ściśnięcie osi pionowej.
+
+    Args:
+        bounds: Granice świata.
+        max_aspect_ratio: Górny limit proporcji wyświetlania (powyżej
+            wprowadzane jest ściśnięcie).
+        target_width_in: Docelowa szerokość figury w calach.
 
     Returns:
-        ((width_in, height_in), mpl_aspect)
-        - width_in, height_in: figsize w calach
-        - mpl_aspect: argument dla ax.set_aspect()
-            1.0 = equal (brak deformacji geometrii)
-            <1.0 = os pionowa rozciagnieta (przeszkody wyzsze niz szersze)
+        Para `((width_in, height_in), mpl_aspect)`:
+        - rozmiar figury w calach przekazywany do `plt.subplots(figsize=…)`,
+        - `mpl_aspect`: wartość dla `ax.set_aspect()`; `1.0` oznacza
+          zachowanie skali (brak deformacji), wartość `< 1.0` —
+          rozciągnięcie osi pionowej.
     """
     L_horiz = bounds.ly  # data range na poziomej osi po obrocie
     L_vert = bounds.lx   # data range na pionowej osi po obrocie
@@ -212,10 +264,26 @@ def render_world(
     max_aspect_ratio: float = 5.0,
     output_path: Optional[Path] = None,
 ) -> None:
-    """Generuje rzut XY w orientacji poziomej (os misji Y - pozioma).
+    """Wygeneruj rzut z góry (XY) świata w układzie poziomym.
 
-    Konwencja po obrocie 90 stopni: world_y -> plot_x (mission direction),
-    world_x -> plot_y (corridor width). Dron startuje po lewej, leci w prawo.
+    Po obrocie o 90°: `world_y → plot_x` (kierunek misji),
+    `world_x → plot_y` (szerokość korytarza). Dron startuje po lewej i
+    leci w prawo.
+
+    Args:
+        bounds: Granice świata (z `read_world_bounds`).
+        obstacles: Lista przeszkód (z `read_obstacles`).
+        trajectories: Opcjonalne trasy `{drone_id: [(x, y), …]}`.
+        start_end: Opcjonalna para `(starts, ends)` z
+            `read_start_end_from_config`.
+        title: Tytuł wykresu.
+        safety_margin: Promień strefy bezpieczeństwa wokół przeszkód [m];
+            `0` oznacza brak strefy.
+        max_aspect_ratio: Górny limit proporcji wyświetlania — przy
+            bardzo długich korytarzach (np. las 600×60 m) wprowadza
+            ściśnięcie osi pionowej dla czytelności.
+        output_path: Ścieżka pliku wyjściowego (PDF/PNG/SVG); `None` —
+            otwiera okno interaktywne.
     """
     figsize, mpl_aspect = _compute_layout(bounds, max_aspect_ratio)
     fig, ax = plt.subplots(figsize=figsize)
@@ -330,6 +398,15 @@ def render_world(
 
 
 def main() -> None:
+    """Wejście wiersza poleceń — wczytaj argumenty i wygeneruj rzut świata.
+
+    Efekty uboczne:
+        Zapisuje plik wyjściowy podany w `-o` albo otwiera okno matplotlib.
+
+    Wyjścia:
+        Kończy z kodem 1, gdy katalog uruchomienia nie istnieje albo
+        brakuje wymaganych plików CSV.
+    """
     parser = argparse.ArgumentParser(
         description="Rzut 2D (widok z gory) swiata symulacji.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

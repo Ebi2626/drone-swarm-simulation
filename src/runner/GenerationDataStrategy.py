@@ -14,7 +14,20 @@ if TYPE_CHECKING:
 
 
 class GenerationDataStrategy(ExperimentDataStrategy):
+    """Strategia generująca świat, przeszkody i trajektorie z meta-heurystyki offline."""
+
     def prepare_data(self, runner: "ExperimentRunner", seeds: SeedRegistry):
+        """Wygeneruj świat/przeszkody, uruchom optymalizator offline i zwaliduj wyniki.
+
+        Args:
+            runner: `ExperimentRunner` z konfiguracją scenariusza i optymalizatora.
+            seeds: Rejestr ziaren — `seeds.rng("environment")` dla obstakli.
+
+        Efekty uboczne:
+            Ustawia `runner.world_data`, `runner.obstacles_data`,
+            `runner.drones_trajectories`. Loguje wyniki i wymiary do
+            `runner.logger`.
+        """
         print("[INFO] Generowanie nowego środowiska i optymalizacja trajektorii (Offline Path-Planning)...")
         runner.world_data = generate_world_boundaries(
             width=runner.track_width,

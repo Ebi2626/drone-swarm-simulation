@@ -320,7 +320,30 @@ def ssa_swarm_strategy(
     timing: Optional["TimingCollector"] = None,
     seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
+    """Wygeneruj trajektorię roju algorytmem SSA (Xue & Shen 2020, mealpy).
 
+    Implementacja `TrajectoryStrategyProtocol` używająca `mealpy.OriginalSSA`
+    przez adapter `SSAProblemAdapter` z trzywarstwowym clippingiem granic
+    (SSA bywa numerycznie niestabilne — Eq. 4 z paperu produkuje ±∞ przy
+    dużych różnicach pozycji).
+
+    Args:
+        start_positions: `(N, 3)` pozycje startowe [m].
+        target_positions: `(N, 3)` pozycje docelowe [m].
+        obstacles_data: Geometria przeszkód statycznych.
+        world_data: Granice świata symulacji.
+        number_of_waypoints: Docelowa liczba punktów `W` po B-spline.
+        drone_swarm_size: Rozmiar roju `N`.
+        algorithm_params: Hiperparametry — `pop_size`, `epochs` (`n_gen`),
+            `n_inner_waypoints`, `ST` (safety threshold, default 0.8),
+            `PD` (producent ratio, 0.2), `SD` (scout ratio, 0.1),
+            `objective_weights`, `penalty_weight`, `noise_std_xy/_z`.
+        timing: Opcjonalny `TimingCollector` faz.
+        seeds: `SeedRegistry` z subseedami `sampling` i `optimizer`.
+
+    Returns:
+        `(N, W, 3)` wygładzona trajektoria; w razie błędu — linia prosta.
+    """
     params = algorithm_params or {}
 
     local_timing = False

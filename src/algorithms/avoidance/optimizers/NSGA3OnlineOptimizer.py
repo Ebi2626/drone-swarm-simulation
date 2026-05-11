@@ -61,6 +61,11 @@ class _BudgetCallback:
     """
 
     def __init__(self, budget: TimeBudget) -> None:
+        """Powiąż callback z `budget` i zainicjuj snapshot best-so-far na pusty.
+
+        Args:
+            budget: Wspólny `TimeBudget` — sprawdzany na każdej generacji.
+        """
         self.budget = budget
         self.generations_seen = 0
         self.best_X: NDArray[np.float64] | None = None
@@ -70,6 +75,15 @@ class _BudgetCallback:
         self.convergence_trace: list[float] = []
 
     def __call__(self, algorithm) -> None:
+        """Wykonaj snapshot populacji i sprawdź budżet (rzuca `BudgetExceeded`).
+
+        Args:
+            algorithm: Bieżąca instancja `NSGA3` z pymoo (atrybut `pop` ma
+                kolumny `X`, `F`).
+
+        Raises:
+            BudgetExceeded: Gdy `budget.check_or_raise()` przekracza próg.
+        """
         self.generations_seen += 1
         # Snapshot populacji ZANIM rzucimy BudgetExceeded.
         try:
@@ -96,12 +110,23 @@ def _build_pymoo_problem(
     bounds_lb: NDArray[np.float64],
     bounds_ub: NDArray[np.float64],
 ):
-    """Buduje pymoo Problem z 1 obj = scalar `WeightedSumFitness.evaluate()`.
+    """Zbuduj `pymoo.Problem` z 1 obj (scalar `WeightedSumFitness.evaluate`).
 
     Unifikacja z SSA/OOA/MSFFOA online: wszystkie 4 algorytmy minimalizują
-    tę samą scalar weighted-sum (porównywalność per-trigger). NSGA-III
-    zachowuje swoją mechanikę — ref-point niching nadal pracuje w decision
-    space, ale obj space jest 1-D, więc Pareto-front degeneruje do 1 punktu.
+    tę samą skalarną sumę ważoną (porównywalność per-trigger). NSGA-III
+    zachowuje ref-point niching w decision space, ale obj space jest 1-D,
+    więc Pareto-front degeneruje do pojedynczego punktu.
+
+    Args:
+        path_problem: Definicja problemu (path_repr, fitness, context, predictor).
+        bounds_lb, bounds_ub: `(D,)` granice genów.
+
+    Returns:
+        Instancja `pymoo.core.problem.Problem` z `_evaluate` zapisującym
+        skalarny `F` w `out["F"]`.
+
+    Raises:
+        ImportError: Gdy pakiet `pymoo` nie jest zainstalowany.
     """
     if not _PYMOO_AVAILABLE:
         raise ImportError(
@@ -155,12 +180,29 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
         min_compute_time_s: float = 0.05,
         rng: np.random.Generator | int | None = None,
     ) -> None:
-        """
-        :param n_partitions: parametr `get_reference_directions("das-dennis", n_obj, n_partitions)`.
-            Dla n_obj=4, n_partitions=4 → C(4+4-1, 4-1) = 35 ref dir.
-            Mniejsze n_partitions = mniej ref dir = mniejszy pop_size potrzebny.
-        :param decision_mode: jak wybrać single solution z Pareto-front. "safety"
-            domyślnie — analogicznie do offline NSGA-3 strategii (Deb 2014).
+        """Skonfiguruj NSGA-III online: liczbę kierunków referencyjnych i tryb selekcji.
+
+        Args:
+            n_inner_waypoints: K — liczba waypointów spójna z
+                `path_representation.n_inner_waypoints`.
+            epoch: Górna liczba generacji (`pymoo.minimize(termination=("n_gen", epoch))`).
+            pop_size: Rozmiar populacji NSGA-III.
+            n_partitions: Parametr Das-Dennis dla
+                `get_reference_directions("das-dennis", n_obj, n_partitions)`;
+                mniejszy `n_partitions` ⇒ mniej kierunków referencyjnych
+                ⇒ mniejsza wymagana populacja.
+            decision_mode: Strategia wyboru pojedynczego rozwiązania
+                z frontu Pareto:
+                  - `"safety"` — minimum `c_safety` (tie-break po `c_energy`),
+                  - `"weighted"` — najniższa suma ważona z `WeightedSumFitness.w_*`,
+                  - `"knee_point"` — geometryczny knee w 4D Pareto.
+            min_compute_time_s: Minimalny budżet [s] do uruchomienia
+                optymalizatora.
+            rng: Ziarno deterministyczne dla `pymoo.minimize(seed=…)`.
+
+        Raises:
+            ImportError: Gdy pakiet `pymoo` nie jest dostępny.
+            ValueError: Gdy `decision_mode` jest spoza dozwolonego zbioru.
         """
         if not _PYMOO_AVAILABLE:
             raise ImportError(
@@ -181,9 +223,27 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
 
     @property
     def population_size(self) -> int:
+        """Rozmiar populacji NSGA-III."""
         return self.pop_size
 
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
+        """Uruchom NSGA-III na YZ-genach w ramach `budget` i zwróć najlepsze waypointy.
+
+        Args:
+            problem: `PathProblem` z fitness, predyktorem i opcjonalną
+                populacją startową.
+            budget: Kooperatywny budżet czasu — sprawdzany przez
+                `_BudgetCallback` po każdej generacji.
+
+        Returns:
+            `OptimizationResult` ze statusem:
+              - `"ok"` z `waypoints` i `extra`
+                (`algorithm="NSGA3"`, `convergence_trace`),
+              - `"timed_out"`, gdy budżet < `min_compute_time_s` albo
+                `BudgetExceeded` (próbujemy zwrócić best-so-far),
+              - `"failed"`, gdy front Pareto był pusty albo żaden kandydat
+                nie był feasible.
+        """
         t_start = time.perf_counter()
 
         if budget.remaining < self.min_compute_time_s:
@@ -371,7 +431,20 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
         F: NDArray[np.float64],
         fitness,
     ) -> int:
-        """Z Pareto-front (F shape (n, 4)) wybierz indeks single solution."""
+        """Wybierz indeks rozwiązania z `(n, 4)` frontu Pareto wg `decision_mode`.
+
+        Args:
+            F: `(n, 4)` macierz fitness (kolumny: c_safety, c_energy, c_jerk,
+                c_symmetry).
+            fitness: Instancja `WeightedSumFitness` — używana w trybie
+                `"weighted"` do odczytu wag.
+
+        Returns:
+            Indeks wybranego rozwiązania w `F`.
+
+        Raises:
+            ValueError: Gdy `decision_mode` nie jest rozpoznawany.
+        """
         if self.decision_mode == "safety":
             # Najniższe c_safety; tie-break po c_energy.
             order = np.lexsort((F[:, 1], F[:, 0]))

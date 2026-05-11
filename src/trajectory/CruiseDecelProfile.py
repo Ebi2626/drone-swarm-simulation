@@ -28,6 +28,13 @@ class CruiseDecelProfile:
     """
 
     def __init__(self, total_distance: float, cruise_speed: float, max_accel: float):
+        """Skonfiguruj profil cruise + decel; obsłuż edge case za krótkiej trasy.
+
+        Args:
+            total_distance: Łączna długość trasy [m].
+            cruise_speed: Prędkość przelotowa na początku trajektorii [m/s].
+            max_accel: Współczynnik hamowania [m/s²].
+        """
         self.total_distance = max(float(total_distance), 0.0)
         self.cruise_speed = max(float(cruise_speed), 1e-6)
         self.max_accel = max(float(max_accel), 1e-6)
@@ -64,6 +71,7 @@ class CruiseDecelProfile:
         self.total_duration = self.t_c + self.t_d
 
     def get_state(self, t: float) -> tuple[float, float]:
+        """Zwróć `(distance, speed)` dla czasu `t`; cap'owane do `total_distance / v_end`."""
         if self.total_distance <= 1e-6:
             return 0.0, 0.0
 

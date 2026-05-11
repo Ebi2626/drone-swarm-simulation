@@ -1,3 +1,4 @@
+"""Liczy `trajectory_metrics` (długość 2D/3D, altitude min/max/mean) per UAV per source."""
 from __future__ import annotations
 
 import json
@@ -7,6 +8,7 @@ from collections import defaultdict
 
 
 def _compute_metrics(points: list[tuple[float, float, float]]) -> dict:
+    """Wylicz długości 2D/3D i statystyki altitude dla sekwencji punktów `(x, y, z)`."""
     point_count = len(points)
 
     if point_count == 0:
@@ -124,6 +126,16 @@ def _populate_one_source(
 
 
 def populate_trajectory_metrics(conn: sqlite3.Connection, run_id: str) -> None:
+    """Zbuduj `trajectory_metrics` z `counted_trajectory_points` i `trajectory_samples`.
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        run_id: Identyfikator runa.
+
+    Efekty uboczne:
+        Wstawia po jednym wierszu per `(uav_id, source_name)` z metrykami
+        długości i altitude.
+    """
     counted_points = _load_grouped_points(
         conn,
         """

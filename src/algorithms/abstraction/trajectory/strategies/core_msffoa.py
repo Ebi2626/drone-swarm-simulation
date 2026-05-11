@@ -398,6 +398,14 @@ class MSFFOAOptimizer:
         # liczby. Brak resetu utrzymuje czytelny log między strategy a optimizer.
 
     def optimize(self) -> Tuple[NDArray[np.float64], float]:
+        """Wykonaj pełną pętlę optymalizacji MSFOA przez `max_generations` iteracji.
+
+        Returns:
+            Krotka `(best_pos, best_fitness)`:
+            - `best_pos` `(n_drones, n_inner, 3)` — najlepszy znaleziony
+              wielobok kontrolny.
+            - `best_fitness` — wartość fitnessu najlepszego rozwiązania.
+        """
         try:
             with self._measure("total_optimization"):
                 with self._measure("population_initialization"):
@@ -631,7 +639,12 @@ class MSFFOAOptimizer:
         return self.global_best_pos.copy(), self.global_best_fitness
 
     def get_best_dense_trajectory(self) -> NDArray[np.float64]:
-        """Returns the full sparse polyline for B-Spline post-processing."""
+        """Zwróć pełny wielobok kontrolny `[start, inner…, target]` najlepszego rozwiązania.
+
+        Returns:
+            `(n_drones, n_inner + 2, 3)` — wielobok gotowy do
+            `generate_bspline_batch` w post-processingu.
+        """
         with self._measure("dense_trajectory_reconstruction"):
             inner = self.global_best_pos[np.newaxis, :, :, :]
             starts = np.broadcast_to(self._starts_bc, (1, self.n_drones, 1, 3)).copy()

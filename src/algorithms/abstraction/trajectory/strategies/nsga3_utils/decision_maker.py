@@ -12,27 +12,36 @@ from numpy.typing import NDArray
 
 
 class DecisionStrategyProtocol(Protocol):
-    """
-    Interfejs dla algorytmu wyboru najlepszego rozwiązania z Frontu Pareto.
-    """
+    """Kontrakt strategii MCDM wybierającej jedno rozwiązanie z frontu Pareto."""
+
     def select_best(self, pareto_front_F: NDArray[np.float64], pareto_front_G: NDArray[np.float64]) -> int:
-        """
-        Wybiera indeks najlepszego rozwiązania.
-        
+        """Wybierz indeks rozwiązania uznanego za najlepsze.
+
         Args:
-            pareto_front_F: Macierz celów (N_Solutions, N_Objectives).
-            pareto_front_G: Macierz naruszeń ograniczeń (N_Solutions, N_Constraints).
-                           (Zwykle w NSGA-III finalny front ma G=0, ale warto sprawdzać).
-                           
+            pareto_front_F: `(N_Solutions, N_Objectives)` wartości obiektywów.
+            pareto_front_G: `(N_Solutions, N_Constraints)` naruszenia
+                ograniczeń (w NSGA-III finalny front ma zwykle `G ≈ 0`,
+                ale strategia powinna i tak filtrować przez `filter_feasible`).
+
         Returns:
-            int: Indeks wiersza w pareto_front_F odpowiadający wybranemu rozwiązaniu.
+            Indeks wiersza w `pareto_front_F` wskazujący wybrane rozwiązanie.
         """
         ...
 
 
 def normalize_matrix(matrix: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Min-Max Scaling po kolumnach. Niezbędne dla porównywalności celów
-    o różnych jednostkach (np. f1 [m] vs f3 [unitless threat])."""
+    """Wykonaj Min-Max scaling kolumnami, mapując każdy obiektyw na `[0, 1]`.
+
+    Niezbędne dla porównywalności obiektywów o różnych jednostkach
+    (np. f1 [m] vs f3 [bezwymiarowy koszt zagrożenia]).
+
+    Args:
+        matrix: `(N, M)` wejściowa macierz obiektywów.
+
+    Returns:
+        `(N, M)` macierz znormalizowana — kolumna o zerowym zakresie
+        (`max == min`) jest zwracana jako same zera.
+    """
     min_vals = np.min(matrix, axis=0)
     max_vals = np.max(matrix, axis=0)
 
@@ -43,8 +52,19 @@ def normalize_matrix(matrix: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 def filter_feasible(F: NDArray, G: NDArray) -> Tuple[NDArray, NDArray, NDArray]:
-    """Zwraca (F_feasible, G_feasible, original_indices) gdzie feasibility =
-    sum(G) ≤ 1e-6. Gdy brak feasible, zwraca cały front (najmniejsze zło)."""
+    """Wybierz wykonalne wiersze (`Σ G ≤ 1e-6`) z frontu Pareto.
+
+    Args:
+        F: `(N, M)` macierz obiektywów.
+        G: `(N, K)` macierz naruszeń ograniczeń.
+
+    Returns:
+        Krotka `(F_feasible, G_feasible, original_indices)`:
+        - `F_feasible`, `G_feasible` — przefiltrowane wiersze.
+        - `original_indices` — indeksy w pierwotnym `F`/`G`.
+        Gdy żaden wiersz nie jest wykonalny, zwraca cały front
+        (zasada „najmniejsze zło" — caller wybierze coś z infeasibles).
+    """
     cv_sum = np.sum(G, axis=1)
     feasible_mask = cv_sum <= 1e-6
     indices = np.where(feasible_mask)[0]
@@ -56,8 +76,10 @@ def filter_feasible(F: NDArray, G: NDArray) -> Tuple[NDArray, NDArray, NDArray]:
 
 
 class EqualWeightsDecision:
-    """Suma znormalizowanych celów z równymi wagami → argmin."""
+    """Suma znormalizowanych obiektywów z równymi wagami; wybór `argmin`."""
+
     def select_best(self, pareto_front_F: NDArray, pareto_front_G: NDArray) -> int:
+        """Patrz `DecisionStrategyProtocol.select_best`."""
         F_feas, _, orig_indices = filter_feasible(pareto_front_F, pareto_front_G)
         F_norm = normalize_matrix(F_feas)
         scores = np.sum(F_norm, axis=1)
@@ -66,12 +88,18 @@ class EqualWeightsDecision:
 
 
 class SafetyPriorityDecision:
-    """Lex-order: feasibility → f3=threat ≤ 1e-3 → min f1 (path length).
+    """Porządek leksykograficzny: feasibility → `f3 = threat ≤ 1e-3` → `min f1`.
 
-    Fallback: gdy żadne rozwiązanie nie ma threat ≤ 1e-3, minimalizuje samo
-    f3 (ratujemy „najmniej niebezpieczne" rozwiązanie).
+    Gdy żadne rozwiązanie nie ma `threat ≤ 1e-3`, minimalizuje samo `f3`
+    (zachowanie „najmniej niebezpiecznego" rozwiązania).
     """
+
     def select_best(self, pareto_front_F: NDArray, pareto_front_G: NDArray) -> int:
+        """Patrz `DecisionStrategyProtocol.select_best`.
+
+        Raises:
+            ValueError: Gdy żadne rozwiązanie nie jest wykonalne.
+        """
         F_feas, _, orig_indices = filter_feasible(pareto_front_F, pareto_front_G)
 
         if len(F_feas) == 0:
@@ -94,11 +122,14 @@ class SafetyPriorityDecision:
 
 
 class KneePointDecision:
-    """Knee point ≈ punkt frontu Pareto najbliższy utopia point [0,…,0]
-    w przestrzeni Min-Max-znormalizowanej (Branke et al. 2004 — heurystyka
-    angle-based zastąpiona euklidesową, prostsza i wystarczająca dla 5D).
+    """Punkt frontu Pareto najbliższy utopii `[0, …, 0]` w przestrzeni Min-Max.
+
+    Branke et al. (2004) — uproszczona wersja euklidesowa zamiast heurystyki
+    angle-based; wystarczająca dla 5-wymiarowej przestrzeni obiektywów.
     """
+
     def select_best(self, pareto_front_F: NDArray, pareto_front_G: NDArray) -> int:
+        """Patrz `DecisionStrategyProtocol.select_best`."""
         F_feas, _, orig_indices = filter_feasible(pareto_front_F, pareto_front_G)
         F_norm = normalize_matrix(F_feas)
         dist_to_utopia = np.sqrt(np.sum(F_norm**2, axis=1))

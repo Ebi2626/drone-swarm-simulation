@@ -13,12 +13,14 @@ if TYPE_CHECKING:
     from main import ExperimentRunner
 
 class ReplayDataStrategy(ExperimentDataStrategy):
+    """Strategia odtwarzająca eksperyment z archiwum CSV (świat + przeszkody + trajektorie)."""
+
     def __init__(self, results_path: str):
+        """Powiąż strategię z katalogiem zawierającym pliki CSV runa do odtworzenia."""
         self.results_path = Path(results_path)
 
     def _map_to_world_data(self, df: pd.DataFrame) -> WorldData:
-        """Rekonstrukcja WorldData z CSV. Wymusza kolejność osi X, Y, Z
-        żeby zmiana porządku wierszy w pliku nie zaburzyła wektorów."""
+        """Zrekonstruuj `WorldData` z CSV; wymusza kolejność osi X/Y/Z."""
         df_sorted = df.set_index('Axis').loc[['X', 'Y', 'Z']]
 
         dimensions = df_sorted['Dimension'].to_numpy(dtype=np.float64)
@@ -37,9 +39,17 @@ class ReplayDataStrategy(ExperimentDataStrategy):
         )
     
     def _map_to_obstacles_data(self, df: pd.DataFrame, shape_type_str: str) -> ObstaclesData:
-        """
-        Rekonstrukcja macierzy przeszkód z uwzględnieniem kształtu.
-        Obsługuje dynamicznie format dla lasu (CYLINDER) oraz miasta (BOX).
+        """Zrekonstruuj `ObstaclesData (N, 6)` z CSV, dobierając kolumny wg `shape_type`.
+
+        Args:
+            df: DataFrame z `generated_obstacles.csv`.
+            shape_type_str: `"CYLINDER"` lub `"BOX"` (case-insensitive).
+
+        Returns:
+            `ObstaclesData` z `(N, 6)` macierzą; CYLINDER pad-uje 6. kolumnę zerami.
+
+        Raises:
+            KeyError: Gdy w CSV brakuje wymaganych kolumn dla danego shape_type.
         """
         shape_type = ObstacleShape[shape_type_str.upper()] 
         
@@ -65,8 +75,7 @@ class ReplayDataStrategy(ExperimentDataStrategy):
         return ObstaclesData(data=data_matrix, shape_type=shape_type)
 
     def _map_to_trajectories(self, df: pd.DataFrame) -> np.ndarray:
-        """Płaska tabela CSV (drone_id, waypoint_id, x, y, z) → tensor
-        (num_drones, num_waypoints, 3)."""
+        """Zamień długą tabelę `(drone_id, waypoint_id, x, y, z)` na tensor `(num_drones, num_waypoints, 3)`."""
         num_drones = df['drone_id'].nunique()
         num_waypoints = df['waypoint_id'].nunique()
 
@@ -79,6 +88,16 @@ class ReplayDataStrategy(ExperimentDataStrategy):
         return trajectories
 
     def prepare_data(self, runner: "ExperimentRunner", seeds: SeedRegistry):
+        """Wczytaj świat / przeszkody / trajektorie z `results_path` i zapisz do `runner`.
+
+        Args:
+            runner: `ExperimentRunner` — modyfikowany in-place.
+            seeds: Rejestr ziaren (nieużywany przy replayu — zachowany dla
+                spójności kontraktu).
+
+        Raises:
+            ValueError: Gdy któryś z wczytanych obiektów ma `None`.
+        """
         print(f"[INFO] Odtwarzanie eksperymentu z archiwum: {self.results_path}")
 
         world_df = pd.read_csv(self.results_path / "world_boundaries.csv")

@@ -4,14 +4,16 @@ import numpy as np
 from typing import List
 
 def positions_to_tensor(positions: List[List[float]]) -> np.ndarray:
-    """
-    Transform positions from List[List[x,y,z]] to tensor NDArray(N, 3).
-    
+    """Zamień `List[List[x, y, z]]` na `np.ndarray (N, 3)` z walidacją kształtu.
+
     Args:
-        positions (List[List[float]]): List of positions (e.g. start/target) for drones.
+        positions: Lista list pozycji dronów (start lub target).
 
     Returns:
-        np.ndarray: Tensor array of drone positions with shape (N, 3) [x, y, z].
+        `(N, 3)` macierz float64 `[x, y, z]`.
+
+    Raises:
+        ValueError: Gdy końcowy kształt nie jest `(N, 3)`.
     """
 
     tensor_positions = np.array(positions, dtype=np.float64)

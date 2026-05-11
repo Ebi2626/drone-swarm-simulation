@@ -107,6 +107,15 @@ ITER_METRICS = (
 
 @dataclass
 class AnalyzerConfig:
+    """Konfiguracja `ExperimentAnalyzer` — listy metryk i parametry bootstrappingu.
+
+    Args:
+        metrics_offline: Metryki offline (offline phase, MOO indicators).
+        metrics_online: Metryki online (collisions, distances, energy).
+        metrics_iter: Metryki iteracyjne (krzywe konwergencji per generacja).
+        bootstrap_resamples: Liczba re-sampli dla CI (`summary_with_ci`).
+        output_subdir: Nazwa katalogu wyjściowego w katalogu eksperymentu.
+    """
     metrics_offline: Iterable[str] = field(default_factory=lambda: OFFLINE_METRICS)
     metrics_online: Iterable[str] = field(default_factory=lambda: ONLINE_METRICS)
     metrics_iter: Iterable[str] = field(default_factory=lambda: ITER_METRICS)
@@ -118,9 +127,26 @@ class ExperimentAnalyzer:
     """High-level facade — `analyze(experiment_dir)` produkuje pełny raport."""
 
     def __init__(self, config: AnalyzerConfig | None = None) -> None:
+        """Skonfiguruj analizator (domyślny `AnalyzerConfig`, gdy `None`)."""
         self.cfg = config or AnalyzerConfig()
 
     def analyze(self, experiment_dir: str | Path) -> Path:
+        """Wygeneruj kompletny zestaw tabel, wykresów i raport dla eksperymentu.
+
+        Args:
+            experiment_dir: Katalog eksperymentu zawierający `analysis.db`
+                (po `ExperimentAggregator.aggregate`).
+
+        Returns:
+            Ścieżka do `analysis_output/` (lub odpowiedniego `output_subdir`).
+
+        Raises:
+            FileNotFoundError: Gdy `analysis.db` nie istnieje.
+
+        Efekty uboczne:
+            Tworzy podkatalogi `tables/` i `plots/{convergence, boxplots,
+            cd_diagrams, pareto, scatter, bar, rankings}/` oraz raport PDF/MD.
+        """
         experiment_dir = Path(experiment_dir).expanduser().resolve()
         db_path = experiment_dir / "analysis.db"
         if not db_path.exists():

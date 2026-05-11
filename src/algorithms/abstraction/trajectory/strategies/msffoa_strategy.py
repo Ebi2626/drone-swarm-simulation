@@ -59,9 +59,31 @@ def msffoa_strategy(
     seeds: SeedRegistry = None,
 
 ) -> NDArray[np.float64]:
-    """
-    Trajectory generation via Multiple Swarm Fruit Fly Optimization Algorithm.
-    (Shi, Zhang & Xia, 2020)
+    """Wygeneruj trajektorię roju algorytmem MSFOA (Shi, Zhang & Xia 2020).
+
+    Implementacja `TrajectoryStrategyProtocol` — patrz `count_trajectories.py`.
+    Skalaryzuje 5 obiektywów `VectorizedEvaluator` przez `TrajectorySOOAdapter`
+    z domyślnymi wagami z `algorithm_params['objective_weights']`.
+
+    Args:
+        start_positions: `(N, 3)` pozycje startowe dronów [m].
+        target_positions: `(N, 3)` pozycje docelowe dronów [m].
+        obstacles_data: Geometria przeszkód statycznych.
+        world_data: Granice świata symulacji.
+        number_of_waypoints: Docelowa liczba punktów `W` w trajektorii
+            (po post-processingu B-spline).
+        drone_swarm_size: Rozmiar roju `N`.
+        algorithm_params: Hiperparametry MSFOA — `pop_size`, `epochs`,
+            `n_inner_waypoints`, `objective_weights`, `penalty_weight`,
+            `n_swarms`, `coe1`, `coe2`, `noise_std_xy`, `noise_std_z`,
+            `threshold_ratio`. `None` ⇒ wartości domyślne.
+        timing: Opcjonalny `TimingCollector` dla pomiaru faz; `None` ⇒
+            tworzony lokalnie i zapisywany na końcu do CSV.
+        seeds: `SeedRegistry` z subseedami `sampling` i `optimizer`.
+
+    Returns:
+        `(N, W, 3)` trajektoria po wygładzeniu B-spline. W razie błędu
+        zwraca trajektorię awaryjną — linię prostą z minimalną wysokością.
     """
     params = algorithm_params or {}
 

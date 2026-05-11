@@ -40,11 +40,20 @@ def populate_online_safety_metrics(
     run_id: str,
     safety_threshold_m: float = DEFAULT_INTER_UAV_SAFETY_THRESHOLD_M,
 ) -> None:
-    """Główna funkcja — liczy i zapisuje metryki online dla 1 runu.
+    """Wylicz per-UAV metryki bezpieczeństwa, energii i gładkości; zapisz do `uav_online_metrics`.
 
-    Idempotentna: kasuje istniejące wiersze z `uav_online_metrics WHERE run_id`
-    i wstawia świeże. Wywoływana z `populate_database` PO `populate_uav_metrics`
-    a PRZED `populate_run_metrics` (które agreguje te wartości do run-level).
+    Idempotentna: czyści istniejące wiersze `WHERE run_id = ?` i wstawia świeże.
+    Wywoływana po `populate_uav_metrics`, a przed `populate_run_metrics` (które
+    agreguje wyniki do poziomu run).
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        run_id: Identyfikator runa.
+        safety_threshold_m: Próg minimalnej akceptowalnej odległości
+            inter-UAV [m]; naruszenia liczone do `violation_count`.
+
+    Efekty uboczne:
+        Nadpisuje wiersze `uav_online_metrics` dla `run_id`.
     """
     samples = _fetch_trajectory_samples(conn, run_id)
     if not samples:

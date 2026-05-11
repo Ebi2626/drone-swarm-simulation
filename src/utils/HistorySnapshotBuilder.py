@@ -9,6 +9,13 @@ from numpy.typing import NDArray
 
 
 class HistorySnapshotBuilder:
+    """Buduje per-generację snapshoty (`payload`) historii optymalizacji do `h5_writer`.
+
+    Łączy decyzje (`decisions_2d`), fitness skalarny, macierz objectivów,
+    constraints, feasibility, leaderów i `extras` w jednolity dict zgodny
+    ze schematem `OptimizationHistoryWriter`.
+    """
+
     def __init__(
         self,
         *,
@@ -16,11 +23,20 @@ class HistorySnapshotBuilder:
         logger: logging.Logger | None = None,
         label: str = "OPT",
     ) -> None:
+        """Powiąż builder z writerem h5 i loggerem.
+
+        Args:
+            history_writer: Obiekt z `put_generation_data(payload)` lub `None`
+                (write to no-op).
+            logger: Logger; `None` ⇒ `logging.getLogger(__name__)`.
+            label: Etykieta używana w komunikatach diagnostycznych.
+        """
         self.history_writer = history_writer
         self.logger = logger or logging.getLogger(__name__)
         self.label = label
 
     def write(self, payload: dict[str, np.ndarray]) -> None:
+        """Wyślij `payload` do writera h5 (no-op, gdy writer = `None`)."""
         if self.history_writer is None:
             return
         self.history_writer.put_generation_data(payload)
@@ -40,6 +56,31 @@ class HistorySnapshotBuilder:
         leader_scalar_fitness: Optional[NDArray[np.float64]] = None,
         global_best_scalar_fitness: Optional[float] = None,
     ) -> dict[str, np.ndarray]:
+        """Złóż per-generację snapshot zgodny ze schematem `OptimizationHistoryWriter`.
+
+        Args:
+            decisions: `(N, D)` lub `(N, k, …)` macierz decyzji (flattenowana
+                do `(N, D)` w razie potrzeby).
+            scalar_fitness: `(N,)` skalarny fitness.
+            objectives: `(N, M)` macierz objectivów (jeśli `None`, pobierana
+                z `fitness_owner.last_objectives` lub fallback do `scalar_fitness.reshape(-1, 1)`).
+            gen: Indeks generacji.
+            gen_start_time: `time.perf_counter()` z początku generacji
+                (do pomiaru `elapsed_s`).
+            fitness_owner: Obiekt z zacache'owanymi `last_*` dla fallbacków.
+            evaluator_out: Słownik z evaluatora (preferowane źródło `G`/`CV`/`feasible_mask`).
+            extras: Dodatkowe pola dorzucane do `payload`.
+            leader_decisions, leader_scalar_fitness: Macierz liderów (gdy algorytm
+                je wyróżnia, np. MSFOA per-rój).
+            global_best_scalar_fitness: Najlepszy fitness historycznie (skalar).
+
+        Returns:
+            Słownik gotowy do `OptimizationHistoryWriter.put_generation_data`.
+
+        Raises:
+            ValueError: Gdy populacje `decisions` i `scalar_fitness` mają
+                niespójne rozmiary.
+        """
         decisions_2d = self._flatten_population(decisions)
         scalar_fitness_1d = np.asarray(scalar_fitness, dtype=np.float64).reshape(-1)
 
@@ -155,6 +196,16 @@ class HistorySnapshotBuilder:
         problem: Any,
         decisions_2d: NDArray[np.float64],
     ) -> dict[str, Any]:
+        """Wywołaj `problem.evaluator` na `decisions_2d` i zwróć surowy `out` dict.
+
+        Args:
+            problem: Obiekt z atrybutami `_decode_inner` i `evaluator`.
+            decisions_2d: `(N, D)` populacja do oceny.
+
+        Returns:
+            Słownik `out` z evaluatora (`F`, `G`, `CV`, `feasible_mask`); pusty
+            przy błędzie / braku odpowiednich atrybutów.
+        """
         out: dict[str, Any] = {}
         try:
             if hasattr(problem, "_decode_inner") and hasattr(problem, "evaluator"):
@@ -165,6 +216,7 @@ class HistorySnapshotBuilder:
         return out
 
     def _flatten_population(self, pop: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Spłaszcz populację `(N, …)` do `(N, D)`; rzuca `ValueError` przy `<2D`."""
         arr = np.asarray(pop, dtype=np.float64)
         if arr.ndim == 2:
             return arr

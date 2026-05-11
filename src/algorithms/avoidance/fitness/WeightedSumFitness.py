@@ -55,13 +55,28 @@ class WeightedSumFitness(IFitnessEvaluator):
         w_symmetry: float = 1.0,
         safe_clearance_m: float = 1.5,
         n_samples: int = 32,
-        # Parametry AxisBiasFitness-style używane TYLKO przez `axis_score`
-        # (gdy evolutionary fitness wpięty jako axis-picker — rzadkie).
         prefer_axis_order: list[str] | tuple[str, ...] = ("right", "left", "up", "down"),
         bias_preferred: float = 1.0,
         bias_perpendicular: float = 1.4,
         bias_oppose: float = 2.5,
     ) -> None:
+        """Skonfiguruj wagi 4 składowych i parametry sticky-axis.
+
+        Args:
+            w_safety, w_energy, w_jerk, w_symmetry: Nieujemne wagi
+                ważonej sumy. Skala C_* jest niezrównoważona — domyślne
+                wartości oddają empirycznie dobrane proporcje.
+            safe_clearance_m: Minimalny dystans od przeszkody [m] —
+                naruszenie generuje karę kwadratową.
+            n_samples: Liczba próbek po B-spline (jednolita siatka
+                `u ∈ [0, 1]`).
+            prefer_axis_order, bias_preferred, bias_perpendicular,
+            bias_oppose: Parametry trybu `axis_score` (rzadko używane —
+                ten fitness przede wszystkim ocenia pełne spliny).
+
+        Raises:
+            ValueError: Gdy którakolwiek `w_*` jest ujemna.
+        """
         if min(w_safety, w_energy, w_jerk, w_symmetry) < 0:
             raise ValueError("Wagi WeightedSumFitness muszą być nieujemne.")
         self.w_safety = float(w_safety)
@@ -86,12 +101,18 @@ class WeightedSumFitness(IFitnessEvaluator):
         context: EvasionContext,
         predictor: IObstaclePredictor,
     ) -> float:
-        """Skalar fitness; LOWER = better. Kontrakt jak w `IFitnessEvaluator`.
+        """Zwróć skalarny fitness ważoną sumą 4 składowych (mniej = lepiej).
 
-        :param candidate: BSpline z `IPathRepresentation.decode_genes` lub
-            `None` gdy dekodowanie zawiodło — wtedy zwracamy ekstremalną karę.
-        :param context: pełny `EvasionContext`.
-        :param predictor: `IObstaclePredictor` do estymacji pozycji przeszkody w czasie.
+        Args:
+            candidate: B-spline z `IPathRepresentation.decode_genes` lub
+                `None` (zdekodowanie zawiodło) — wtedy zwracana jest
+                ekstremalna kara `≈ 4e9 × max(w_*)`.
+            context: Pełny `EvasionContext`.
+            predictor: Estymator pozycji przeszkody w funkcji czasu.
+
+        Returns:
+            Skalarna wartość kosztu — `0` ⇒ idealna trasa, sentinel ~`1e9`
+            sygnalizuje zdegenerowanego kandydata.
         """
         components = self.evaluate_components(candidate, context, predictor)
         return float(
@@ -107,15 +128,21 @@ class WeightedSumFitness(IFitnessEvaluator):
         context: EvasionContext,
         predictor: IObstaclePredictor,
     ) -> NDArray[np.float64]:
-        """Wektor [c_safety, c_energy, c_jerk, c_symmetry] (przed wagami).
+        """Zwróć surowy `(4,)` wektor `[c_safety, c_energy, c_jerk, c_symmetry]` przed wagami.
 
-        Zaprojektowane dla `NSGA3OnlineOptimizer` (multi-objective NSGA-III) —
-        zwraca surowe składowe by pymoo mógł budować Pareto-front. SOO
-        (`MealpyOptimizer`, `MSFFOAOnlineOptimizer`) wołają `evaluate` które
-        wewnętrznie składa to przez wagi.
+        Używane przez `NSGA3OnlineOptimizer` do budowy frontu Pareto;
+        warianty SOO (`MealpyOptimizer`, `MSFFOAOnlineOptimizer`) wołają
+        `evaluate`, który ten wektor agreguje wagami.
 
-        :return: shape (4,). Sentinel `[1e9]*4` gdy `candidate is None` lub
-                 ścieżka degeneracyjna (numerical error w splev).
+        Args:
+            candidate: B-spline kandydata albo `None` przy zdegenerowanym
+                kandydacie.
+            context: Pełny `EvasionContext`.
+            predictor: Estymator pozycji przeszkody.
+
+        Returns:
+            `(4,)` składowe kosztu; sentinel `[1e9, 1e9, 1e9, 1e9]` przy
+            braku kandydata lub błędach numerycznych w `splev`.
         """
         SENTINEL = np.full(4, 1e9, dtype=np.float64)
         if candidate is None:
@@ -164,11 +191,16 @@ class WeightedSumFitness(IFitnessEvaluator):
         pos: NDArray[np.float64],  # (N, 3)
         context: EvasionContext,
     ) -> float:
-        """Kara za odchylenie od osi `preferred_axis_hint` (sticky-axis).
+        """Kara za odchylenie kandydata od osi `preferred_axis_hint` (sticky-axis).
 
-        Jeśli `preferred_axis_hint` jest `None` — koszt = 0 (optymalizator
-        ma swobodę). Jeśli ustawiony — penalizujemy projekcję spline'u na
-        oś PRZECIWNĄ do hintu (np. hint=right → penalty na spline_y < start_y).
+        Args:
+            pos: `(N, 3)` próbki splajnu po `splev`.
+            context: `EvasionContext`; gdy `preferred_axis_hint is None`,
+                koszt = 0 (planer ma swobodę).
+
+        Returns:
+            Σ kwadratów projekcji przeciwnej do hintu — `0` przy braku hintu
+            albo gdy spline w pełni leży po stronie zgodnej z hintem.
         """
         hint = context.preferred_axis_hint
         if hint is None:
@@ -201,6 +233,7 @@ class WeightedSumFitness(IFitnessEvaluator):
         return float(np.sum(wrong_side ** 2))
 
     def order_score(self, axis_name: str) -> float:
+        """Tie-break score `0…0.1` dla `axis_name` zgodnie z `prefer_axis_order`."""
         return self._order_scores.get(axis_name, 0.0)
 
     def axis_score(
@@ -211,9 +244,9 @@ class WeightedSumFitness(IFitnessEvaluator):
         obs_vel_hat: NDArray[np.float64] | None,
         order_score: float,
     ) -> float:
-        """Cooperative axis-score (analog `AxisBiasFitness`). Używane tylko
-        jeśli `WeightedSumFitness` byłby wpięty jako axis-picker — w praktyce
-        rzadko, ale zachowane dla type-safety kontraktu `IFitnessEvaluator`.
+        """Score osi (analog `AxisBiasFitness`) — używany rzadko, dla zgodności kontraktu.
+
+        Pełny opis kontraktu: `IFitnessEvaluator.axis_score`.
         """
         axis_hat = axis_dir / (np.linalg.norm(axis_dir) + 1e-9)
         if obs_vel_hat is not None:

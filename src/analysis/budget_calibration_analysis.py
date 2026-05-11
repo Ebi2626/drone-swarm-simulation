@@ -79,23 +79,24 @@ def compute_nfe_thresholds(
     higher_is_better: bool,
     thresholds: list[float] = THRESHOLDS,
 ) -> pd.DataFrame:
-    """Find first NFE where metric reaches X% of its final value.
+    """Znajdź pierwsze NFE, w którym `metric` osiąga zadany procent finalnej wartości.
 
-    Convergence "90%" znaczy: pokonano 90% drogi z `initial_val` do
-    `final_val`. Wzór ujednolicony dla obu kierunków:
+    Definicja konwergencji „X%”: pokonano X% drogi z `initial_val` do
+    `final_val`, czyli `target = initial + thr × (final − initial)`. Wzór
+    bezpieczny dla obu kierunków i wartości ujemnych — w odróżnieniu od
+    naiwnego `target = thr × final`, który przy ujemnym `final` triggerował
+    natychmiastowo.
 
-        target = initial_val + threshold * (final_val − initial_val)
+    Args:
+        df_iter: Tidy iteration metrics z kolumnami `optimizer`, `environment`,
+            `seed`, `eval_count_cumulative`, `<metric>`.
+        metric: Nazwa kolumny metryki.
+        higher_is_better: `True` ⇒ szukamy `val ≥ target`; `False` ⇒ `val ≤ target`.
+        thresholds: Lista frakcji w `[0, 1]`.
 
-    Dla `higher_is_better=True` szukamy pierwszego `val ≥ target`.
-    Dla `higher_is_better=False` szukamy pierwszego `val ≤ target`.
-
-    Wzór jest **bezpieczny** dla negatywnych objectivów (np. R2 może być
-    ujemny w niektórych konwencjach) — wcześniejsza wersja `target = thr ·
-    final` dawała `vals >= target` natychmiast triggerujące przy
-    ujemnym `final`.
-
-    Returns DataFrame with columns:
-        optimizer, environment, seed, threshold, nfe_at_threshold
+    Returns:
+        DataFrame z kolumnami `optimizer, environment, seed, threshold,
+        nfe_at_threshold`.
     """
     rows = []
     groups = df_iter.groupby(["optimizer", "environment", "seed"])
@@ -158,14 +159,20 @@ def _interpolate_metric_on_nfe_grid(
     metric: str,
     n_points: int = 200,
 ) -> pd.DataFrame:
-    """Interpolate metric values onto a common NFE grid.
+    """Zinterpoluj per-run wartości `metric` na wspólną siatkę NFE.
 
-    Different algorithms report NFE at different iteration counts. To compare
-    them on the same x-axis, we interpolate each run's metric onto a shared
-    grid of `n_points` evenly spaced NFE values from 0 to max NFE observed.
+    Różne algorytmy raportują NFE w innych punktach iteracji; żeby porównać
+    je na wspólnej osi X, robimy interpolację liniową na `n_points`
+    równomiernych NFE od 0 do maks. zaobserwowanej wartości.
 
-    Returns DataFrame with columns:
-        optimizer, environment, seed, nfe_grid, {metric}
+    Args:
+        df_iter: Tidy iteration metrics.
+        metric: Kolumna metryki do interpolacji.
+        n_points: Liczba punktów wspólnej siatki.
+
+    Returns:
+        DataFrame z kolumnami `optimizer, environment, seed, nfe_grid,
+        <metric>`.
     """
     max_nfe = df_iter["eval_count_cumulative"].max()
     nfe_grid = np.linspace(0, max_nfe, n_points)
@@ -204,9 +211,16 @@ def plot_convergence_vs_nfe(
     higher_is_better: bool,
     out_dir: Path,
 ) -> None:
-    """Plot convergence curves: metric vs NFE, mean ± 1 std.
+    """Wygeneruj krzywą konwergencji `metric` vs NFE (mean ± 1 std), per środowisko.
 
-    One plot per environment, all optimizers overlaid.
+    Args:
+        df_iter: Tidy iteration metrics.
+        metric: Kolumna metryki na osi Y.
+        higher_is_better: Niewykorzystywany (zachowany dla spójności sygnatur).
+        out_dir: Katalog docelowy PDF (`convergence_vs_nfe_<metric>_<env>.pdf`).
+
+    Efekty uboczne:
+        Zapisuje pliki PDF (po jednym na środowisko).
     """
     interp_df = _interpolate_metric_on_nfe_grid(df_iter, metric)
 
@@ -240,14 +254,19 @@ def compute_ranking_at_nfe_slices(
     higher_is_better: bool,
     fractions: list[float] = NFE_FRACTIONS,
 ) -> pd.DataFrame:
-    """Compute Friedman-style ranking at various NFE budget fractions.
+    """Wylicz średnie rangi optymalizatorów dla wybranych frakcji budżetu NFE.
 
-    At each fraction of max NFE, we extract the metric value (via interpolation)
-    and rank the optimizers per (environment, seed). Then average ranks across
-    seeds to get mean rank per (environment, nfe_fraction, optimizer).
+    W każdym slice'ie NFE (`fraction × max_nfe`) ranguje optymalizatory per
+    `(environment, seed)`, a następnie uśrednia rangi po seedach (Friedman-style).
 
-    Returns DataFrame with columns:
-        environment, nfe_fraction, optimizer, avg_rank
+    Args:
+        df_iter: Tidy iteration metrics.
+        metric: Kolumna metryki będąca podstawą rankingu.
+        higher_is_better: `True` ⇒ ranking malejąco; `False` ⇒ rosnąco.
+        fractions: Frakcje budżetu w `[0, 1]`.
+
+    Returns:
+        DataFrame z kolumnami `environment, nfe_fraction, optimizer, avg_rank`.
     """
     interp_df = _interpolate_metric_on_nfe_grid(df_iter, metric)
     max_nfe = interp_df["nfe_grid"].max()
@@ -296,10 +315,18 @@ def plot_ranking_stability_heatmap(
     out_dir: Path,
     metric: str,
 ) -> None:
-    """Heatmap: x=NFE fraction, y=optimizer, color=avg rank.
+    """Heatmapa stabilności rankingu: oś X = frakcja NFE, oś Y = algorytm, kolor = avg rank.
 
-    One heatmap per environment. Demonstrates ranking stability (§6.4):
-    if rankings don't change across budget fractions, the comparison is robust.
+    Stabilny ranking między frakcjami świadczy o odporności porównania
+    na wybór budżetu (§6.4). Generowana per środowisko.
+
+    Args:
+        rankings_df: Wynik `compute_ranking_at_nfe_slices`.
+        out_dir: Katalog docelowy PDF.
+        metric: Nazwa metryki (do tytułu i nazwy pliku).
+
+    Efekty uboczne:
+        Zapisuje `ranking_stability_<metric>_<env>.pdf` per środowisko.
     """
     import matplotlib.pyplot as plt
 
@@ -341,10 +368,15 @@ def generate_budget_summary_table(
     df_thresholds: pd.DataFrame,
     out_dir: Path,
 ) -> None:
-    """Aggregate NFE thresholds into a summary table.
+    """Zagreguj tabelę progów NFE i zapisz CSV + LaTeX.
 
-    Output: budget_summary.csv + budget_summary.tex with columns:
-        optimizer, environment, threshold, nfe_median, nfe_q25, nfe_q75
+    Args:
+        df_thresholds: Wynik `compute_nfe_thresholds` (zagregowany po metrykach).
+        out_dir: Katalog docelowy.
+
+    Efekty uboczne:
+        Zapisuje `budget_summary.csv` i `budget_summary.tex` z kolumnami
+        `optimizer, environment, threshold, nfe_median, nfe_q25, nfe_q75`.
     """
     summary = (
         df_thresholds
@@ -395,6 +427,19 @@ def generate_budget_summary_table(
 # ── Main pipeline ────────────────────────────────────────────────────────
 
 def main(experiment_dir: str | Path) -> None:
+    """Uruchom kompletny pipeline kalibracji budżetu (CLI entry-point).
+
+    Wczytuje `analysis.db`, dla każdej metryki w `CONVERGENCE_METRICS` rysuje
+    krzywą konwergencji, liczy progi NFE i heatmapę stabilności rankingu,
+    a finalnie generuje tabelę zbiorczą.
+
+    Args:
+        experiment_dir: Katalog eksperymentu (musi zawierać `analysis.db`
+            z `ExperimentAggregator`).
+
+    Raises:
+        SystemExit: Gdy `analysis.db` nie istnieje albo brak metryk.
+    """
     experiment_dir = Path(experiment_dir)
     db_path = experiment_dir / "analysis.db"
 

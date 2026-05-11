@@ -33,12 +33,18 @@ DEFAULT_REF_POINT_MARGIN = 0.5
 
 
 def build_reference_pareto_sets(conn: sqlite3.Connection, experiment_dir: Path) -> dict[tuple[str, int], np.ndarray]:
-    """Buduje reference set R per (environment, n_obj) z last-gen feasible-ND
-    fronts wszystkich runów. Wpisuje R do `reference_pareto_sets` ORAZ
-    reference point r* do `reference_points`.
+    """Zbuduj merged ND reference set R per `(environment, n_obj)` z last-gen wszystkich runów.
+
+    Wpisuje R do `reference_pareto_sets` i reference point `r*` do
+    `reference_points` (idempotentnie — usuwa stare wiersze przed wstawieniem).
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        experiment_dir: Katalog eksperymentu (parametr zachowany dla zgodności
+            sygnatury — ścieżki h5 odczytywane są z `runs.source_path`).
 
     Returns:
-        dict[(env, n_obj) -> R: ndarray (|R|, n_obj)] dla wygody backfill'u.
+        Mapa `(env, n_obj) → R (|R|, n_obj)` ułatwiająca dalszy backfill.
     """
     runs = conn.execute(
         "SELECT run_id, source_path, environment FROM runs ORDER BY environment, run_id"
@@ -126,7 +132,7 @@ def build_reference_pareto_sets(conn: sqlite3.Connection, experiment_dir: Path) 
 def load_reference_set(
     conn: sqlite3.Connection, environment: str, n_obj: int
 ) -> Optional[np.ndarray]:
-    """Wczytuje R z DB. Zwraca None jeśli brak."""
+    """Wczytaj `R (|R|, n_obj)` z `reference_pareto_sets`; `None`, gdy brak."""
     rows = conn.execute(
         """
         SELECT point_idx, objective_j, value
@@ -149,7 +155,7 @@ def load_reference_set(
 def load_reference_point(
     conn: sqlite3.Connection, environment: str, n_obj: int
 ) -> Optional[np.ndarray]:
-    """Wczytuje r* (nadir+ε·range) z DB. Zwraca None gdy brak."""
+    """Wczytaj `r*` (nadir + ε·range) z `reference_points`; `None`, gdy brak."""
     rows = conn.execute(
         """
         SELECT objective_j, value FROM reference_points
@@ -169,8 +175,7 @@ def load_reference_point(
 def load_ideal_point(
     conn: sqlite3.Connection, environment: str, n_obj: int
 ) -> Optional[np.ndarray]:
-    """Wczytuje z* = min(R, axis=0) z `reference_points.ideal_value`. Zwraca
-    None gdy brak (np. backfill z legacy DB bez tej kolumny)."""
+    """Wczytaj `z* = min(R, axis=0)` z `reference_points.ideal_value`; `None`, gdy brak."""
     rows = conn.execute(
         """
         SELECT objective_j, ideal_value FROM reference_points
@@ -193,9 +198,17 @@ def backfill_moo_quality_with_reference(
     conn: sqlite3.Connection,
     reference_sets: dict[tuple[str, int], np.ndarray],
 ) -> None:
-    """Re-liczy GD/IGD+/HV per generacja dla każdego runu i UPDATE'uje
-    `iteration_metrics`. Następnie odświeża `run_metrics.gd_final`,
-    `run_metrics.igd_plus`, `run_metrics.hypervolume` z last-gen.
+    """Przelicz GD / IGD+ / HV per generacja względem `reference_sets` i odśwież agregaty.
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        reference_sets: Mapa `(env, n_obj) → R` (zwykle z
+            `build_reference_pareto_sets`).
+
+    Efekty uboczne:
+        UPDATE w `iteration_metrics` (per-gen) oraz w `run_metrics`
+        (`gd_final`, `igd_plus`, `hypervolume`, `hypervolume_normalized`)
+        z wartości last-gen.
 
     HV liczone z reference_point r* załadowanego z `reference_points`
     (Ishibuchi 2018). Jeśli r* nie istnieje dla danego (env, n_obj), HV
@@ -253,6 +266,7 @@ def backfill_moo_quality_with_reference(
 
 
 def _peek_n_obj(h5_path: Path) -> Optional[int]:
+    """Zwróć `n_obj` (liczbę kolumn `objectives_matrix`) z h5; `None` przy braku/błędzie."""
     try:
         import h5py
     except ImportError:  # pragma: no cover
@@ -270,6 +284,7 @@ def _peek_n_obj(h5_path: Path) -> Optional[int]:
 
 
 def _last_gen_feasible_front(h5_path: Path) -> Optional[np.ndarray]:
+    """Zwróć ND-front feasible rozwiązań z ostatniej generacji w `h5_path`; `None` przy braku."""
     """Zwraca feasible non-dominated front z last gen lub None."""
     try:
         import h5py
@@ -320,6 +335,7 @@ def _last_gen_feasible_front(h5_path: Path) -> Optional[np.ndarray]:
 
 
 def _non_dominated(F: np.ndarray) -> np.ndarray:
+    """Zwróć podzbiór `F` zawierający rozwiązania niezdominowane (`O(n²)`)."""
     """Pareto-front (rows of F nie zdominowane przez żadny inny row).
 
     Preferuje `pymoo.util.nds.non_dominated_sorting.NonDominatedSorting`

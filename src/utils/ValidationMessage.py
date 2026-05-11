@@ -1,6 +1,7 @@
 from enum import Enum
 
 class ValidationMessage(str, Enum):
+    """Słownik komunikatów walidacji konfiguracji środowiska/dronów (z `format`)."""
     INVALID_INITIAL_POINTS = "Number of initial positions ({}) does not match the number of drones ({})."
     INVALID_END_POINTS = "Number of end positions ({}) does not match the number of drones ({})."
     MISSING_SHAPE_DIMENSION = "Lack of dimension '{}' for obstacle shape '{}'."

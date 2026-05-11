@@ -55,11 +55,19 @@ def populate_offline_objectives(
     run_id: str,
     h5_path: Path,
 ) -> None:
-    """Wyciąga best feasible F-vector z h5 i UPDATE'uje `run_metrics`.
+    """UPDATE'uj `run_metrics` per-objective wartościami z best feasible F-vector w `h5_path`.
 
-    Idempotentne: re-run UPDATE'uje wartości, nie duplikuje wierszy.
-    Brak h5 / pusty `objectives_matrix` → silent no-op (run_metrics
-    pozostaje z NULL'ami — odpowiednik braku optymalizacji).
+    Idempotentne — re-run nadpisuje wartości. Brak `h5_path`,
+    `objectives_matrix` lub pusta last-gen ⇒ silent no-op.
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        run_id: Identyfikator runa.
+        h5_path: Ścieżka do `optimization_history.h5`.
+
+    Efekty uboczne:
+        UPDATE w `run_metrics` (`final_objective`, `final_objectives_json`
+        i kolumny per-obj zgodnie z mapowaniem `_F_TO_COLUMN_*`).
     """
     if not h5_path.exists():
         return
@@ -118,26 +126,20 @@ def populate_offline_objectives(
 
 
 def _extract_best_feasible_F(h5_path: Path) -> Optional[np.ndarray]:
-    """Z h5 wyciągnij F-vector best feasible solution z LAST generation.
+    """Wyciągnij F-vector best feasible solution z LAST generation w `h5_path`.
 
-    Preferowana strategia: odczyt `best_idx` z h5.
-    `HistorySnapshotBuilder.build_payload` (używany przez MSFFOA) zapisuje
-    `best_idx = argmin(scalar_fitness)` — to jest "best po skalaryzacji
-    algorytmu" (Big-M feasibility-first + weighted sum). Używamy go
-    bezpośrednio, bez ponownego wyboru po f1.
+    Preferuje `best_idx` zapisany przez `HistorySnapshotBuilder.build_payload`
+    (`argmin(scalar_fitness)`). Fallback: feasibility-first + `argmin(f1)`
+    z `feasible_mask` lub `constraint_violation` / `CV`. Gdy 0 feasible —
+    `argmin(f1)` z całej populacji z `WARNING` (final_objective reprezentuje
+    infeasible).
 
-    Pipeline:
-    1. Jeśli h5 zawiera `best_idx` (HistorySnapshotBuilder writers): użyj go
-       — F[best_idx] reprezentuje WIERNIE best po fitness algorytmu.
-    2. Fallback (per-gen metrics SSA/OOA writers, h5 bez best_idx):
-       feasibility-first wybór najpierw, potem argmin(f1) z feasible. Jeśli
-       0 feasible — argmin(f1) z całej populacji + WARNING (final_objective
-       reprezentuje infeasible).
+    Args:
+        h5_path: Ścieżka do `optimization_history.h5`.
 
-    Zwraca `None` gdy:
-    - h5 nie zawiera `objectives_matrix`,
-    - last gen ma 0 individuals,
-    - exception przy odczycie h5.
+    Returns:
+        `(n_obj,)` F-vector wybranego rozwiązania lub `None`, gdy h5 nie
+        zawiera `objectives_matrix`, last-gen jest pusta albo wystąpił błąd.
     """
     try:
         import h5py

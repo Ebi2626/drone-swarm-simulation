@@ -13,6 +13,17 @@ import sqlite3
 
 
 def populate_run_metrics(conn: sqlite3.Connection, run_id: str) -> None:
+    """Zbuduj agregat `run_metrics` dla `run_id` z wcześniej załadowanych tabel.
+
+    Args:
+        conn: Aktywne połączenie do `analysis.db`.
+        run_id: Identyfikator runa.
+
+    Efekty uboczne:
+        Wstawia / aktualizuje rekord w `run_metrics`. Pola F-vector
+        (`final_objective*`) pozostają `NULL` — wypełnia je
+        `populate_offline_objectives`.
+    """
     cur = conn.execute(
         """
         WITH

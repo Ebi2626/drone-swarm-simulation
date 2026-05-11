@@ -7,21 +7,29 @@ logger = logging.getLogger(__name__)
 
 
 class RunRegistry:
+    """SQLite registry runów eksperymentu — śledzi status (`PENDING/STARTED/COMPLETED/FAILED`).
+
+    Pozwala wznawiać przerwane eksperymenty (joblib multiprocessing-safe
+    przez `journal_mode=WAL`) i raportować postęp.
+    """
+
     STATUS = {"PENDING": "PENDING", "STARTED": "STARTED",
               "COMPLETED": "COMPLETED", "FAILED": "FAILED"}
 
     def __init__(self, db_path: str | Path):
+        """Powiąż registry z plikiem SQLite (tworzy katalog i schemat jeśli brak)."""
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self):
-        # check_same_thread=False wymagane przy joblib multiprocessing
+        """Utwórz nowe połączenie SQLite z `WAL` i `check_same_thread=False`."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")  # kluczowe dla concurrent writes
         return conn
 
     def _init_db(self):
+        """Utwórz tabelę `runs` (idempotentnie) z UNIQUE`(optimizer, environment, avoidance, seed)`."""
         with self._connect() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS runs (
@@ -39,7 +47,12 @@ class RunRegistry:
             """)
 
     def populate(self, sweep_params: list[dict]):
-        """Inicjalizuje 1600 wpisów – wywołać raz, przed startem."""
+        """Wstaw `sweep_params` jako PENDING (idempotentnie via `INSERT OR IGNORE`).
+
+        Args:
+            sweep_params: Lista dictów z kluczami `optimizer, environment,
+                avoidance, seed`.
+        """
         with self._connect() as conn:
             conn.executemany("""
                 INSERT OR IGNORE INTO runs
@@ -48,6 +61,11 @@ class RunRegistry:
             """, sweep_params)
 
     def should_run(self, optimizer, environment, avoidance, seed) -> bool:
+        """`True`, gdy wpis jest `PENDING/FAILED/STARTED` lub nie istnieje w registry.
+
+        Brak wpisu zwraca `True` z `WARNING` (możliwa niespójność klucza
+        między `prepare_experiment.populate` a `_get_registry_job_key`).
+        """
         with self._connect() as conn:
             row = conn.execute("""
                 SELECT status FROM runs
@@ -75,8 +93,7 @@ class RunRegistry:
         return row[0] in ("PENDING", "FAILED", "STARTED")
 
     def mark_started(self, optimizer, environment, avoidance, seed):
-        # Aktualizujemy czas startu i jednocześnie czyścimy stary czas zakończenia
-        # oraz komunikaty o błędach (niezbędne przy wznawianiu po crashu)
+        """Oznacz run jako `STARTED`, ustaw `started_at` i wyczyść `finished_at/error_msg`."""
         self._upsert_status(optimizer, environment, avoidance, seed,
                             "STARTED",
                             started_at=datetime.utcnow().isoformat(),
@@ -84,11 +101,13 @@ class RunRegistry:
                             error_msg=None)
 
     def mark_completed(self, optimizer, environment, avoidance, seed):
+        """Oznacz run jako `COMPLETED` z `finished_at=now()`; loguje postęp."""
         self._upsert_status(optimizer, environment, avoidance, seed,
                             "COMPLETED", finished_at=datetime.utcnow().isoformat())
         self._log_progress("COMPLETED")
 
     def mark_failed(self, optimizer, environment, avoidance, seed, error_msg: str):
+        """Oznacz run jako `FAILED` z `error_msg` (truncate do 1 KB); loguje postęp."""
         self._upsert_status(optimizer, environment, avoidance, seed,
                             "FAILED", finished_at=datetime.utcnow().isoformat(),
                             error_msg=error_msg[:1000])
@@ -148,6 +167,7 @@ class RunRegistry:
             """, insert_vals)
 
     def get_summary(self) -> dict:
+        """Zwróć słownik `{status: count}` z agregatu po `status` w `runs`."""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) FROM runs GROUP BY status"

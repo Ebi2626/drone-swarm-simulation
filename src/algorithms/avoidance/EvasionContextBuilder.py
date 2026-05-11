@@ -124,16 +124,32 @@ def jit_build_dynamic_search_space(current_pos: np.ndarray, rejoin_point: np.nda
 
 
 class EvasionContextBuilder:
+    """Buduje `EvasionContext` (rejoin point + adaptacyjna przestrzeń poszukiwań).
+
+    Ciężkie obliczenia geometryczne wynesione do jąder Numba JIT;
+    `scipy.splev` pozostaje w Pythonie.
     """
-    Preprocesor akademicki dla algorytmów unikania kolizji.
-    Zoptymalizowany numerycznie: ciężkie jądra matematyczne skompilowane przez
-    Numba JIT, splev (FITPACK/Fortran) pozostaje po stronie Pythona.
-    """
+
     def __init__(self, t_min=2.0, t_max=4.0, rejoin_arc_m=8.0,
                  floor_margin=1.0, ceiling_margin=1.0, lateral_margin=4.0,
                  margin_velocity_gain: float = 0.05,
                  rejoin_flyby_safety_m: float = 3.0,
                  lateral_max_offset_m: float = 8.0):
+        """Skonfiguruj parametry geometryczne planera uniku.
+
+        Args:
+            t_min, t_max: Dolny i górny horyzont czasowy planowania [s].
+            rejoin_arc_m: Bazowy dystans łuku do punktu powrotu [m].
+            floor_margin, ceiling_margin: Marginesy bezpieczeństwa od
+                podłogi i sufitu świata [m].
+            lateral_margin: Margines lateralny przy budowie BBOX poszukiwań [m].
+            margin_velocity_gain: Mnożnik `|rel_vel|` dodawany do BBOX padding
+                (szybsze zagrożenia ⇒ większy bufor).
+            rejoin_flyby_safety_m: Dodatkowy bufor czasowy przy obliczaniu
+                punktu powrotu po przelocie obok zagrożenia [m].
+            lateral_max_offset_m: Twardy limit lateralnej odchyłki BBOX-u od
+                drona [m]; `≤ 0` wyłącza ograniczenie.
+        """
         self.t_min = t_min
         self.t_max = t_max
         self.rejoin_arc_m = rejoin_arc_m
@@ -159,6 +175,29 @@ class EvasionContextBuilder:
               env_bounds: tuple[np.ndarray, np.ndarray],
               preferred_axis_hint: str | None = None,
               secondary_threats: list[ThreatAlert] | None = None) -> EvasionContext:
+        """Zbuduj kontekst dla pojedynczego trigger'a uniku.
+
+        Liczy adaptacyjną przestrzeń poszukiwań (`search_space_min/max`),
+        długość łuku flyby i punkt powrotu (`rejoin_point`,
+        `rejoin_base_arc`) na podstawie aktualnej geometrii i prędkości.
+
+        Args:
+            drone_id: Indeks drona w głównym roju.
+            current_time: Bieżący czas symulacji [s].
+            drone_state: Stan kinematyczny drona.
+            threat: Najgroźniejsze zagrożenie.
+            base_spline: Bazowa trajektoria offline tego drona.
+            base_arc_progress: Bieżąca długość łuku przebyta na bazowej
+                trajektorii [m].
+            env_bounds: Para `(world_min, world_max)` `(3,)` granic świata.
+            preferred_axis_hint: Sticky-axis z poprzedniego planu, jeśli
+                unik trwa.
+            secondary_threats: Inne drony / obiekty w zasięgu (multi-threat
+                awareness); `None` ⇒ pusta lista.
+
+        Returns:
+            Kompletny `EvasionContext` gotowy do przekazania strategiom uniku.
+        """
 
         world_min, world_max = env_bounds
         floor_z = float(world_min[2]) + self.floor_margin

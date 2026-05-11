@@ -22,17 +22,28 @@ class MetricExtractor:
     """Czyta metryki z `analysis.db` i zwraca DataFrames."""
 
     def __init__(self, db_path: str | Path) -> None:
+        """Powiąż ekstraktor z istniejącą bazą `analysis.db`.
+
+        Args:
+            db_path: Ścieżka do pliku bazy SQLite.
+
+        Raises:
+            FileNotFoundError: Gdy plik bazy nie istnieje.
+        """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Brak bazy: {self.db_path}")
 
     def run_summary(self) -> pd.DataFrame:
-        """Per-run zestawienie: jedna obserwacja per run_id.
+        """Zwróć tidy DataFrame z per-run zestawieniem (jedna obserwacja per `run_id`).
 
-        Kolumny include: optimizer, environment, seed, avoidance, success,
-        final_objective, hypervolume, igd_plus, gd_final, spread_final,
-        spacing_final, r2_final, convergence_speed_gen, auc_best_so_far,
-        oraz wszystkie online aggregates.
+        Kolumny: `optimizer`, `environment`, `seed`, `avoidance`, `success`,
+        `final_objective`, MOO indicators (HV/IGD+/GD/spread/spacing/R2)
+        oraz online aggregates (`collision_count`, `min_inter_uav_distance_m`,
+        `mean_*_indicator`, …).
+
+        Returns:
+            Tidy DataFrame indeksowany po `run_id`.
         """
         query = """
         SELECT
@@ -82,11 +93,15 @@ class MetricExtractor:
         self,
         metrics: Optional[list[str]] = None,
     ) -> pd.DataFrame:
-        """Per-iteration time series. Jeden wiersz per (run_id, iteration).
+        """Zwróć tidy time series — jeden wiersz per `(run_id, iteration)`.
 
         Args:
-            metrics: opcjonalnie subset kolumn (zawsze zachowujemy
-                run_id, optimizer, environment, seed, iteration).
+            metrics: Opcjonalny subset kolumn metryk; klucze tożsamości
+                (`run_id, optimizer, environment, seed, iteration`) są
+                zawsze obecne. `None` ⇒ pełen zestaw domyślnych kolumn.
+
+        Returns:
+            Tidy DataFrame z kolumnami tożsamości + wybranymi metrykami.
         """
         cols = (
             metrics
@@ -129,7 +144,12 @@ class MetricExtractor:
             return pd.read_sql_query(query, conn)
 
     def online_summary(self) -> pd.DataFrame:
-        """Per-run online avoidance summary z view'a `vw_run_online_summary`."""
+        """Zwróć per-run podsumowanie online avoidance z widoku `vw_run_online_summary`.
+
+        Returns:
+            DataFrame z agregatami: liczba triggerów uniku, wallclock, błędy
+            rejoin, dystanse między dronami i wskaźniki energii / gładkości.
+        """
         query = """
         SELECT
             v.run_id,
@@ -160,17 +180,17 @@ class MetricExtractor:
             return pd.read_sql_query(query, conn)
 
     def pareto_front_last_gen(self) -> pd.DataFrame:
-        """Last-gen feasible front per run, w formie long-form.
+        """Zwróć long-form feasible front Pareto z ostatniej generacji per run.
 
-        Filtruje populację last-gen przez `feasible_mask` (gdy dostępny w h5),
-        a następnie liczy non-dominated front. Bez tego filtru "pareto front"
-        zawierałby infeasible solutions, co przekłamuje porównanie cross-algorytm
-        (algorytm który zostawia więcej infeasible w pop ma "większy front").
-        Spójne z `populate_offline_objectives._extract_best_feasible_F`.
+        Czyta `optimization_history.h5` per run, filtruje populację przez
+        `feasible_mask` (lub `constraint_violation` z `FEASIBILITY_EPS`)
+        i liczy non-dominated front. Bez filtru rankingi cross-algorytm są
+        zaburzone przez infeasible solutions.
 
-        Kolumny: run_id, optimizer, environment, seed, point_idx,
-        objective_j, value. Używane do plotów Pareto front.
-        Wymaga `optimization_history.h5` na dysku.
+        Returns:
+            DataFrame z kolumnami `run_id, optimizer, environment, seed,
+            point_idx, objective_j, value`. Pusty, gdy brak `h5py` lub
+            żaden run nie ma feasible kandydatów w last-gen.
         """
         # Ten extractor czyta h5 bezpośrednio (run_metrics nie przechowuje
         # całego fronta). Robimy to w pythonie z h5py.
@@ -244,11 +264,16 @@ class MetricExtractor:
 
 
 def _extract_feasible_mask_from_h5(f, gen_idx: int, pop_size: int):
-    """Wyciąga feasible_mask z h5 dla generacji `gen_idx`.
+    """Wyciągnij maskę feasible z h5 dla generacji `gen_idx`.
 
-    Preferuje `feasible_mask`. Fallback: liczy z `constraint_violation`/`CV` przy
-    pomocy `FEASIBILITY_EPS`. Zwraca None gdy brak danych — caller pozostaje
-    przy nie-filtrowanym F.
+    Args:
+        f: Otwarty `h5py.File`.
+        gen_idx: Indeks generacji.
+        pop_size: Oczekiwany rozmiar populacji (do walidacji shape).
+
+    Returns:
+        `(pop_size,)` maska boolowska albo `None`, gdy brak danych — caller
+        pozostaje wtedy przy niefiltrowanej macierzy `F`.
     """
     import numpy as np
     if "feasible_mask" in f:
@@ -276,6 +301,7 @@ def _extract_feasible_mask_from_h5(f, gen_idx: int, pop_size: int):
 
 
 def _non_dominated(F):
+    """Zwróć podzbiór `F` zawierający rozwiązania niezdominowane (`O(n²)`)."""
     import numpy as np
 
     F = np.asarray(F, dtype=float)

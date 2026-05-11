@@ -38,10 +38,12 @@ _RC = {
 
 
 def apply_style() -> None:
+    """Zastosuj wspólny styl publikacyjny (mała czcionka serif, ukryte spines)."""
     plt.rcParams.update(_RC)
 
 
 def make_figure(figsize: tuple[float, float] | None = None):
+    """Utwórz `(fig, ax)` z aplikowanym stylem; `figsize` domyślnie `(6, 4)`."""
     apply_style()
     if figsize is None:
         figsize = _RC["figure.figsize"]
@@ -49,6 +51,7 @@ def make_figure(figsize: tuple[float, float] | None = None):
 
 
 def save_and_close(fig, out_path) -> None:
+    """Zapisz `fig` do `out_path` i zamknij; przy `.pdf` dorzuć też PNG (imread)."""
     from pathlib import Path
 
     out_path = Path(out_path)

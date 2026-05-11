@@ -8,6 +8,14 @@ from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.abstraction.generate_world_boundaries import WorldData
 
 class SwarmBaseWorld(BaseAviary):
+    """Bazowe środowisko PyBullet dla roju — granice świata, podłoga, sufit, agenci.
+
+    Łączy główny rój (`primary_num_drones`) i opcjonalnych dynamicznych
+    obstakli (`num_dynamic_obstacles`) jako jednorodne ciała PyBullet,
+    rozróżniane semantycznie przez `is_dynamic_obstacle`/`get_body_role`.
+    Konkretne klasy potomne implementują `draw_obstacles` (las, miasto, …).
+    """
+
     def __init__(
         self,
         world_data: WorldData,
@@ -66,23 +74,28 @@ class SwarmBaseWorld(BaseAviary):
             p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
 
     def get_primary_agent_indices(self):
+        """Zwróć listę indeksów `[0, primary_num_drones)` — głównych dronów roju."""
         return list(range(self.primary_num_drones))
 
     def get_dynamic_obstacle_indices(self):
+        """Zwróć indeksy dynamicznych obstakli `[primary, total)`; pusta przy wyłączonych."""
         if not self.dynamic_obstacles_enabled:
             return []
         return list(range(self.primary_num_drones, self.total_agents))
 
     def is_dynamic_obstacle(self, agent_idx: int) -> bool:
+        """`True`, gdy `agent_idx` mieści się w zakresie dynamicznych obstakli."""
         return self.dynamic_obstacles_enabled and self.primary_num_drones <= agent_idx < self.total_agents
 
     def get_agent_index_from_body_id(self, body_id: int):
+        """Mapuj `body_id` PyBullet na indeks agenta; `None`, gdy nie należy do dronów."""
         for idx, drone_body_id in enumerate(self.DRONE_IDS):
             if drone_body_id == body_id:
                 return idx
         return None
 
     def get_body_role(self, body_id: int) -> str:
+        """Zwróć semantyczną rolę ciała: `drone / dynamic_obstacle / ground / ceiling / static_obstacle`."""
         agent_idx = self.get_agent_index_from_body_id(body_id)
         if agent_idx is not None:
             return "dynamic_obstacle" if self.is_dynamic_obstacle(agent_idx) else "drone"
@@ -207,15 +220,18 @@ class SwarmBaseWorld(BaseAviary):
 
     @abstractmethod
     def draw_obstacles(self) -> None:
+        """Wystaw przeszkody w PyBullet — implementowane przez klasy potomne."""
         raise NotImplementedError
 
     def get_detailed_collisions(self, include_dynamic_obstacles: bool = False):
-        """
-        Zwraca listę kolizji jako:
-            (agent_idx, other_body_id)
+        """Zwróć listę `(agent_idx, other_body_id)` z fizycznych kontaktów PyBullet.
 
-        Domyślnie raportuje kolizje tylko dla głównych dronów.
-        Jeśli include_dynamic_obstacles=True, sprawdza wszystkich agentów.
+        Args:
+            include_dynamic_obstacles: `True` ⇒ uwzględnij dynamiczne
+                obstakle jako agentów źródłowych; domyślnie tylko `primary_num_drones`.
+
+        Returns:
+            Zbiór par bez duplikatów (kontakt z samym sobą wykluczony).
         """
         collisions = []
         max_agent_idx = self.NUM_DRONES if include_dynamic_obstacles else self.primary_num_drones
@@ -235,12 +251,14 @@ class SwarmBaseWorld(BaseAviary):
         return list(set(collisions))
 
     def get_agent_collisions(self, include_dynamic_obstacles: bool = False):
-        """
-        Zwraca kolizje agent-agent jako:
-            (agent_idx, other_agent_idx)
+        """Zwróć kolizje agent-agent jako `(agent_idx, other_agent_idx)`.
 
-        Przydatne, jeśli później będziesz chciał odróżniać:
-        dron-vs-dron, dron-vs-dynamic_obstacle, dynamic_obstacle-vs-dynamic_obstacle.
+        Args:
+            include_dynamic_obstacles: Patrz `get_detailed_collisions`.
+
+        Returns:
+            Zbiór par agent-agent bez duplikatów; pomija ciała statyczne
+            (ground/ceiling/static obstacles).
         """
         collisions = []
         for agent_idx, other_body_id in self.get_detailed_collisions(
@@ -268,13 +286,17 @@ class SwarmBaseWorld(BaseAviary):
     def get_inter_drone_proximity_collisions(
         self, threshold_m: float | None = None,
     ) -> list[tuple[int, int, float]]:
-        """Wykrywa pary primary-swarm dronów których odległość center-to-center
-        jest ≤ `threshold_m`. Komplementarne do `get_detailed_collisions`,
-        które wymagają fizycznego kontaktu (LCP).
+        """Wykryj pary dronów (primary) z odległością center-to-center ≤ `threshold_m`.
+
+        Komplementarne do `get_detailed_collisions`, który wymaga fizycznego
+        kontaktu (LCP) — proximity wyłapuje również near-miss.
+
+        Args:
+            threshold_m: Próg odległości [m]; `None` ⇒ `INTER_DRONE_COLLISION_THRESHOLD_M`.
 
         Returns:
-            Lista (agent_idx_a, agent_idx_b, distance_m), gdzie a < b.
-            Pusta gdy żadne pary nie kwalifikują.
+            Lista `(agent_idx_a, agent_idx_b, distance_m)` z `a < b`; pusta,
+            gdy żadne pary nie kwalifikują się.
         """
         if threshold_m is None:
             threshold_m = self.INTER_DRONE_COLLISION_THRESHOLD_M
@@ -300,14 +322,15 @@ class SwarmBaseWorld(BaseAviary):
     def get_all_inter_drone_collisions(
         self, threshold_m: float | None = None,
     ) -> list[tuple[int, int, float, str]]:
-        """Łączy fizyczne (LCP) i proximity-based wykrywanie kolizji dron-dron
-        do jednej spójnej listy. Każda krotka:
-            (agent_idx_a, agent_idx_b, distance_m, source)
-        gdzie `source ∈ {"contact", "proximity"}`.
+        """Połącz fizyczne (LCP) i proximity-based kolizje dron-dron do jednej listy.
 
-        Deduplikacja: jeśli para jest wykryta zarówno fizycznie jak i przez
-        proximity, raportujemy tylko raz z source="contact" (silniejszy
-        wskaźnik — fizycznie się stykają).
+        Args:
+            threshold_m: Próg dla wykrywania proximity (`None` ⇒ wartość domyślna).
+
+        Returns:
+            Lista `(agent_idx_a, agent_idx_b, distance_m, source)` z
+            `source ∈ {"contact", "proximity"}`. Para wykryta oboma metodami
+            raportowana jest raz jako `"contact"` (silniejszy wskaźnik).
         """
         # Fizyczne kontakty: agent-agent pairs z get_agent_collisions, tylko
         # primary drones (nie dynamic obstacles).

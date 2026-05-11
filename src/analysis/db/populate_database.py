@@ -1,3 +1,10 @@
+"""Populator bazy `analysis.db` — łączy wszystkie loadery i populatory metryk.
+
+Per run wykonuje 4 fazy: surowe pliki źródłowe (CSV/h5), tabele pochodne
+(trajectory/uav/iteration/online_safety), agregat `run_metrics` i F-vector
+z `optimization_history.h5`. Status każdego runa zapisywany jest w
+`runs.aggregation_status` — pojedynczy błąd nie blokuje pozostałych runów.
+"""
 import logging
 from pathlib import Path
 import sqlite3
@@ -20,6 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 def populate_database(experiment_dir: str | Path) -> Path:
+    """Załaduj wszystkie runy z `experiment_dir` do `analysis.db`.
+
+    Każdy run jest najpierw oznaczany `aggregation_status='discovered'`,
+    następnie przechodzi pełen pipeline (raw load → derived tables →
+    aggregates → F-vector). Wynik kończy się statusem `'aggregated'` albo
+    `'failed'` z `aggregation_error`. Pojedynczy fail nie przerywa pętli.
+
+    Args:
+        experiment_dir: Katalog eksperymentu zawierający per-run podkatalogi.
+
+    Returns:
+        Ścieżkę do `analysis.db`.
+    """
     experiment_dir = Path(experiment_dir).expanduser().resolve()
     db_path = experiment_dir / "analysis.db"
 

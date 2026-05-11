@@ -16,6 +16,12 @@ class ConstantSpeedProfile:
     """
 
     def __init__(self, total_distance: float, speed: float):
+        """Skonfiguruj profil; `t_c = total_distance / speed`, brak ramp.
+
+        Args:
+            total_distance: Łączna długość trasy [m].
+            speed: Stała prędkość przelotowa [m/s] (`> 0`).
+        """
         self.total_distance = max(float(total_distance), 0.0)
         self.cruise_speed = max(float(speed), 1e-6)
 
@@ -31,6 +37,7 @@ class ConstantSpeedProfile:
         self.total_duration = self.t_c
 
     def get_state(self, t: float) -> tuple[float, float]:
+        """Zwróć `(distance, speed)` dla czasu `t`; `speed = 0` po dotarciu na koniec."""
         if self.total_distance <= 1e-6:
             return 0.0, 0.0
 

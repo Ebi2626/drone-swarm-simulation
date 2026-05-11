@@ -30,20 +30,20 @@ def validate_trajectories(
     start_positions: NDArray[np.float64],
     label: str = "trajectory",
 ) -> dict[str, Any]:
-    """Sprawdza poprawność trajektorii zwróconej przez strategię.
+    """Sprawdź sanity trajektorii (NaN/Inf, near-zero length, stuck-at-start).
 
     Args:
-        trajectories: (n_drones, n_waypoints, 3) — wynik strategii optymalizacji.
-        start_positions: (n_drones, 3) — punkty startowe (do porównania
-            z ostatnim waypoint'em w sekcji „dron nie ruszył").
-        label: Etykieta używana w komunikatach (np. nazwa strategii).
+        trajectories: `(n_drones, n_waypoints, 3)` z optymalizatora.
+        start_positions: `(n_drones, 3)` punkty startowe (do detekcji „stuck").
+        label: Etykieta logu (np. nazwa strategii).
 
     Returns:
-        Dict z wynikami:
-        ``{"finite": bool, "near_zero_drones": list[int],
-        "stuck_at_start_drones": list[int], "per_drone_length_m": list[float]}``.
-        Funkcja nie zwraca True/False jednoznacznego — rozdzielamy patologie,
-        żeby caller (np. ETL) mógł je rozróżniać.
+        Dict `{finite, near_zero_drones, stuck_at_start_drones, per_drone_length_m}`.
+        Funkcja nie rzuca wyjątków — patologie są rozdzielane, by caller (ETL)
+        mógł je rozróżnić.
+
+    Efekty uboczne:
+        Drukuje ostrzeżenia z prefiksem `⚠` na stdout.
     """
     arr = np.asarray(trajectories, dtype=np.float64)
     starts = np.asarray(start_positions, dtype=np.float64)

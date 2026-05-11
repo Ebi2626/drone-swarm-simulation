@@ -1,23 +1,23 @@
-"""
-Generic Single-Objective Adapter for VectorizedEvaluator.
+"""Adapter SOO dla `VectorizedEvaluator`: skalaryzacja MOO → fitness skalarny.
 
-Bridges the multi-objective VectorizedEvaluator (F: objectives, G: constraints)
-to a scalar fitness value suitable for single-objective metaheuristics
-(e.g., PSO, DE, FOA variants).
+Most między wielokryterialnym `VectorizedEvaluator` (F: obiektywy,
+G: ograniczenia) a skalarnym fitnessem wymaganym przez metaheurystyki
+single-objective (PSO, DE, warianty FOA, mealpy SSA/OOA).
 
-Golden Rules enforced:
-1. Objective Normalization — F is divided by F_ref (straight-line reference)
-   before weighting, so objectives operate on a dimensionless ~1.0 scale.
-2. **Hard Feasibility-First (Big-M)** — infeasible solutions (any G[k]>0) get
-   fitness ≥ HARD_INFEASIBLE_BASE (1e6), proportional to total violation
-   magnitude. Feasible solutions get just `obj_values`. Effect: feasible
-   ALWAYS dominates infeasible regardless of objective differences. Mirrors
-   NSGA-III's native feasibility-first dominance (Deb 2000 §V.A) for SOO.
+Dwie reguły niezmienne:
+1. **Normalizacja obiektywów** — F jest dzielone przez `F_ref` (referencyjna
+   linia prosta) przed ważeniem, więc każdy obiektyw operuje w bezwymiarowej
+   skali ~1.0.
+2. **Hard Feasibility-First (Big-M)** — rozwiązania niewykonalne
+   (jakiekolwiek `G[k] > 0`) dostają fitness ≥ `HARD_INFEASIBLE_BASE` (1e6)
+   proporcjonalny do sumy naruszeń; rozwiązania wykonalne dostają samo
+   `obj_values`. Skutek: wykonalne ZAWSZE dominują niewykonalne, niezależnie
+   od różnic w obiektywach. Odwzorowanie feasibility-first dominance z
+   NSGA-III (Deb 2000 §V.A) w wariancie SOO.
 
-Why hard gating: previously `np.max(0,G)*weight` (soft penalty, weakest-link)
-allowed infeasible-with-low-obj to outrank feasible-with-high-obj. Optimizer
-returned kinematically infeasible trajectories → drone executes → panic
-falls (user 2026-05-07).
+Soft penalty (`np.max(0, G) * weight`) pozwalał wcześniej, by niewykonalne
+rozwiązanie z niskim obj wygrywało nad wykonalnym z wyższym obj — optymalizator
+zwracał kinematycznie niewykonalne trajektorie i drony spadały.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 from numpy.typing import NDArray
 
-# Zmiana nazwy importu zgodnie z fizyczną nazwą w projekcie
 from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
 
 
@@ -39,32 +38,37 @@ HARD_INFEASIBLE_BASE: float = 1e6
 
 
 class TrajectorySOOAdapter:
-    """Converts VectorizedEvaluator outputs into a single scalar fitness.
+    """Skalaryzator wyjść `VectorizedEvaluator` do pojedynczego fitnessu.
 
-    Designed as a callable: an instance can be passed directly as the
-    ``fitness_function`` argument to any SOO optimizer that operates on
-    inner waypoints tensors.
+    Instancja jest wywoływalna (`__call__`) i może być bezpośrednio
+    przekazana jako `fitness_function` do dowolnego optymalizatora SOO
+    operującego na tensorach inner-waypointów.
 
-    Pipeline (per call):
-    1. Receive inner waypoints ``(Pop, N_drones, Inner, 3)``.
-    2. Prepend start positions, append target positions (Polyline construction).
-    3. Query ``VectorizedEvaluator`` -> ``F (Pop, M)``, ``G (Pop, K)``.
-    4. Normalize ``F`` by ``F_ref`` (Golden Rule #1).
-    5. Aggregate ``G`` via Big-M feasibility-first ordering (Golden Rule #2):
-       ``total_violation = sum(max(0, G[k]))`` — kara rośnie liniowo z każdym
-       naruszeniem (ranking inside-bucket dla infeasible). Każde infeasible
-       (any G[k]>0) wpada w bucket ``≥ HARD_INFEASIBLE_BASE``.
-    6. Return ``(Pop,)`` scalar fitness.
+    Przebieg pojedynczego wywołania:
+
+    1. Przyjmuje inner waypointy `(Pop, N_drones, Inner, 3)`.
+    2. Dokleja pozycje startowe i docelowe (rekonstrukcja pełnego wieloboku).
+    3. Pyta `VectorizedEvaluator` → `F (Pop, M)`, `G (Pop, K)`.
+    4. Normalizuje `F` przez `F_ref` (reguła #1).
+    5. Agreguje `G` przez Big-M feasibility-first (reguła #2):
+       `total_violation = Σ max(0, G[k])` — kara rośnie liniowo z każdym
+       naruszeniem (porządkowanie wewnątrz kubełka niewykonalnych); każde
+       niewykonalne (jakiekolwiek `G[k] > 0`) trafia do kubełka
+       `≥ HARD_INFEASIBLE_BASE`.
+    6. Zwraca `(Pop,)` fitness skalarny (mniej = lepiej).
 
     Args:
-        evaluator: Pre-configured VectorizedEvaluator instance.
-        start_positions: (N_drones, 3) fixed start positions.
-        target_positions: (N_drones, 3) fixed target positions.
-        n_drones: Number of drones.
-        n_inner: Number of inner waypoints per drone.
-        weights: (M,) objective weights [w_path_length, w_smoothness, w_collision_risk].
-        penalty_weight: Multiplier for the weakest-link constraint penalty.
-        history_writer: Optional logger for saving generational data.
+        evaluator: Skonfigurowany `VectorizedEvaluator`.
+        start_positions: `(N_drones, 3)` pozycje startowe [m].
+        target_positions: `(N_drones, 3)` pozycje docelowe [m].
+        n_drones: Liczba dronów w roju.
+        n_inner: Liczba wewnętrznych węzłów kontrolnych na drona.
+        weights: `(M=5,)` wagi dla 5 obiektywów `VectorizedEvaluator`:
+            `[w_f1_trajectory, w_f2_height_angle, w_f3_threat,
+            w_f4_turn, w_f5_coordination]`.
+        penalty_weight: Mnożnik wielkości naruszenia w kubełku Big-M
+            (rozdziela rozwiązania niewykonalne wewnątrz kubełka).
+        history_writer: Opcjonalny logger zapisu danych per generacja.
     """
 
     def __init__(
@@ -97,30 +101,25 @@ class TrajectorySOOAdapter:
         self.last_constraints: NDArray[np.float64] | None = None
         self._debug_printed: bool = False
 
-    # ------------------------------------------------------------------
-    # Reference scale computation (Golden Rule #1)
-    # ------------------------------------------------------------------
-
     def _compute_reference_scales(self) -> NDArray[np.float64]:
-        """Evaluate a straight-line trajectory to obtain F_ref for normalization.
+        """Wylicz `F_ref` na bazie referencyjnej trajektorii prostej (linia start→target).
 
-        Strategia (decyzja użytkownika 2026-05-07): bez cap'u.
-        - Dla `f_ref[k] > 1e-9`: używamy faktycznej wartości referencyjnej.
-          Normalizacja proporcjonalna do skali objectivu.
-        - Dla `f_ref[k] ≤ 1e-9` (komponent zerowy na straight line, np. f3
-          threat dla korytarza bez przeszkód): używamy `1.0` jako neutralny
-          mianownik. Skutek: `F_norm[k] = F[k]` (obserwowana wartość bez
-          skalowania), co zachowuje feasibility-first ordering — feasible
-          z normalnym `F[k] = O(1..10)` ma fitness w O(1..100), zawsze
-          poniżej `HARD_INFEASIBLE_BASE = 1e6`.
+        Strategia bez sztucznego cap'a:
+        - Dla `f_ref[k] > 1e-9`: używamy faktycznej wartości referencyjnej —
+          normalizacja proporcjonalna do skali obiektywu.
+        - Dla `f_ref[k] ≤ 1e-9` (komponent zerowy na linii prostej, np. f3
+          threat w korytarzu bez przeszkód): `1.0` jako neutralny mianownik.
+          Skutek: `F_norm[k] = F[k]` zachowuje feasibility-first ordering —
+          wykonalne `F[k] = O(1..10)` daje fitness `O(1..100)`, zawsze poniżej
+          `HARD_INFEASIBLE_BASE = 1e6`.
 
-        Wcześniejsze rozwiązanie (`max(f_ref, 1e-6)`) było pułapką: dla
-        f_ref[k]=0 normalizacja przez 1e-6 dawała `F_norm[k] = 1e6 · F[k]`,
-        co pozwala feasible solution wyjść > Big-M base i złamać Golden Rule #2
-        (zob. xfail test `test_soo_adapter_big_m_robust_to_zero_f_ref_component`).
+        Cap `max(f_ref, 1e-6)` byłby pułapką: dla `f_ref[k] = 0` normalizacja
+        przez `1e-6` dałaby `F_norm[k] = 1e6 · F[k]`, pozwalając wykonalnemu
+        rozwiązaniu wyjść powyżej Big-M i złamać regułę #2 (test xfail:
+        `test_soo_adapter_big_m_robust_to_zero_f_ref_component`).
 
         Returns:
-            (M,) reference objective values, guaranteed > 0.
+            `(M,)` referencyjne wartości obiektywów, zawsze `> 0`.
         """
         # Generate evenly spaced intermediate points along the straight line
         t_vals = np.linspace(0, 1, self.n_inner + 2)[1:-1]
@@ -150,18 +149,16 @@ class TrajectorySOOAdapter:
             self._zero_ref_components = []
         return np.where(zero_ref_mask, 1.0, f_ref)
 
-    # ------------------------------------------------------------------
-    # Callable interface
-    # ------------------------------------------------------------------
-
     def __call__(self, inner_waypoints: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Evaluate a batch of inner-waypoint populations.
+        """Oceń całą populację inner-waypointów i zwróć fitness skalarny.
 
         Args:
-            inner_waypoints: (Pop_size, N_drones, N_inner, 3).
+            inner_waypoints: `(Pop_size, N_drones, N_inner, 3)` — same węzły
+                wewnętrzne (bez `start` i `target`, doklejane w środku).
 
         Returns:
-            (Pop_size,) scalar fitness values (lower is better).
+            `(Pop_size,)` wartości fitnessu skalarnego (mniej = lepiej).
+            Wykonalne dostają wartości `O(1..100)`, niewykonalne `≥ 1e6`.
         """
         pop_size = inner_waypoints.shape[0]
 

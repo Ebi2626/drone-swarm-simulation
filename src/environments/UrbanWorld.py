@@ -9,6 +9,8 @@ from src.utils.config_parser import sanitize_init_params
 
 
 class UrbanWorld(SwarmBaseWorld):
+    """Środowisko miejskie — przeszkody to budynki (boxy) z `obstacles_data`."""
+
     def __init__(
         self,
         world_data: WorldData,        # ← wymiary świata
@@ -45,25 +47,20 @@ class UrbanWorld(SwarmBaseWorld):
             **kwargs
         )
 
-    # ------------------------------------------------------------------ #
-    # Implementacja rysowania przeszkód                                  #
-    # ------------------------------------------------------------------ #
     def draw_obstacles(self):
+        """Wystaw wszystkie budynki (boxy) w PyBullet zgodnie z `obstacles.data`."""
         print("[DEBUG]: Drawing obstacles")
-        self._create_city(self.obstacles.data) 
-      
-    # ------------------------------------------------------------------ #
-    # Geometria przeszkód                                                #
-    # ------------------------------------------------------------------ #
+        self._create_city(self.obstacles.data)
 
     def _create_building(self, obstacle: np.ndarray) -> None:
-        shade = np.random.uniform(0.6, 0.9) # Zmienna losowa niekontorlowana seedem - to tylko kolor
+        """Wystaw pojedynczy box PyBullet z parametrów `(x, y, z, length, width, height)`."""
+        # Kolor losowany ad-hoc — niekontrolowany seedem (wpływa wyłącznie na render).
+        shade = np.random.uniform(0.6, 0.9)
         x, y, z = obstacle[0], obstacle[1], obstacle[2]
         length, width, height = obstacle[3], obstacle[4], obstacle[5]
         base_z = z + height / 2
         print("[DEBUG]: x,y,z", x, y, z)
         print("[DEBUG]: length, width, height", length, width, height)
-
 
         col_shape = p.createCollisionShape(
             p.GEOM_BOX, halfExtents=[length/2, width/2, height/2]
@@ -77,5 +74,6 @@ class UrbanWorld(SwarmBaseWorld):
 
 
     def _create_city(self, obstacles: np.ndarray) -> None:
+        """Iteruj po wierszach `obstacles` i wystaw `_create_building` dla każdego."""
         for i in range(obstacles.shape[0]):
             self._create_building(obstacles[i, :])

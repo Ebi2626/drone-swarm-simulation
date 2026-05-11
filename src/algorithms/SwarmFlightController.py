@@ -1,18 +1,11 @@
 import numpy as np
-import pybullet as p
 from src.algorithms.abstraction.trajectory.strategies.shared.NumbaTrajectoryProfile import NumbaTrajectoryProfile
 
 
-# B-fix lookahead saturation (Kamień 2026-05-07): cap pos_e seen by PID by
-# clipping target_pos to within `max_lookahead_m` of cur_pos. Drone "łagodnie"
-# dogania zamiast skoku — PID nie dostaje horrendous pos_e który prowadzi
-# do extreme thrust commands → death-spiral.
-#
-# Tuning history:
-# - Initial 1.0m (drone-swarm-simulation Kamień 2026-05-07): redukcja
-#   panic falls z 4 do 1 per forest+ssa run.
-# - Refined to 0.5m (follow-up po drone 2 panic): tighter tracking,
-#   PID dostaje noiseless input → mniej extreme thrust commands.
+# Lookahead saturation: cap pos_e widziane przez PID przez clip target_pos do
+# `max_lookahead_m` od cur_pos. Drone „łagodnie" dogania zamiast skoku —
+# PID nie dostaje horrendous pos_e prowadzącego do extreme thrust commands
+# (death-spiral). 0.5m empirycznie eliminuje panic falls w forest+ssa.
 DEFAULT_TARGET_LOOKAHEAD_M: float = 0.5
 
 
@@ -35,7 +28,6 @@ def clip_target_lookahead(
         return np.asarray(target_pos, dtype=np.float64).copy()
     return cur_pos + offset * (max_lookahead_m / dist)
 
-# POPRAWKA: Wszystkie zunifikowane struktury pobieramy z BaseAvoidance
 from src.algorithms.avoidance.EvasionContextBuilder import EvasionContextBuilder
 
 from src.algorithms.avoidance.ThreatAnalyzer.ThreatAnalyzer import KinematicState, ThreatAlert
@@ -47,11 +39,41 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 
 class SwarmFlightController():
+    """Sterownik lotu roju — utrzymuje per-drona stan {TRACKING, EVASION, BLEND}.
+
+    Każdy dron przechodzi przez maszynę stanów: TRACKING (śledzenie bazowego
+    splajnu) ⇄ EVASION (wykonanie planu uniku z `avoidance_algorithm`) →
+    REJOIN_BLEND (mostek mieszający komendy z powrotem do splajnu bazowego).
+
+    Triggery uniku pochodzą z dwóch źródeł: deterministycznego oracle
+    (`_oracle_threat_check`) i analizy LiDAR (`_analyze_lidar_for_threat`).
+    Sterowanie PID realizowane przez `TunedDSLPIDControl` (lub
+    `DSLPIDControl`, gdy `params.use_tuned_pid=False`).
+
+    Instancja działa w dwóch wariantach (parametr `is_obstacle`):
+      - rojem głównym (śledzą bazowe splajny i unikają),
+      - dynamicznych przeszkód (śledzą odwrócone splajny, brak uniku).
+    """
+
     MODE_TRACKING = 0
     MODE_EVASION = 1
-    MODE_REJOIN_BLEND = 2  # Faza 3.2: mostek EVASION→TRACKING (mieszanie komend PID)
+    MODE_REJOIN_BLEND = 2  # Mostek EVASION→TRACKING (mieszanie komend PID).
 
     def __init__(self, parent, num_drones, is_obstacle: bool, avoidance_algorithm=None, params=None):
+        """Skonfiguruj sterownik roju, kontrolery PID i progi wyzwalania uniku.
+
+        Args:
+            parent: Obiekt nadrzędny (`SwarmBaseWorld`) dostarczający
+                splajny, środowisko i logger.
+            num_drones: Liczba dronów (każdy ma własny PID, LiDAR i stan).
+            is_obstacle: `True` ⇒ instancja steruje rojem dynamicznych
+                przeszkód (bez avoidance, splajny odwrócone).
+            avoidance_algorithm: Strategia online avoidance
+                (`BaseAvoidance`); progi `trigger_*` i `*_cooldown` czytane
+                z `avoidance_algorithm.params`.
+            params: Hydra `cfg.simulation` — `cruise_speed`, `max_accel`,
+                `collision_radius`, `enable_avoidance`, `use_tuned_pid` itd.
+        """
         self._trajectory_start_times = np.zeros(num_drones)
         self.is_obstacle = is_obstacle
         self.avoidance_algorithm = avoidance_algorithm
@@ -59,10 +81,10 @@ class SwarmFlightController():
         self.num_drones = num_drones
         self.params = params or {}
 
-        # Tuned PID + anti-tilt (Kamień 2026-05-07): zapobiega death-spiral
-        # podczas sharp lateral maneuvers. Switch via `params.use_tuned_pid`
-        # (default True). Dla baseline experiments z original DSLPIDControl
-        # użyj `use_tuned_pid: false`.
+        # Tuned PID + anti-tilt: zapobiega death-spiral podczas sharp lateral
+        # maneuvers. Switch via `params.use_tuned_pid` (default True). Dla
+        # baseline experiments z original DSLPIDControl użyj
+        # `use_tuned_pid: false`.
         use_tuned = bool(self.params.get("use_tuned_pid", True))
         controller_cls = TunedDSLPIDControl if use_tuned else DSLPIDControl
         self.controllers = [
@@ -73,12 +95,10 @@ class SwarmFlightController():
             self.params.get("target_lookahead_m", DEFAULT_TARGET_LOOKAHEAD_M)
         )
 
-        # Drony wyłączone po kolizji (Krok 2 plan.md 2026-05-07).
-        # `compute_actions` zwraca dla nich RPM=0 (silniki off);
-        # `_run_lidar_and_detect` pomija je w pętli (LiDAR off, oszczędność CPU).
-        # `latest_scans[i]` jest ustawiane na [] żeby downstream avoidance
-        # nie traktował starych skanów jako "świeżych". Set, nie array, bo
-        # oczekujemy max ~kilku wpisów w typowym roju.
+        # Drony wyłączone po kolizji: `compute_actions` zwraca dla nich RPM=0,
+        # `_run_lidar_and_detect` pomija je w pętli (oszczędność CPU),
+        # `latest_scans[i]` ustawiane na [] żeby downstream avoidance nie
+        # traktował starych skanów jako „świeżych".
         self._disabled_drones: set[int] = set()
 
         # Bazowe trajektorie (offline, nigdy zmieniane)
@@ -97,8 +117,7 @@ class SwarmFlightController():
         # (ttc < cooldown/2) nie replanujemy częściej niż co `min_dt`. Bez tego
         # throttla w korytarzu z wieloma przeszkodami oracle skakał między
         # celami co 20 ms, PID nie nadążał wykonać żadnego z kolejnych planów.
-        # Wartość 1.5 s ≈ pełna długość typowego planu uniku po skróceniu
-        # `evasion_time_max` z 6→3 s (Bug #2 plan, Krok 3a). Plan ma realnie
+        # Wartość 1.5 s ≈ pełna długość typowego planu uniku — plan ma realnie
         # zdążyć skończyć (BLEND→TRACKING) zanim go wymienimy. Dla scenariuszy
         # z dużą dynamiką zagrożeń tłumimy replan dodatkowym kryterium
         # `_lateral_progress_min_m` (patrz `_maybe_trigger_evasion`).
@@ -121,10 +140,10 @@ class SwarmFlightController():
         # co zapobiega flip-floppingowi up↔right↔left, gdy oracle przełącza cel
         # między przeszkodami w tym samym korytarzu. Resetowane przy końcu BLEND.
         self._last_preferred_axis: list[str | None] = [None] * num_drones
-        # Re-trigger cooldown po `compute_evasion_plan → None` (refactor 2026-05-02
-        # Single-Arc Deflection): bez tego drone re-triggeruje co tick (~10 ms),
-        # każdy trigger trwa do 1 s — symulacja staje się non-realtime. Cooldown
-        # daje drone'owi prosty oddech zanim spróbuje znowu. Czytamy z
+        # Re-trigger cooldown po `compute_evasion_plan → None`: bez tego drone
+        # re-triggeruje co tick (~10 ms), każdy trigger trwa do 1 s — symulacja
+        # staje się non-realtime. Cooldown daje drone'owi oddech zanim
+        # spróbuje znowu. Czytamy z
         # avoidance.params (yaml configs/avoidance/*.yaml `no_plan_cooldown_s`).
         _av_params_cooldown = (
             self.avoidance_algorithm.params if self.avoidance_algorithm is not None else {}
@@ -136,9 +155,9 @@ class SwarmFlightController():
         self._rejoin_base_arcs = np.zeros(num_drones)
         self._rejoin_points: list[np.ndarray | None] = [None] * num_drones
 
-        # PK do `update_online_optimization_outcome` (Krok 3.4 plan.md). Per-drone
-        # ostatni `trigger_time` z udanym plan_built — czyścimy gdy outcome został
-        # zarejestrowany (BLEND_END lub collision). Brak (None) = brak otwartego
+        # PK do `update_online_optimization_outcome`. Per-drone ostatni
+        # `trigger_time` z udanym plan_built — czyścimy gdy outcome został
+        # zarejestrowany (BLEND_END lub collision). None = brak otwartego
         # rekordu = collision/rejoin nic nie aktualizuje. Współpracuje z
         # `consume_pending_evasion_trigger_time()` — main.py używa go w
         # `_process_collisions` żeby zamknąć rekord po kolizji.
@@ -146,7 +165,7 @@ class SwarmFlightController():
         # Bazowy czas startu (po hover lub po rejoin) — używany do tracking
         self._tracking_start_times = np.zeros(num_drones)
 
-        # Faza 3.2: mostek EVASION→TRACKING (MODE_REJOIN_BLEND).
+        # Mostek EVASION→TRACKING (MODE_REJOIN_BLEND).
         # W oknie [_blend_start, _blend_start + blend_duration] liczymy target jako
         # mieszankę: α·evasion + (1-α)·tracking, α ∈ [1, 0]. Po wygaśnięciu okna
         # przełączamy na MODE_TRACKING, a evasion_spline jest zwalniany.
@@ -208,11 +227,13 @@ class SwarmFlightController():
             (av.params.get("rejoin_switch_radius_m", 1.5) if av is not None else 1.5)
         )
 
-    # =========================================================================
-    # Inicjalizacja
-    # =========================================================================
-
     def init_lidars(self, physics_client_id: int) -> None:
+        """Utwórz po jednym `LidarSensor` na drona (no-op dla `is_obstacle`).
+
+        Args:
+            physics_client_id: Identyfikator klienta PyBullet, w którym
+                LiDARy mają wystawiać promienie raycast.
+        """
         if self.is_obstacle:
             return
         self._physics_client_id: int = physics_client_id
@@ -221,6 +242,14 @@ class SwarmFlightController():
         ]
 
     def draw_lidar_rays(self, current_states: list, tracked_drone_idx: int) -> None:
+        """Narysuj wiązkę debug-LiDAR dla śledzonego drona; pozostałe wyczyść.
+
+        Args:
+            current_states: Lista stanów z `BaseAviary._getDroneStateVector`
+                (slice `0:3` to pozycja).
+            tracked_drone_idx: Indeks drona, którego wiązka ma być widoczna;
+                spoza zakresu ⇒ no-op.
+        """
         if self.is_obstacle or self._lidars is None:
             return
         if not (0 <= tracked_drone_idx < self.num_drones):
@@ -231,6 +260,7 @@ class SwarmFlightController():
                 self._lidars[i].clear_debug_lines()
 
     def clear_lidar_rays(self) -> None:
+        """Skasuj wszystkie debug-linie LiDAR (no-op gdy LiDARy nie zainicjalizowane)."""
         if self._lidars is None:
             return
         for lidar in self._lidars:
@@ -247,7 +277,7 @@ class SwarmFlightController():
           balistycznie (grawitacja) + zachowuje residual momentum z LCP
           impulse'a kolizji.
 
-        Decyzja użytkownika 2026-05-08: NIE freeze'ujemy fizyki — drone ma
+        Decyzja: NIE freeze'ujemy fizyki — drone ma
         się normalnie zderzyć i spaść na ziemię pod wpływem grawitacji.
         Wcześniejsze freeze (mass=0 + resetBaseVelocity) powodowało
         nienaturalny "stop-action" i ukrywał faktyczną dynamikę po collision.
@@ -261,10 +291,6 @@ class SwarmFlightController():
             return  # idempotent — drugie wywołanie no-op
         self._disabled_drones.add(int(drone_id))
         self.latest_scans[int(drone_id)] = []
-
-    # =========================================================================
-    # Przygotowanie bazowych trajektorii
-    # =========================================================================
 
     def _prepare_trajectories(self):
         if self.is_obstacle:
@@ -311,10 +337,6 @@ class SwarmFlightController():
         plt.savefig(filename, dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-    # =========================================================================
-    # Detekcja zagrożeń (LiDAR + dynamiczne przeszkody)
-    # =========================================================================
-
     def _oracle_threat_check(
         self,
         drone_id: int,
@@ -345,7 +367,7 @@ class SwarmFlightController():
         re-triggery.
 
         Scenariusz head-on (ten sam korytarz) — LiDAR widzi przeszkodę dopiero
-        w stożku; oracle wyzwala unik zanim to nastąpi (Faza 1 planu).
+        w stożku; oracle wyzwala unik zanim to nastąpi.
         """
         obs_ctrl = getattr(self.parent, "dynamic_obstacle_trajectory_controller", None)
         if obs_ctrl is None or obs_ctrl._base_trajectories is None:
@@ -496,10 +518,6 @@ class SwarmFlightController():
             "radius": float(getattr(closest, "obstacle_radius", 0.5)),
         }
     
-    # =========================================================================
-    # Rezolucja bazowego łuku (arc) i odwrotność profilu trapezoidalnego
-    # =========================================================================
-
     def _base_flight_time(self, drone_id: int, current_time: float) -> float:
         return max(0.0, current_time - self._tracking_start_times[drone_id])
 
@@ -558,11 +576,22 @@ class SwarmFlightController():
         dt = (v - np.sqrt(disc)) / a
         return float(spline.ta + spline.tc + dt)
 
-    # =========================================================================
-    # Główna pętla
-    # =========================================================================
-
     def compute_actions(self, current_states, current_time):
+        """Wylicz komendy PWM dla każdego drona zgodnie z bieżącym trybem lotu.
+
+        Lazy-init bazowych splajnów na pierwszym wywołaniu. Disabled drony
+        (po kolizji) dostają RPM=0 (lot balistyczny). Pozostałe są kierowane
+        do `_step_tracking` / `_step_evasion` / `_step_blend` zależnie od
+        `_flight_modes[i]`. `clip_target_lookahead` ogranicza skok PID.
+
+        Args:
+            current_states: Lista stanów z PyBullet (slice `0:3` pozycja,
+                `10:13` prędkość).
+            current_time: Bieżący czas symulacji [s].
+
+        Returns:
+            `(num_drones, 4)` macierz komend PWM (RPM dla 4 silników CF2X).
+        """
         if self._base_trajectories is None:
             self._base_trajectories = self._prepare_trajectories()
             self._trajectory_start_times.fill(self.hover_duration)
@@ -575,7 +604,7 @@ class SwarmFlightController():
         zero_action = np.zeros(4, dtype=np.float64)
         for i in range(self.num_drones):
             # Disabled (post-collision): silniki off, RPM=0 → drone w trybie
-            # ballistic (grawitacja). Krok 2 plan.md 2026-05-07.
+            # ballistic (tylko grawitacja).
             if i in self._disabled_drones:
                 actions.append(zero_action)
                 continue
@@ -585,15 +614,15 @@ class SwarmFlightController():
             if self._flight_modes[i] == self.MODE_EVASION:
                 target_pos, target_vel = self._step_evasion(i, state, current_time)
             elif self._flight_modes[i] == self.MODE_REJOIN_BLEND:
-                # Faza 3.2: mostek mieszający komendę EVASION→TRACKING.
+                # Mostek mieszający komendę EVASION→TRACKING.
                 target_pos, target_vel = self._step_blend(i, current_time)
             else:
                 target_pos, target_vel = self._step_tracking(i, current_time)
 
-            # B-fix lookahead saturation (Kamień 2026-05-07): cap pos_e
-            # widziane przez PID. Zapobiega death-spiral gdy drone is far
-            # behind target — PID dostaje "1m ahead" zamiast horrendous
-            # pos_e który powoduje extreme thrust commands.
+            # Lookahead saturation: cap pos_e widziane przez PID. Zapobiega
+            # death-spiral gdy drone is far behind target — PID dostaje
+            # „1m ahead" zamiast horrendous pos_e który prowadzi do extreme
+            # thrust commands.
             cur_pos = np.asarray(state[0:3], dtype=np.float64)
             target_pos = clip_target_lookahead(
                 cur_pos, target_pos, self._target_lookahead_m,
@@ -610,20 +639,12 @@ class SwarmFlightController():
 
         return np.array(actions)
 
-    # =========================================================================
-    # Tryb TRACKING
-    # =========================================================================
-
     def _step_tracking(self, drone_id: int, current_time: float) -> tuple[np.ndarray, np.ndarray]:
         spline = self._base_trajectories[drone_id]
         flight_time = current_time - self._trajectory_start_times[drone_id]
         if flight_time < 0:
             return spline.get_state_at_time(0.0)
         return spline.get_state_at_time(flight_time)
-
-    # =========================================================================
-    # Tryb EVASION
-    # =========================================================================
 
     def _step_evasion(self, drone_id: int, state: np.ndarray, current_time: float) -> tuple[np.ndarray, np.ndarray]:
         ev_spline = self._evasion_trajectories[drone_id]
@@ -645,14 +666,12 @@ class SwarmFlightController():
 
         if evasion_finished or close_to_rejoin:
             drone_vel = np.asarray(state[10:13], dtype=np.float64)
-            # Faza 3.2/3.3: nie przełączamy od razu na TRACKING — najpierw BLEND.
-            # Dopasowanie czasowe bazowego splinu do rzeczywistej pozycji drona.
+            # Nie przełączamy od razu na TRACKING — najpierw BLEND
+            # z dopasowaniem czasowym bazowego splinu do rzeczywistej pozycji.
             self._start_rejoin_blend(drone_id, current_time, drone_pos, drone_vel)
             return self._step_blend(drone_id, current_time)
 
         return target_pos, target_vel
-
-    # --- Faza 3.3: dopasowanie fazy czasowej do aktualnej pozycji drona ---
 
     @staticmethod
     def _fit_tracking_time_to_drone(
@@ -685,10 +704,6 @@ class SwarmFlightController():
             for t in candidates
         ])
         return float(candidates[int(np.argmin(errors))])
-
-    # =========================================================================
-    # Online optimization outcome lifecycle (Krok 3.4 plan.md)
-    # =========================================================================
 
     def consume_pending_evasion_trigger_time(self, drone_id: int) -> float | None:
         """Zwraca + czyści `trigger_time` ostatniego otwartego rekordu uniku.
@@ -762,10 +777,10 @@ class SwarmFlightController():
         drone_pos: np.ndarray,
         drone_vel: np.ndarray,
     ) -> None:
-        """Uruchamia mostek MODE_REJOIN_BLEND (Faza 3.2).
+        """Uruchamia mostek MODE_REJOIN_BLEND.
 
-        Ustawia bazowy tracking-time tak, by pasował do aktualnej pozycji drona
-        (Faza 3.3), po czym `_step_blend` miesza komendy przez `blend_duration`.
+        Ustawia bazowy tracking-time tak, by pasował do aktualnej pozycji drona;
+        `_step_blend` następnie miesza komendy przez `blend_duration`.
         """
         base_spline = self._base_trajectories[drone_id]
         rejoin_arc = float(self._rejoin_base_arcs[drone_id])
@@ -803,9 +818,8 @@ class SwarmFlightController():
         )
 
     def _step_blend(self, drone_id: int, current_time: float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Faza 3.2: liniowe mieszanie komend EVASION i TRACKING przez
-        okres `blend_duration`. α(t): 1 → 0.
+        """Liniowe mieszanie komend EVASION i TRACKING przez okno
+        `blend_duration`. α(t): 1 → 0.
             target = α·evasion_state + (1-α)·tracking_state
         Po wygaśnięciu okna przechodzimy na MODE_TRACKING i zwalniamy
         evasion_spline/rejoin_point. Eliminuje impuls komendy PID.
@@ -840,10 +854,6 @@ class SwarmFlightController():
         blended_pos = alpha * ev_pos + (1.0 - alpha) * tr_pos
         blended_vel = alpha * ev_vel + (1.0 - alpha) * tr_vel
         return blended_pos, blended_vel
-
-    # =========================================================================
-    # Lidar + wykrywanie zagrożeń + trigger
-    # =========================================================================
 
     def _run_lidar_and_detect(self, current_states: list, current_time: float) -> None:
         all_positions = np.array([s[0:3] for s in current_states], dtype=np.float64)
@@ -912,12 +922,12 @@ class SwarmFlightController():
 
             if not self.enable_avoidance or self.avoidance_algorithm is None:
                 continue
-            # Faza 2: NIE pomijamy MODE_EVASION — decyzja o re-triggerze
-            # zapada w `_maybe_trigger_evasion` po sprawdzeniu divergencji zagrożenia.
+            # NIE pomijamy MODE_EVASION — decyzja o re-triggerze zapada
+            # w `_maybe_trigger_evasion` po sprawdzeniu divergencji zagrożenia.
 
             current_velocity = current_states[i][10:13]
 
-            # Faza 1: Ground-truth predykcja TTC na bazie znanych splajnów.
+            # Ground-truth predykcja TTC na bazie znanych splajnów.
             # Uruchamiamy oracle PRZED LiDARem — wyzwala unik wcześniej niż stożek.
             threat = self._oracle_threat_check(
                 drone_id=i,
@@ -956,11 +966,11 @@ class SwarmFlightController():
         env_bounds: tuple[np.ndarray, np.ndarray],
         all_drone_states: list | None = None,
     ) -> None:
-        # No-plan cooldown (refactor 2026-05-02): drone w cooldown po niedawnym
-        # `compute_evasion_plan → None` — silent skip żeby nie spamować
-        # optymalizatora 100×/s tym samym infeasible problemem. Krok 5 fairness
-        # (2026-05-03): logujemy `event_type="cooldown_skip"` dla analizy w pracy
-        # — algorytmy z większą liczbą no_plan dostają więcej skipów (bias).
+        # No-plan cooldown: drone w cooldown po niedawnym `compute_evasion_plan
+        # → None` — silent skip żeby nie spamować optymalizatora 100×/s tym
+        # samym infeasible problemem. Logujemy `event_type="cooldown_skip"`
+        # dla analizy: algorytmy z większą liczbą no_plan dostają więcej
+        # skipów (potrzebne do unbiased porównania).
         if (
             self._flight_modes[drone_id] == self.MODE_TRACKING
             and current_time < float(self._no_plan_until[drone_id])
@@ -1053,10 +1063,9 @@ class SwarmFlightController():
         if same_threat and time_since < self._evasion_cooldown and not threat_receding:
             should_trigger = False
 
-        # Faza 2: Re-trigger w trakcie EVASION tylko jeśli zagrożenie
-        # znacząco różni się od tego, co już unikamy (nowy obiekt, zmieniony
-        # wektor prędkości) albo jest na tyle blisko, że stary plan nie
-        # zdąży (ttc < pół cooldown).
+        # Re-trigger w trakcie EVASION tylko jeśli zagrożenie znacząco różni
+        # się od tego, co już unikamy (nowy obiekt, zmieniony wektor prędkości)
+        # albo jest na tyle blisko, że stary plan nie zdąży (ttc < pół cooldown).
         # BLEND też traktujemy jak "w trakcie uniku" — przerwanie blendu na rzecz
         # re-triggera jest dopuszczalne tylko przy znaczącej dywergencji zagrożenia.
         in_evasion = self._flight_modes[drone_id] in (
@@ -1143,9 +1152,8 @@ class SwarmFlightController():
 
         t_min = float(self.avoidance_algorithm.params.get("evasion_time_min", 2.0))
         t_max = float(self.avoidance_algorithm.params.get("evasion_time_max", 4.0))
-        # Faza 2.5: pad bbox adaptacyjny do |rel_vel|. Pobierany z configu A*
-        # by obie struktury (pad w Context) używały
-        # tej samej stałej — spójność buforów.
+        # pad bbox adaptacyjny do |rel_vel|. Pobierany z configu avoidance,
+        # żeby builder i optimizer używały tej samej stałej — spójność buforów.
         margin_gain = float(self.avoidance_algorithm.params.get("margin_velocity_gain", 0.05))
         rejoin_arc_m = float(self.avoidance_algorithm.params.get("rejoin_arc_distance_m", 8.0))
         rejoin_flyby_safety_m = float(
@@ -1172,14 +1180,14 @@ class SwarmFlightController():
             else None
         )
 
-        # Sequential cooperative planning (2026-05-01): zbierz pozostałe drony
-        # (≠ drone_id) jako secondary_threats z DOKŁADNĄ TRAJEKTORIĄ (base spline
-        # w MODE_TRACKING, evasion spline w MODE_EVASION/REJOIN_BLEND). Bo pętla
-        # `_run_lidar_and_detect` przetwarza drony sekwencyjnie 0..N, drony
-        # planujące się POŹNIEJ w tym samym ticku widzą NOWO ZBUDOWANE evasion
-        # plany wcześniejszych dronów (sequential coordination prioritized
-        # planning a la Erdmann & Lozano-Pérez 1987, Van den Berg & Overmars 2005).
-        # Filtrujemy do max 30 m promienia (w 3s window dalsze i tak nie kolidują).
+        # Sequential cooperative planning: zbierz pozostałe drony (≠ drone_id)
+        # jako secondary_threats z DOKŁADNĄ TRAJEKTORIĄ (base spline w
+        # MODE_TRACKING, evasion spline w MODE_EVASION/REJOIN_BLEND). Pętla
+        # `_run_lidar_and_detect` przetwarza drony sekwencyjnie 0..N, więc
+        # drony planujące się POŹNIEJ w tym samym ticku widzą nowo zbudowane
+        # evasion plany wcześniejszych — sequential coordination prioritized
+        # planning (Erdmann & Lozano-Pérez 1987, Van den Berg & Overmars 2005).
+        # Filtrujemy do max 30 m promienia (dalsze w 3s window nie kolidują).
         secondary_threats: list[ThreatAlert] = []
         if all_drone_states is not None and len(all_drone_states) > 1:
             primary_obs_pos = np.asarray(threat["position"], dtype=np.float64)
@@ -1345,10 +1353,6 @@ class SwarmFlightController():
                 planning_wall_time_s=plan.planning_wall_time_s,
             )
 
-    # =========================================================================
-    # Granice świata (z cfg / world_data)
-    # =========================================================================
-
     def _resolve_env_z_bounds(self, env) -> tuple[float, float]:
         parent = self.parent
         floor_z = 0.1
@@ -1390,12 +1394,9 @@ class SwarmFlightController():
             np.array([x_max, y_max, ceiling_z], dtype=np.float64),
         )
 
-    # =========================================================================
-    # Stan końcowy
-    # =========================================================================
-
     @property
     def all_finished(self) -> bool:
+        """`True`, gdy wszystkie drony są w `finish_radius` od końca swojego splajnu."""
         if self._base_trajectories is None:
             return False
         return all(

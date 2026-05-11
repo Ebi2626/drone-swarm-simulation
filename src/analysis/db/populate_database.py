@@ -1,4 +1,10 @@
-# src/analysis/db/populate_database.py
+"""Populator bazy `analysis.db` — łączy wszystkie loadery i populatory metryk.
+
+Per run wykonuje 4 fazy: surowe pliki źródłowe (CSV/h5), tabele pochodne
+(trajectory/uav/iteration/online_safety), agregat `run_metrics` i F-vector
+z `optimization_history.h5`. Status każdego runa zapisywany jest w
+`runs.aggregation_status` — pojedynczy błąd nie blokuje pozostałych runów.
+"""
 import logging
 from pathlib import Path
 import sqlite3
@@ -21,6 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 def populate_database(experiment_dir: str | Path) -> Path:
+    """Załaduj wszystkie runy z `experiment_dir` do `analysis.db`.
+
+    Każdy run jest najpierw oznaczany `aggregation_status='discovered'`,
+    następnie przechodzi pełen pipeline (raw load → derived tables →
+    aggregates → F-vector). Wynik kończy się statusem `'aggregated'` albo
+    `'failed'` z `aggregation_error`. Pojedynczy fail nie przerywa pętli.
+
+    Args:
+        experiment_dir: Katalog eksperymentu zawierający per-run podkatalogi.
+
+    Returns:
+        Ścieżkę do `analysis.db`.
+    """
     experiment_dir = Path(experiment_dir).expanduser().resolve()
     db_path = experiment_dir / "analysis.db"
 
@@ -146,8 +165,7 @@ def _count_csv_rows(path: Path) -> int | None:
 def _register_run_files(conn: sqlite3.Connection, run_id: str, run_dir: Path) -> None:
     """Rejestruje pliki źródłowe runu w `run_files`.
 
-    Wypełnia 8 z 8 kolumn (po refaktorze 2026-05-07 — usunięte `checksum`
-    i `extra_json`):
+    Kolumny:
     - `relative_path`, `file_format`, `exists_flag`, `size_bytes` —
       podstawowe metadata systemu plików
     - `row_count` — liczba wierszy danych dla CSV (NULL dla h5/log)
@@ -320,20 +338,15 @@ def _load_collisions(conn: sqlite3.Connection, run_id: str, csv_path: Path) -> N
 def _load_evasion_events(conn: sqlite3.Connection, run_id: str, csv_path: Path) -> None:
     """Ładuje `evasion_events.csv` do tabeli `evasion_events`.
 
-    Zmiany 2026-05-07:
-    - `astar_success` (kolumna w CSV i schema DB) **usunięta** — algorytm A*
-      wycofany; pole było zawsze `NOT fallback_used` (semantycznie redundantne).
-    - Nowa kolumna `ttc_source` ('oracle_discrete' | 'continuous') —
-      jednoznacznie określa źródło `ttc` (oracle dyskretyzowane z lookahead
-      vs naive `dist/closing_speed`).
-    - Nowa kolumna `preferred_axis` ('right'|'left'|'up'|'down'|NULL) —
-      wyodrębniona z poprzedniego bug-prone `notes="axis=..."` patternu.
-      Notacja kierunkowa zgodna z `AxisChooser._choose`. NULL gdy oś nie
-      określona (avoidance nie wstawił `axis_chosen` do extra dict).
+    Kolumny:
+    - `ttc_source` ('oracle_discrete' | 'continuous') — jednoznacznie określa
+      źródło `ttc` (oracle dyskretyzowane z lookahead vs naive `dist/closing_speed`).
+    - `preferred_axis` ('right'|'left'|'up'|'down'|NULL) — notacja kierunkowa
+      zgodna z `AxisChooser`. NULL gdy oś nie określona (avoidance nie wstawił
+      `axis_chosen` do extra dict).
 
-    Backward-compat: stare CSV (sprzed 2026-05-07) z kolumną `astar_success`
-    wciąż się ładuje — nadmiarowa kolumna jest po prostu ignorowana. Brak
-    `ttc_source` / `preferred_axis` w starych CSV → NULL w DB.
+    Backward-compat: legacy CSV z dodatkowymi kolumnami są ignorowane;
+    brak `ttc_source` / `preferred_axis` w starych CSV → NULL w DB.
     """
     if not csv_path.exists():
         return
@@ -526,7 +539,7 @@ def _load_world_boundaries(conn: sqlite3.Connection, run_id: str, csv_path: Path
 def _load_generated_obstacles(conn: sqlite3.Connection, run_id: str, csv_path: Path) -> None:
     """Ładuje `generated_obstacles.csv` do tabeli `generated_obstacles`.
 
-    Refaktor 2026-05-07: rozdzielona semantyka per shape_type.
+    Semantyka per shape_type:
     - Cylinder (forest): zapisujemy `shape_type='cylinder'`, `radius`,
       `height`; `length=NULL, width=NULL`.
     - Box (urban): zapisujemy `shape_type='box'`, `length`, `width`,

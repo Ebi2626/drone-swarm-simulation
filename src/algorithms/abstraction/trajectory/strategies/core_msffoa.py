@@ -25,6 +25,12 @@ Mapowanie sekcji paperu → kod (literature/MSFFOA.md):
 | Sec. 4      | Zaktualizowano (Eq. 18-19): Wprowadzono elityzm dla liderów    |
 |             | roju (środek roju ulega aktualizacji tylko gdy winner jest     |
 |             | ściśle lepszy od dotychczasowego best).                        |
+| Logging     | Per-gen history zapisuje swarm_best_pos (G liderów po Phase-3  |
+|             | elitism), nie offspring new_pop. Spójne z NSGA-III/OOA/SSA,    |
+|             | które logują populację po selekcji (current state), nie        |
+|             | eksplorację. Eliminuje fałszywą degradację feasible_ratio      |
+|             | przy konwergencji liderów w wąską niszę feasibility (offspring |
+|             | tuż za progiem nie są stanem algorytmu, lecz perturbacją).     |
 
 PRAGMATYCZNE ADAPTACJE vs paper (udokumentowane lokalnie w kodzie):
 1. Anizotropowy R (per-osi step_local) zamiast skalarnego R z paperu —
@@ -67,7 +73,21 @@ class MSFFOAOptimizer:
         n_swarms: Number of sub-swarms (G). Default 5.
         coe1: Weight of the parent/leader path data (coe1 + coe2 = 1). Default 0.8.
         coe2: Weight of the current fly's path data. Default 0.2.
-        threshold: The threshold dividing global and local search phases.
+        threshold: Initial value of the threshold dividing global and local
+            search phases. If ``threshold_ratio`` is None, this value stays
+            STATIC throughout optimization (paper Sec. 1 — stały próg).
+        threshold_ratio: If provided, włącza ADAPTACYJNY threshold: po każdej
+            generacji próg jest przeliczany jako
+            ``threshold = best_feasible_swarm_fit × (1 + threshold_ratio)``.
+            Semantyka: podroje w obrębie ``threshold_ratio`` od najlepszego
+            feasible podroju → LOCAL (refinement); pozostałe → GLOBAL
+            (exploration). Mała wartość = ostre kryterium (mało LOCAL),
+            duża = liberalne. Gdy żaden podrój nie jest jeszcze feasible,
+            threshold=0 → wszystkie w GLOBAL (czysta eksploracja).
+            Adaptacja jest pragmatyczną adaptacją do naszego Big-M
+            (``HARD_INFEASIBLE_BASE`` w soo_adapter): paperowy stały próg
+            zakłada gładki krajobraz fitness, a Big-M wprowadza nieciągłość
+            przy granicy feasibility, którą statyczny próg źle interpretuje.
         bounds_margin: Extra margin applied to supplied ``world_min_bounds`` /
             ``world_max_bounds``. Domyślnie 0, bo oczekujemy, że wywołujący
             dostarczy już poprawnie rozszerzone granice z
@@ -104,6 +124,7 @@ class MSFFOAOptimizer:
         coe1: float = 0.8,
         coe2: float = 0.2,
         threshold: float = 100.0,
+        threshold_ratio: Optional[float] = None,
         bounds_margin: float = 0.0,
         step_global_frac: Optional[NDArray[np.float64]] = None,
         step_local_frac: Optional[NDArray[np.float64]] = None,
@@ -118,11 +139,17 @@ class MSFFOAOptimizer:
         self.n_inner = n_inner
         self.max_generations = max_generations
 
-        # MSFOA Specific Parameters
         self.G = n_swarms
         self.coe1 = coe1
         self.coe2 = coe2
-        self.threshold = threshold
+        self.threshold = float(threshold)
+        # Adaptacyjny próg (opcjonalny). Gdy None — paperowy tryb statyczny.
+        # Synchroniczne z soo_adapter.HARD_INFEASIBLE_BASE = 1e6.
+        self.threshold_ratio: Optional[float] = (
+            float(threshold_ratio) if threshold_ratio is not None else None
+        )
+        self._HARD_INFEASIBLE_BASE: float = 1e6
+        self._THRESHOLD_FLOOR: float = 0.01
 
         # Walidacje strukturalne (paper Sec. 1: G ≥ 1, M_pop podzielne przez G)
         # MUSZĄ być przed `self.P = pop_size // n_swarms`, żeby n_swarms=0
@@ -156,7 +183,6 @@ class MSFFOAOptimizer:
         self.world_max = np.asarray(world_max_bounds, dtype=np.float64)
         self.world_size = self.world_max - self.world_min
 
-        # Endpoints
         self.start_pos = np.asarray(start_positions, dtype=np.float64)
         self.target_pos = np.asarray(target_positions, dtype=np.float64)
         self._starts_bc = self.start_pos[np.newaxis, :, np.newaxis, :]
@@ -223,9 +249,14 @@ class MSFFOAOptimizer:
 
         self._measure = self._timing.measure if self._timing else lambda *a, **kw: nullcontext()
 
-        # Swarm memory
         self.swarm_best_pos: NDArray[np.float64] = np.empty((self.G, self.n_drones, self.n_inner, 3))
         self.swarm_best_fit: NDArray[np.float64] = np.full(self.G, np.inf)
+
+        # Lazy-init w `_initialize_swarms` gdy znamy M, K z adaptera (None gdy
+        # fitness_fn nie wystawia last_objectives/last_constraints → fallback
+        # do skalarnego fitness w bloku logowania).
+        self.swarm_best_F: NDArray[np.float64] | None = None
+        self.swarm_best_G: NDArray[np.float64] | None = None
 
         self.global_best_pos: NDArray[np.float64] = np.empty((self.n_drones, self.n_inner, 3))
         self.global_best_fitness: float = np.inf
@@ -240,6 +271,21 @@ class MSFFOAOptimizer:
                     f"got {initial_population.shape}."
                 )
         self._initial_population: Optional[NDArray[np.float64]] = initial_population
+
+    def _snapshot_FG_flat(
+        self,
+    ) -> Tuple[Optional[NDArray[np.float64]], Optional[NDArray[np.float64]]]:
+        """Zwraca kopię (F, G) z ostatniej ewaluacji adaptera, jeśli wystawia
+        last_objectives / last_constraints (TrajectorySOOAdapter). Dla prostych
+        funkcji fitness (testy) zwraca (None, None) i wówczas blok logowania
+        per-gen używa skalarnego fitness jako fallback. Snapshot trzeba wykonać
+        zaraz po `_evaluate`, zanim kolejne wywołanie nadpisze cache adaptera.
+        """
+        raw_f = getattr(self.fitness_fn, "last_objectives", None)
+        raw_g = getattr(self.fitness_fn, "last_constraints", None)
+        F = np.asarray(raw_f, dtype=np.float64).copy() if raw_f is not None else None
+        G = np.asarray(raw_g, dtype=np.float64).copy() if raw_g is not None else None
+        return F, G
 
     def _initialize_swarms(self) -> None:
         """
@@ -264,12 +310,24 @@ class MSFFOAOptimizer:
             all_fit = self._evaluate(
                 self._initial_population
             ).reshape(self.G, self.P)
+            # Snapshot F/G PRZED kolejnym _evaluate; potrzebne do logowania liderów.
+            init_F_flat, init_G_flat = self._snapshot_FG_flat()
 
             # Wybór lidera każdego roju: osobnik z najniższym fitness
             best_in_slice_idx = np.argmin(all_fit, axis=1)   # Shape: (G,)
             for g in range(self.G):
                 self.swarm_best_pos[g] = pop_split[g, best_in_slice_idx[g]]
                 self.swarm_best_fit[g] = all_fit[g, best_in_slice_idx[g]]
+
+            # Wyciągnięcie F/G zwycięzców z plasterków (jeśli adapter je wystawia)
+            if init_F_flat is not None:
+                M = init_F_flat.shape[1]
+                init_F = init_F_flat.reshape(self.G, self.P, M)
+                self.swarm_best_F = init_F[np.arange(self.G), best_in_slice_idx]
+            if init_G_flat is not None:
+                K = init_G_flat.shape[1]
+                init_G = init_G_flat.reshape(self.G, self.P, K)
+                self.swarm_best_G = init_G[np.arange(self.G), best_in_slice_idx]
 
         else:
             # Oryginalna wewnętrzna inicjalizacja (fallback gdy brak external pop)
@@ -282,6 +340,10 @@ class MSFFOAOptimizer:
             noise *= (self.world_size * 0.1)[np.newaxis, np.newaxis, np.newaxis, :]
             self.swarm_best_pos = self._clip_to_bounds(base_tiled + noise)
             self.swarm_best_fit = self._evaluate(self.swarm_best_pos)
+            # F/G dotyczą bezpośrednio G liderów (1:1, bez selekcji).
+            init_F_flat, init_G_flat = self._snapshot_FG_flat()
+            self.swarm_best_F = init_F_flat  # shape (G, M) lub None
+            self.swarm_best_G = init_G_flat  # shape (G, K) lub None
 
         # Ustalenie globalnego optimum na podstawie stanu początkowego
         best_idx = int(np.argmin(self.swarm_best_fit))
@@ -294,17 +356,71 @@ class MSFFOAOptimizer:
     def _evaluate(self, pop: NDArray[np.float64]) -> NDArray[np.float64]:
         return self.fitness_fn(pop)
 
+    def _update_adaptive_threshold(self) -> None:
+        """Adaptacyjna kalibracja threshold (Eq. 5-8) — relatywna do current best.
+
+        No-op gdy ``threshold_ratio is None`` (paperowy tryb statyczny).
+
+        Semantyka:
+            ``threshold = best_feasible_swarm_fit × (1 + threshold_ratio)``
+
+        Konsekwencja w `is_global = swarm_best_fit > threshold`:
+        - Najlepszy feasible podrój: fit = best_feasible < threshold → LOCAL
+          (zawsze refinement najlepszego).
+        - Podroje w obrębie ``threshold_ratio`` od best: fit ≤ threshold → LOCAL.
+        - Podroje dalej: fit > threshold → GLOBAL (eksploracja).
+
+        Gdy żaden podrój nie jest jeszcze feasible (wszystkie ≥ HARD_INFEASIBLE_BASE),
+        zachowujemy bieżącą wartość ``self.threshold`` (initial z konstruktora lub
+        ostatnia kalibracja feasible). Działa to poprawnie, bo każde infeasible
+        fitness ~1e6 jest z góry większe od jakiejkolwiek sensownej wartości
+        threshold (zarówno 0, jak i np. 0.26 z anchora `sum(|w|)`), więc wszystkie
+        podroje i tak są w GLOBAL — wybór konkretnej wartości jest bez znaczenia
+        dla zachowania, a zachowanie initial value daje spójny log.
+
+        Powód adaptacji: paperowy stały próg zakłada gładki krajobraz fitness;
+        nasz Big-M wprowadza skok rzędu 1e6 między infeasible a feasible, więc
+        statyczny próg ustawiony pre-run źle interpretuje dynamikę krajobrazu
+        feasible (zob. eksperyment 2026-05-09 — analytical anchor `sum(|w|)`
+        dawał threshold poniżej osiąganego floor fitness).
+        """
+        if self.threshold_ratio is None:
+            return  # paperowy tryb statyczny — nie ruszamy self.threshold
+        feasible = self.swarm_best_fit < self._HARD_INFEASIBLE_BASE
+        if feasible.any():
+            best_feasible = float(np.min(self.swarm_best_fit[feasible]))
+            self.threshold = max(
+                best_feasible * (1.0 + self.threshold_ratio),
+                self._THRESHOLD_FLOOR,
+            )
+        # else: zachowaj poprzednią wartość — wszystkie infeasible (≥ 1e6)
+        # i tak ją przekraczają, więc all GLOBAL niezależnie od konkretnej
+        # liczby. Brak resetu utrzymuje czytelny log między strategy a optimizer.
+
     def optimize(self) -> Tuple[NDArray[np.float64], float]:
+        """Wykonaj pełną pętlę optymalizacji MSFOA przez `max_generations` iteracji.
+
+        Returns:
+            Krotka `(best_pos, best_fitness)`:
+            - `best_pos` `(n_drones, n_inner, 3)` — najlepszy znaleziony
+              wielobok kontrolny.
+            - `best_fitness` — wartość fitnessu najlepszego rozwiązania.
+        """
         try:
             with self._measure("total_optimization"):
                 with self._measure("population_initialization"):
                     self._initialize_swarms()
+                    self._update_adaptive_threshold()
 
                 source = "external (ceteris paribus)" if self._initial_population is not None else "internal"
+                threshold_mode = (
+                    f"adaptive(ratio={self.threshold_ratio})"
+                    if self.threshold_ratio is not None else "static"
+                )
                 print(
                     f"[MSFOA] Init complete [{source}]. Swarms (G): {self.G}, "
                     f"Flies/Swarm: {self.P}, Gens: {self.max_generations}, "
-                    f"Threshold: {self.threshold}\n"
+                    f"Threshold: {self.threshold:.4f} [{threshold_mode}]\n"
                     f"[MSFOA] Init Global Best: {self.global_best_fitness:.4f}"
                 )
 
@@ -349,11 +465,28 @@ class MSFFOAOptimizer:
                         old_fit_flat = self._evaluate(
                             old_pop.reshape(self.pop_size, self.n_drones, self.n_inner, 3)
                         )
+                        # Snapshot Phase-1 F/G PRZED Phase 2 nadpisze cache adaptera.
+                        old_F_flat, old_G_flat = self._snapshot_FG_flat()
                         old_fit = old_fit_flat.reshape(self.G, self.P)
 
                         old_best_idx = np.argmin(old_fit, axis=1)
                         old_best_pos = old_pop[np.arange(self.G), old_best_idx]
                         old_best_fit = old_fit[np.arange(self.G), old_best_idx]
+                        # F/G zwycięzcy Phase 1 per swarm (jeśli adapter wystawia)
+                        if old_F_flat is not None:
+                            M = old_F_flat.shape[1]
+                            old_best_F = old_F_flat.reshape(self.G, self.P, M)[
+                                np.arange(self.G), old_best_idx
+                            ]
+                        else:
+                            old_best_F = None
+                        if old_G_flat is not None:
+                            K = old_G_flat.shape[1]
+                            old_best_G = old_G_flat.reshape(self.G, self.P, K)[
+                                np.arange(self.G), old_best_idx
+                            ]
+                        else:
+                            old_best_G = None
 
                         # =================================================================
                         # Phase 2: Competitive Strategies of Offspring
@@ -367,11 +500,26 @@ class MSFFOAOptimizer:
                         new_fit_flat = self._evaluate(
                             new_pop.reshape(self.pop_size, self.n_drones, self.n_inner, 3)
                         )
+                        new_F_flat, new_G_flat = self._snapshot_FG_flat()
                         new_fit = new_fit_flat.reshape(self.G, self.P)
 
                         new_best_idx = np.argmin(new_fit, axis=1)
                         new_best_pos = new_pop[np.arange(self.G), new_best_idx]
                         new_best_fit = new_fit[np.arange(self.G), new_best_idx]
+                        if new_F_flat is not None:
+                            M = new_F_flat.shape[1]
+                            new_best_F = new_F_flat.reshape(self.G, self.P, M)[
+                                np.arange(self.G), new_best_idx
+                            ]
+                        else:
+                            new_best_F = None
+                        if new_G_flat is not None:
+                            K = new_G_flat.shape[1]
+                            new_best_G = new_G_flat.reshape(self.G, self.P, K)[
+                                np.arange(self.G), new_best_idx
+                            ]
+                        else:
+                            new_best_G = None
 
                         # =================================================================
                         # Phase 3: Competition & Update (Sec. 4 paperu)
@@ -383,36 +531,65 @@ class MSFFOAOptimizer:
                             new_best_pos,
                             old_best_pos,
                         )
+                        # Wybór F/G zwycięzcy zgodny z `win_is_new` (broadcast po osi feature)
+                        if old_best_F is not None and new_best_F is not None:
+                            winner_F = np.where(win_is_new[:, np.newaxis], new_best_F, old_best_F)
+                        else:
+                            winner_F = None
+                        if old_best_G is not None and new_best_G is not None:
+                            winner_G = np.where(win_is_new[:, np.newaxis], new_best_G, old_best_G)
+                        else:
+                            winner_G = None
 
-                        # POPRAWKA ZGODNA Z LITERATURĄ: Elityzm lokalny liderów roju 
+                        # POPRAWKA ZGODNA Z LITERATURĄ: Elityzm lokalny liderów roju
                         # (Eq. 18-19, Shi et al. 2020). Lider pod-roju zastępowany jest
-                        # nową pozycją tylko i wyłącznie wtedy, gdy funkcja dopasowania 
+                        # nową pozycją tylko i wyłącznie wtedy, gdy funkcja dopasowania
                         # zwycięzcy z danego kroku jest mniejsza od historycznie
                         # najlepszej funkcji dopasowania dla tego pod-roju.
                         update_mask = winner_fit < self.swarm_best_fit
-                        
+
                         self.swarm_best_fit = np.where(
                             update_mask, winner_fit, self.swarm_best_fit
                         )
-                        
+
                         update_mask_pos = update_mask[:, np.newaxis, np.newaxis, np.newaxis]
                         self.swarm_best_pos = np.where(
                             update_mask_pos, winner_pos, self.swarm_best_pos
                         )
+                        # Aktualizacja persistent F/G liderów tym samym maskowaniem
+                        # (zachowuje semantykę elityzmu — F/G nieaktualizowanego lidera
+                        # pozostaje z poprzedniej generacji).
+                        if winner_F is not None and self.swarm_best_F is not None:
+                            self.swarm_best_F = np.where(
+                                update_mask[:, np.newaxis], winner_F, self.swarm_best_F
+                            )
+                        if winner_G is not None and self.swarm_best_G is not None:
+                            self.swarm_best_G = np.where(
+                                update_mask[:, np.newaxis], winner_G, self.swarm_best_G
+                            )
 
                         gen_global_idx = int(np.argmin(self.swarm_best_fit))
                         if self.swarm_best_fit[gen_global_idx] < self.global_best_fitness:
                             self.global_best_fitness = float(self.swarm_best_fit[gen_global_idx])
                             self.global_best_pos = self.swarm_best_pos[gen_global_idx].copy()
 
-                        if self._history_writer is not None:
-                            raw_f = getattr(self.fitness_fn, "last_objectives", None)
-                            if raw_f is not None:
-                                obj_matrix = np.asarray(raw_f, dtype=np.float64).copy()
-                            else:
-                                obj_matrix = new_fit_flat.reshape(-1, 1)
+                        # Re-kalibracja adaptacyjnego threshold na podstawie
+                        # bieżącego stanu podrojów po Phase-3 elitism.
+                        # No-op gdy threshold_ratio is None.
+                        self._update_adaptive_threshold()
 
-                            raw_g = getattr(self.fitness_fn, "last_constraints", None)
+                        if self._history_writer is not None:
+                            # Logujemy STAN algorytmu (G liderów po Phase-3 elitism),
+                            # nie offspring (new_pop) — spójne z NSGA-III/OOA/SSA, które
+                            # logują populację po selekcji, nie eksplorację.
+                            # Eliminuje fałszywą degradację `feasible_ratio` przy
+                            # konwergencji liderów w wąską niszę feasibility (offspring
+                            # tuż za progiem nie są stanem algorytmu, lecz perturbacją).
+                            if self.swarm_best_F is not None:
+                                obj_matrix = self.swarm_best_F
+                            else:
+                                obj_matrix = self.swarm_best_fit.reshape(-1, 1)
+
                             evaluator = getattr(self.fitness_fn, "evaluator", None)
                             n_eval = (
                                 int(evaluator.individuals_evaluated)
@@ -427,8 +604,8 @@ class MSFFOAOptimizer:
                             self._history_writer.put_generation_data(
                                 per_gen_metrics_from_FG(
                                     objectives=obj_matrix,
-                                    constraints=raw_g,
-                                    decisions=new_pop.reshape(self.pop_size, -1).copy(),
+                                    constraints=self.swarm_best_G,
+                                    decisions=self.swarm_best_pos.reshape(self.G, -1).copy(),
                                     elapsed_s=gen_elapsed,
                                     eval_count_cumulative=n_eval,
                                 )
@@ -436,10 +613,15 @@ class MSFFOAOptimizer:
 
                         if (gen + 1) % log_interval == 0 or (gen + 1) == self.max_generations:
                             swarms_in_global = int(np.sum(is_global))
+                            extra = (
+                                f" | Threshold: {self.threshold:.4f}"
+                                if self.threshold_ratio is not None else ""
+                            )
                             print(
                                 f"[MSFOA] Gen {(gen + 1):4d}/{self.max_generations} | "
                                 f"Best Fitness: {self.global_best_fitness:.4f} | "
                                 f"Swarms in Global phase: {swarms_in_global}/{self.G}"
+                                f"{extra}"
                             )
 
                 print(f"[MSFOA] Finished. Final Best Fitness: {self.global_best_fitness:.6f}")
@@ -457,7 +639,12 @@ class MSFFOAOptimizer:
         return self.global_best_pos.copy(), self.global_best_fitness
 
     def get_best_dense_trajectory(self) -> NDArray[np.float64]:
-        """Returns the full sparse polyline for B-Spline post-processing."""
+        """Zwróć pełny wielobok kontrolny `[start, inner…, target]` najlepszego rozwiązania.
+
+        Returns:
+            `(n_drones, n_inner + 2, 3)` — wielobok gotowy do
+            `generate_bspline_batch` w post-processingu.
+        """
         with self._measure("dense_trajectory_reconstruction"):
             inner = self.global_best_pos[np.newaxis, :, :, :]
             starts = np.broadcast_to(self._starts_bc, (1, self.n_drones, 1, 3)).copy()

@@ -17,8 +17,6 @@ from mealpy.utils.target import Target  # noqa: F401  # re-export-safe; not stri
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
-
-# Wspólne komponenty z MSFFOA / NSGA-III
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
     SwarmOptimizationProblem,
 )
@@ -44,13 +42,12 @@ if TYPE_CHECKING:
     pass
 
 
-# ---------------------------------------------------------------------------
-# Adapter problemu OOA - Rygorystyczny Strażnik Granic (Hard Bounding)
-# ---------------------------------------------------------------------------
-
 class OOAProblemAdapter(MealpyProblem):
-    """
-    Problem mealpy dla OOA z bezwzględnym wymuszaniem granic (Hard Clipping).
+    """Adapter `mealpy.Problem` dla OOA z twardym clippingiem granic.
+
+    Bez clippingu OOA bywa numerycznie niestabilne — `amend_position`
+    wywoływane przez mealpy po każdej aktualizacji wektora decyzyjnego
+    zabezpiecza przed wartościami `±∞`/`NaN`.
     """
 
     def __init__(
@@ -76,15 +73,18 @@ class OOAProblemAdapter(MealpyProblem):
 
         self._starts_bc = start_pos[np.newaxis, :, np.newaxis, :]
         self._targets_bc = target_pos[np.newaxis, :, np.newaxis, :]
-        
-        # Wypakowane granice do łatwego clipowania w obj_func
+
         self._lb = np.asarray(bounds.lb, dtype=np.float64)
         self._ub = np.asarray(bounds.ub, dtype=np.float64)
 
     def amend_position(self, position: np.ndarray, *args: Any, **kwargs: Any) -> np.ndarray:
-        """
-        NADRYWANIE MEALPY: Gwarantuje, że przy każdej aktualizacji wektora decyzyjnego,
-        agent nie wyleci w nieskończoność. Bez tego OOA bywa numerycznie niestabilne.
+        """Hook mealpy — wymuś `position ∈ [lb, ub]` z zastąpieniem `NaN` przez `ub`.
+
+        Args:
+            position: Wektor decyzyjny po ruchu agenta.
+
+        Returns:
+            Bezpieczna pozycja w obrębie granic problemu.
         """
         return np.clip(np.nan_to_num(position, nan=self._ub), self._lb, self._ub)
 
@@ -120,14 +120,9 @@ class OOAProblemAdapter(MealpyProblem):
         }
 
     def obj_func(self, x: np.ndarray) -> float:
-        # Bezwzględne sprawdzenie na wejściu (fail-safe)
         x_safe = np.clip(np.nan_to_num(x, nan=self._ub), self._lb, self._ub)
         return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
 
-
-# ---------------------------------------------------------------------------
-# Subklasa OOA z generacyjnym logowaniem historii
-# ---------------------------------------------------------------------------
 
 class LoggedOriginalOOA(OriginalOOA):
     """OOA z logowaniem per-gen + cache F/G na targetach.
@@ -236,10 +231,6 @@ class LoggedOriginalOOA(OriginalOOA):
             logger.warning(f"[OOA] Warning: history logging failed at epoch {epoch}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Główna strategia OOA
-# ---------------------------------------------------------------------------
-
 def osprey_swarm_strategy(
     *,
     start_positions: NDArray[np.float64],
@@ -252,7 +243,28 @@ def osprey_swarm_strategy(
     timing: Optional["TimingCollector"] = None,
     seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
-    
+    """Wygeneruj trajektorię roju algorytmem OOA (Trojovský & Dehghani 2023, mealpy).
+
+    Implementacja `TrajectoryStrategyProtocol` używająca `mealpy.OriginalOOA`
+    przez adapter `OOAProblemAdapter` (twardy clipping granic) i skalaryzator
+    `TrajectorySOOAdapter`.
+
+    Args:
+        start_positions: `(N, 3)` pozycje startowe [m].
+        target_positions: `(N, 3)` pozycje docelowe [m].
+        obstacles_data: Geometria przeszkód statycznych.
+        world_data: Granice świata symulacji.
+        number_of_waypoints: Docelowa liczba punktów `W` po B-spline.
+        drone_swarm_size: Rozmiar roju `N`.
+        algorithm_params: Hiperparametry — `pop_size`, `epochs` (lub `n_gen`),
+            `n_inner_waypoints`, `objective_weights`, `penalty_weight`,
+            `noise_std_xy/_z`, `n_workers`.
+        timing: Opcjonalny `TimingCollector` faz.
+        seeds: `SeedRegistry` z subseedami `sampling` i `optimizer`.
+
+    Returns:
+        `(N, W, 3)` wygładzona trajektoria; w razie błędu — linia prosta.
+    """
     params = algorithm_params or {}
 
     local_timing = False
@@ -319,8 +331,6 @@ def osprey_swarm_strategy(
                 )
 
                 scalar_adapter._f_ref = np.maximum(scalar_adapter._f_ref, 1.0)
-
-                # Wydruk kontrolny F_ref - powinny być sensowne wartości wokół 1.0 dla linii prostej
                 logger.info(f"[OOA] F_ref (normalization scales): {scalar_adapter._f_ref}")
 
                 problem_ref = SwarmOptimizationProblem(
@@ -347,7 +357,7 @@ def osprey_swarm_strategy(
                     rng=seeds.rng("sampling")
                 )
 
-                # Konwersja do List[1D array], aby Mealpy poprawnie potraktowało każdy wektor bazowy
+                # Mealpy oczekuje listy 1D wektorów per starting solution.
                 starting_solutions_raw = np.asarray(sampling._do(problem_ref, pop_size), dtype=np.float64)
                 starting_solutions = [sol for sol in starting_solutions_raw]
 
@@ -385,7 +395,6 @@ def osprey_swarm_strategy(
                     seed=seeds.seed("optimizer")
                 )
 
-                # Bezpieczne pobranie z klipowaniem
                 best_x = mealpy_problem.amend_position(np.asarray(best_agent.solution, dtype=np.float64))
                 best_fitness = float(best_agent.target.fitness)
 

@@ -1,3 +1,4 @@
+"""Buduje per-UAV agregat `uav_metrics` (planned vs actual trajectory + collisions/evasions)."""
 from __future__ import annotations
 
 import json
@@ -5,6 +6,15 @@ import sqlite3
 
 
 def populate_uav_metrics(conn: sqlite3.Connection, run_id: str) -> None:
+    """Zbuduj wiersze `uav_metrics` dla każdego UAV obecnego w którejkolwiek tabeli źródłowej.
+
+    Łączy planned/actual trajectory (z `trajectory_metrics`) z liczbą kolizji
+    i evasion events per dron.
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        run_id: Identyfikator runa.
+    """
     cur = conn.execute(
         """
         WITH

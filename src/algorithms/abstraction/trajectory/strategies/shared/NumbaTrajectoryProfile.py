@@ -1,39 +1,63 @@
+"""Profil trajektorii: trapezoidalny rozkład prędkości na gładkim B-spline.
+
+Wczytuje zestaw waypointów, fituje na nich kubiczny B-spline (`scipy.splprep`)
+i wystawia `get_state_at_time(t) -> (pos, vel)` używane przez kontroler PID
+oraz oracle predykcji w `SwarmFlightController`.
+"""
 import numpy as np
 from scipy.interpolate import splev, splprep
 
 from src.algorithms.abstraction.trajectory.strategies.shared.bspline_utils import calculate_trapezoidal_profile, get_state_at_time_numba
 
+
 class NumbaTrajectoryProfile:
+    """Trapezoidalny profil prędkości na B-spline z waypointów.
+
+    Pola publiczne:
+        waypoints, distances, cumulative_distances, total_distance,
+        arc_length, cruise_speed, max_accel, tck, u_params,
+        ta, tc, td, sa, sc, v_peak, total_duration
+        (długości faz przyspieszania/cruise/hamowania, dystanse fazowe,
+        peak speed, łączny czas przejazdu).
+    """
+
     def __init__(self, waypoints: np.ndarray, cruise_speed: float, max_accel: float):
+        """Zafituj B-spline na waypointach i wylicz parametry profilu trapezoidalnego.
+
+        Args:
+            waypoints: `(W, 3)` punkty trasy `[x, y, z]` w kolejności
+                chronologicznej.
+            cruise_speed: Docelowa prędkość przelotowa [m/s].
+            max_accel: Maksymalne przyspieszenie/hamowanie [m/s²].
+        """
         self.waypoints = np.asarray(waypoints, dtype=np.float64)
 
-        # Szybka kalkulacja z Numby
         diffs = np.diff(self.waypoints, axis=0)
         self.distances = np.linalg.norm(diffs, axis=1)
         self.cumulative_distances = np.insert(np.cumsum(self.distances), 0, 0.0)
         self.total_distance = self.cumulative_distances[-1]
         self.max_accel = max_accel
-        # Konsumenci avoidance (EvasionContextBuilder, BSplineSmoother, BSplineYZGenes,
-        # ) wymagają referencyjnej prędkości przelotowej dla profilu uniku.
-        # Po refaktorze BSplineTrajectory→NumbaTrajectoryProfile zniknął zagnieżdżony
-        # `.profile.cruise_speed` — eksponujemy bezpośrednio.
+        # Konsumenci avoidance (EvasionContextBuilder, BSplineSmoother) wymagają
+        # referencyjnej prędkości przelotowej — eksponujemy bezpośrednio.
         self.cruise_speed = cruise_speed
 
-        # B-spline coef (tck) i arc_length — wymagane przez avoidance (splev na
-        # `base_spline.tck` daje tangent/pozycję ciągłą). NumbaTrajectoryProfile sam w sobie
-        # interpoluje liniowo między waypointami, ale waypointy pochodzą z gęstego
-        # próbkowania B-spline po offline optimization (dense_samples=200 default), więc
-        # ponowne dopasowanie krzywej `splprep(s=0, k=3)` jest tożsame z pierwotną krzywą.
-        # `arc_length` aliasujemy do total_distance (przy 200 próbkach różnica < 0.1%).
+        # arc_length aliasujemy do total_distance: waypointy pochodzą z gęstego
+        # próbkowania B-spline (dense_samples=200), różnica < 0.1%.
         self.arc_length = float(self.total_distance)
         self.tck, self.u_params = self._fit_bspline()
 
-        # Wyliczenie profilu w Numbie
         self.ta, self.tc, self.td, self.sa, self.sc, self.v_peak, self.total_duration = calculate_trapezoidal_profile(
             self.total_distance, cruise_speed, max_accel
         )
 
     def _fit_bspline(self):
+        """Zafituj kubiczny B-spline (`splprep(k=3)`) na waypointach.
+
+        Returns:
+            Para `(tck, u_params)` z `scipy.interpolate.splprep`, lub
+            `(None, None)` dla zdegenerowanej trasy (< 4 waypointów albo
+            zerowa długość).
+        """
         # splprep(k=3) wymaga >= 4 unikalnych punktów. Dla zdegenerowanych przypadków
         # (waypoints powtórzone, np. dron stoi w miejscu) zwracamy None — avoidance
         # wykrywa to przez `arc_length <= 1e-6` i wtedy nie woła splev.
@@ -48,28 +72,27 @@ class NumbaTrajectoryProfile:
         return tck, u_params
 
     def get_state_at_time(self, t: float):
-        """Returns (position, velocity) at given time `t` along the trajectory.
+        """Zwróć stan trajektorii (pozycja, prędkość) w chwili `t` od startu.
 
-        Refactor 2026-05-07 (Kamień: B-spline tracking):
-        Wcześniej delegowane do `get_state_at_time_numba` które używało
-        **linear interpolation** między waypointami (linijka 299) — to
-        produkowało direction discontinuities przy waypoint junctions
-        (instantaneous turn = lateral acc spikes 100x+ m/s²). Drone PID
-        nie potrafi takiego acc → panic falls.
+        Profil trapezoidalny mapuje `t → s` (długość łuku), a następnie
+        `s → u` (parametr splajnu) przez interpolację
+        `cumulative_distances ↔ u_params`. Tym samym splajnem ocenia
+        `compute_max_observed_acceleration` w fazie offline — geometria jest
+        identyczna. Liniowa interpolacja między waypointami powodowałaby
+        nieciągłości kierunku przy złączach (skoki lateralnego przyspieszenia
+        100× powyżej max_accel), które PID drona kończą paniczną utratą lotu.
 
-        Teraz używa `scipy.interpolate.splev` na `self.tck` (B-spline
-        zafitowany w `_fit_bspline`). Path geometryczny = identyczny smooth
-        B-spline którym ocenia optimizer w `compute_max_observed_acceleration`.
-        Trapezoidal profile mapuje t → s (arc length) → u (spline parameter)
-        przez interpolację (cumulative_distances ↔ u_params).
+        Args:
+            t: Chwila czasowa od startu trajektorii [s]; `t ≤ 0` zwraca
+                pozycję początkową, `t ≥ total_duration` — końcową; oba
+                z zerową prędkością.
 
-        Fallback: gdy `self.tck is None` (degenerate path < 4 waypoints lub
-        zero distance), używa starego linear-interp helper'a (numba).
+        Returns:
+            Para `(pos, vel)`: `pos` `(3,)` w metrach, `vel` `(3,)` w m/s.
 
-        Test: `tests/trajectory/test_numba_trajectory_bspline_following.py
-        ::test_get_state_at_time_follows_smooth_bspline_not_linear_polyline`.
+        Fallback: gdy `self.tck is None` (trasa < 4 waypointów albo
+        zerowa długość), wywołuje pomocnik numba z interpolacją liniową.
         """
-        # Trapezoidal profile: t → arc length s + speed
         if t <= 0.0:
             return self.waypoints[0].copy(), np.zeros(3, dtype=np.float64)
         if t >= self.total_duration:
@@ -90,8 +113,6 @@ class NumbaTrajectoryProfile:
             )
             current_speed = self.v_peak - self.max_accel * t_dec
 
-        # Fallback: degenerate path (< 4 waypoints lub zero arc length)
-        # gdzie B-spline nie daje się zafittować — pozostaje linear interp.
         if self.tck is None:
             return get_state_at_time_numba(
                 self.waypoints, self.distances, self.cumulative_distances,
@@ -104,14 +125,12 @@ class NumbaTrajectoryProfile:
         # `cumulative_distances[i]` to arc length przy waypoint[i].
         u = float(np.interp(current_dist, self.cumulative_distances, self.u_params))
 
-        # Position from B-spline: splev returns list of arrays per dimension
         pos_components = splev(u, self.tck)
         pos = np.array(
             [float(pos_components[0]), float(pos_components[1]), float(pos_components[2])],
             dtype=np.float64,
         )
 
-        # Tangent direction (unit) from spline 1st derivative
         tangent_components = splev(u, self.tck, der=1)
         tangent = np.array(
             [float(tangent_components[0]), float(tangent_components[1]), float(tangent_components[2])],

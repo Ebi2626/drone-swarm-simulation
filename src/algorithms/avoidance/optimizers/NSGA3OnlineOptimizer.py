@@ -50,30 +50,40 @@ logger = logging.getLogger(__name__)
 
 
 class _BudgetCallback:
-    """Pymoo callback wywołujący `budget.check_or_raise()` per generację I
-    capture'ujący best-so-far (regression fix 2026-05-03).
-
-    Bez capture'owania best-so-far, gdy `BudgetExceeded` fires, NSGA-3 wracał
-    `waypoints=None` mimo że populacja zawierała feasible candidates. Mealpy
-    (SSA/OOA) nie ma tego problemu bo używa `max_time` natywnie i graceful'nie
-    finalizuje. Tu capture'ujemy `algorithm.pop` po każdej generacji i przy
-    BudgetExceeded zwracamy najlepszego non-sentinel osobnika.
+    """Pymoo callback z dwoma zadaniami:
+    1. Wywołanie `budget.check_or_raise()` per generację (cooperative budget).
+    2. Capture best-so-far populacji — bez tego przy `BudgetExceeded` NSGA-3
+       wracał `waypoints=None` mimo że populacja zawierała feasible
+       candidates (mealpy SSA/OOA nie ma tego problemu bo `max_time` jest
+       natywne i graceful'nie finalizuje).
 
     `BudgetExceeded` propaguje przez pymoo `minimize()` do top-level handlera.
     """
 
     def __init__(self, budget: TimeBudget) -> None:
+        """Powiąż callback z `budget` i zainicjuj snapshot best-so-far na pusty.
+
+        Args:
+            budget: Wspólny `TimeBudget` — sprawdzany na każdej generacji.
+        """
         self.budget = budget
         self.generations_seen = 0
-        # Capture best-so-far na koniec każdej gen (przed budget check).
         self.best_X: NDArray[np.float64] | None = None
         self.best_F: NDArray[np.float64] | None = None
-        # Convergence trace (Krok 3.3b plan.md): per-gen najlepsze fitness
-        # filtered po sentinel threshold (1e8) — gdy populacja jest infeasible
-        # zapisujemy `inf` (analiza może filtrować).
+        # Per-gen najlepszy feasible fitness; `inf` gdy cała populacja
+        # infeasible (analiza może filtrować inf).
         self.convergence_trace: list[float] = []
 
     def __call__(self, algorithm) -> None:
+        """Wykonaj snapshot populacji i sprawdź budżet (rzuca `BudgetExceeded`).
+
+        Args:
+            algorithm: Bieżąca instancja `NSGA3` z pymoo (atrybut `pop` ma
+                kolumny `X`, `F`).
+
+        Raises:
+            BudgetExceeded: Gdy `budget.check_or_raise()` przekracza próg.
+        """
         self.generations_seen += 1
         # Snapshot populacji ZANIM rzucimy BudgetExceeded.
         try:
@@ -100,15 +110,23 @@ def _build_pymoo_problem(
     bounds_lb: NDArray[np.float64],
     bounds_ub: NDArray[np.float64],
 ):
-    """Buduje pymoo Problem z 1 obj = scalar `WeightedSumFitness.evaluate()`.
+    """Zbuduj `pymoo.Problem` z 1 obj (scalar `WeightedSumFitness.evaluate`).
 
-    Fairness fix 2026-05-03 (Krok 1): NSGA-III dotychczas używał multi-obj
-    `evaluate_components` (4-D Pareto) + `decision_mode="safety"` (lexsort tylko
-    po c_safety, IGNORUJE c_energy/jerk/symmetry). Pozostałe 3 algorytmy
-    (SSA/OOA/MSFFOA) używają scalar weighted-sum przez `evaluate()`. Różne
-    funkcje celu = nie porównujemy tej samej rzeczy. Tu unifikujemy: NSGA-III
-    też scalar weighted-sum. NSGA-III zachowuje swoją mechanikę (ref-point
-    niching nadal pracuje na decision space, tylko obj wymiar = 1).
+    Unifikacja z SSA/OOA/MSFFOA online: wszystkie 4 algorytmy minimalizują
+    tę samą skalarną sumę ważoną (porównywalność per-trigger). NSGA-III
+    zachowuje ref-point niching w decision space, ale obj space jest 1-D,
+    więc Pareto-front degeneruje do pojedynczego punktu.
+
+    Args:
+        path_problem: Definicja problemu (path_repr, fitness, context, predictor).
+        bounds_lb, bounds_ub: `(D,)` granice genów.
+
+    Returns:
+        Instancja `pymoo.core.problem.Problem` z `_evaluate` zapisującym
+        skalarny `F` w `out["F"]`.
+
+    Raises:
+        ImportError: Gdy pakiet `pymoo` nie jest zainstalowany.
     """
     if not _PYMOO_AVAILABLE:
         raise ImportError(
@@ -162,12 +180,29 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
         min_compute_time_s: float = 0.05,
         rng: np.random.Generator | int | None = None,
     ) -> None:
-        """
-        :param n_partitions: parametr `get_reference_directions("das-dennis", n_obj, n_partitions)`.
-            Dla n_obj=4, n_partitions=4 → C(4+4-1, 4-1) = 35 ref dir.
-            Mniejsze n_partitions = mniej ref dir = mniejszy pop_size potrzebny.
-        :param decision_mode: jak wybrać single solution z Pareto-front. "safety"
-            domyślnie — analogicznie do offline NSGA-3 strategii (Deb 2014).
+        """Skonfiguruj NSGA-III online: liczbę kierunków referencyjnych i tryb selekcji.
+
+        Args:
+            n_inner_waypoints: K — liczba waypointów spójna z
+                `path_representation.n_inner_waypoints`.
+            epoch: Górna liczba generacji (`pymoo.minimize(termination=("n_gen", epoch))`).
+            pop_size: Rozmiar populacji NSGA-III.
+            n_partitions: Parametr Das-Dennis dla
+                `get_reference_directions("das-dennis", n_obj, n_partitions)`;
+                mniejszy `n_partitions` ⇒ mniej kierunków referencyjnych
+                ⇒ mniejsza wymagana populacja.
+            decision_mode: Strategia wyboru pojedynczego rozwiązania
+                z frontu Pareto:
+                  - `"safety"` — minimum `c_safety` (tie-break po `c_energy`),
+                  - `"weighted"` — najniższa suma ważona z `WeightedSumFitness.w_*`,
+                  - `"knee_point"` — geometryczny knee w 4D Pareto.
+            min_compute_time_s: Minimalny budżet [s] do uruchomienia
+                optymalizatora.
+            rng: Ziarno deterministyczne dla `pymoo.minimize(seed=…)`.
+
+        Raises:
+            ImportError: Gdy pakiet `pymoo` nie jest dostępny.
+            ValueError: Gdy `decision_mode` jest spoza dozwolonego zbioru.
         """
         if not _PYMOO_AVAILABLE:
             raise ImportError(
@@ -188,9 +223,27 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
 
     @property
     def population_size(self) -> int:
+        """Rozmiar populacji NSGA-III."""
         return self.pop_size
 
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
+        """Uruchom NSGA-III na YZ-genach w ramach `budget` i zwróć najlepsze waypointy.
+
+        Args:
+            problem: `PathProblem` z fitness, predyktorem i opcjonalną
+                populacją startową.
+            budget: Kooperatywny budżet czasu — sprawdzany przez
+                `_BudgetCallback` po każdej generacji.
+
+        Returns:
+            `OptimizationResult` ze statusem:
+              - `"ok"` z `waypoints` i `extra`
+                (`algorithm="NSGA3"`, `convergence_trace`),
+              - `"timed_out"`, gdy budżet < `min_compute_time_s` albo
+                `BudgetExceeded` (próbujemy zwrócić best-so-far),
+              - `"failed"`, gdy front Pareto był pusty albo żaden kandydat
+                nie był feasible.
+        """
         t_start = time.perf_counter()
 
         if budget.remaining < self.min_compute_time_s:
@@ -205,10 +258,9 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
             lb, ub = problem.path_repr.gene_bounds(problem.context)
             pymoo_problem = _build_pymoo_problem(problem, lb, ub)
 
-            # Fairness fix 2026-05-03 (Krok 1): n_obj=1 (scalar weighted-sum).
-            # Dla 1-obj Das-Dennis(1, p) = 1 ref_dir (p irrelevant). To OK —
-            # NSGA-III mechanika (ref-point niching) zachowana w decision space,
-            # ale obj space jest 1-D więc niching nie wpływa na selekcję.
+            # n_obj=1 → Das-Dennis(1, p) = 1 ref_dir (p irrelevant). NSGA-III
+            # niching nie wpływa na selekcję w 1-D, ale ref-point niching
+            # w decision space zostaje aktywny.
             ref_dirs = get_reference_directions("das-dennis", 1, n_partitions=1)
 
             # Ceteris paribus: jeśli `GenericOptimizingAvoidance` pre-wygenerował
@@ -254,10 +306,9 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
             X = np.atleast_2d(res.X)
             F = np.atleast_2d(res.F)
 
-            # Filtr sentinel-cost (regression fix 2026-05-02): candidates z
-            # `decode_genes returning None` mają fitness `[1e9, 1e9, 1e9, 1e9]`.
-            # `_select_from_pareto` po lexsort wybierałby ich nawet jeśli istnieją
-            # feasible candidates z normalnym fitness. Zostawiamy tylko non-sentinel.
+            # Filtr sentinel-cost: candidates z `decode_genes` zwracającym None
+            # mają fitness 1e9. Bez filtru argmin/lexsort mógł je wybrać nawet
+            # przy istniejących feasible candidates.
             SENTINEL_THRESHOLD = 1e8
             feasible_mask = F[:, 0] < SENTINEL_THRESHOLD
             if not np.any(feasible_mask):
@@ -313,10 +364,10 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
                 f"NSGA3OnlineOptimizer: d{problem.context.drone_id} — "
                 f"BudgetExceeded po {elapsed:.3f}s ({e})"
             )
-            # Best-so-far recovery (regression fix 2026-05-03): bez tego NSGA-3
-            # zwracał None mimo że populacja miała feasible candidates. Mealpy
-            # (SSA/OOA) graceful'nie kończy na max_time, my musimy zrobić to
-            # ręcznie z capture'a w `_BudgetCallback`.
+            # Best-so-far recovery z snapshotu w `_BudgetCallback`: bez tego
+            # NSGA-3 zwracał None mimo że populacja miała feasible candidates
+            # (pymoo `minimize()` przerywany BudgetExceeded nie zwraca
+            # częściowego stanu — recovery musi wyciągnąć go z callbacka).
             try:
                 if callback.best_X is not None and callback.best_F is not None:
                     F_so_far = np.atleast_2d(callback.best_F)
@@ -380,7 +431,20 @@ class NSGA3OnlineOptimizer(IPathOptimizer):
         F: NDArray[np.float64],
         fitness,
     ) -> int:
-        """Z Pareto-front (F shape (n, 4)) wybierz indeks single solution."""
+        """Wybierz indeks rozwiązania z `(n, 4)` frontu Pareto wg `decision_mode`.
+
+        Args:
+            F: `(n, 4)` macierz fitness (kolumny: c_safety, c_energy, c_jerk,
+                c_symmetry).
+            fitness: Instancja `WeightedSumFitness` — używana w trybie
+                `"weighted"` do odczytu wag.
+
+        Returns:
+            Indeks wybranego rozwiązania w `F`.
+
+        Raises:
+            ValueError: Gdy `decision_mode` nie jest rozpoznawany.
+        """
         if self.decision_mode == "safety":
             # Najniższe c_safety; tie-break po c_energy.
             order = np.lexsort((F[:, 1], F[:, 0]))

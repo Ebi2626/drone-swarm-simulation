@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Generator konfiguracji eksperymentów z plików definicji YAML.
+
+Wczytuje `definition.yaml` opisujący `parameters_grid`, rozwija pary
+(optimizer × environment) z opcjonalnymi `env_overrides`, generuje
+pliki proxy w `configs/optimizer/_proxy_*.yaml`, zapisuje `manifest.yaml`
+w `results/<exp_id>/` i inicjalizuje `RunRegistry` rekordami PENDING.
+"""
 import argparse
 import collections.abc
 import copy
@@ -18,7 +25,15 @@ from src.utils.RunRegistry import RunRegistry
 
 
 def _deep_update(d: dict, u: collections.abc.Mapping) -> dict:
-    """Rekurencyjne scalanie: `u` nadpisuje `d` per-klucz, mappingi schodzą głębiej."""
+    """Rekurencyjnie scal `u` w `d`: skalary nadpisują, słowniki schodzą głębiej.
+
+    Args:
+        d: Słownik docelowy, modyfikowany w miejscu.
+        u: Słownik z wartościami nadpisującymi.
+
+    Returns:
+        Ten sam `d` po scaleniu (zwracany dla wygody łańcuchowania wywołań).
+    """
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
             d[k] = _deep_update(d.get(k, {}) or {}, v)
@@ -44,18 +59,26 @@ def _write_proxy_yaml(
     base_content: dict,
     overrides: collections.abc.Mapping,
 ) -> str:
-    """Generuje plik proxy YAML łącząc bazowy config + overrides.
+    """Zapisz plik proxy łączący `base_content` z `overrides`.
 
-    Plik trafia bezpośrednio do `configs/optimizer/` z prefiksem
-    `_proxy_<exp_id>_...`, więc referencja Hydra (`optimizer=<name>`) nie
-    zawiera `/` i nie tworzy zagnieżdżonych katalogów w `results/`.
+    Plik trafia do `configs/optimizer/` z przedrostkiem `_proxy_<exp_id>_...`,
+    aby odwołanie Hydra (`optimizer=<nazwa>`) nie zawierało ukośnika
+    (ukośnik w nazwie grupy konfiguracyjnej powodowałby zagnieżdżenie wyników).
 
     Args:
-        suffix: Opcjonalny sufiks (np. nazwa env). Jeśli None, plik jest
-            jednym uniwersalnym proxy. Jeśli podany — proxy per-env.
+        target_dir: Katalog docelowy (`configs/optimizer/`).
+        exp_id: Identyfikator eksperymentu — wchodzi w nazwę pliku.
+        base_name: Nazwa bazowa optymalizatora (np. `"msffoa"`).
+        idx: Indeks w `optimizers_list` zapewniający unikalność.
+        suffix: Przyrostek środowiska (np. `"forest"`); `None` ⇒ jeden
+            wspólny plik proxy dla wszystkich środowisk.
+        base_content: Wczytana zawartość bazowego pliku YAML optymalizatora.
+        overrides: Mapa nadpisań do scalenia z `base_content`.
+
     Returns:
-        Nazwa pliku proxy bez rozszerzenia, gotowa do użycia jako Hydra
-        config-group reference (np. "_proxy_exp_xxx_msffoa_forest_0").
+        Nazwa pliku proxy bez rozszerzenia (np.
+        `"_proxy_exp_xxx_msffoa_forest_0"`), gotowa jako wartość grupy
+        konfiguracyjnej Hydra.
     """
     base_copy = copy.deepcopy(base_content)
     magic = {k: base_copy.pop(k) for k in ("_target_", "_partial_", "_convert_") if k in base_copy}
@@ -83,31 +106,34 @@ def expand_optimizers_for_environments(
     exp_id: str,
     configs_dir: Path,
 ) -> tuple[list[dict], list[str]]:
-    """Generuje proxy yamls i tablicę par (optimizer × environment).
+    """Rozwiń pary optymalizator × środowisko w macierz zadań, tworząc pliki proxy.
 
-    Reguły:
-    - Optimizer jako string `"foo"`: brak overrides; pary `{optimizer: foo,
-      environment: env}` dla każdego env.
-    - Optimizer jako `{name: foo, overrides: {...}}` (bez env_overrides):
-      jeden proxy z bazowymi override'ami; pary `{optimizer: tmp/<proxy>,
-      environment: env}` dla każdego env.
-    - Optimizer jako `{name: foo, env_overrides: {<env>: {...}, ...}}`:
-      - Dla każdego env w `env_overrides` → dedykowany proxy
-        `tmp/<exp>_<foo>_<env>_<idx>` (scalony bazowy config + `overrides` + `env_overrides[env]`).
-      - Dla envów nieobecnych w `env_overrides`:
-        - Jeśli istnieje `overrides` (bazowe) → użyj jednego wspólnego bazowego proxy.
-        - W p.p. — sama nazwa bazowa (bez proxy).
+    Trzy dopuszczalne formaty wpisu w `optimizers_list`:
+    - `"foo"` — bez nadpisań; jedna nazwa dla wszystkich środowisk.
+    - `{name, overrides}` — wspólny plik proxy z polem `overrides`.
+    - `{name, env_overrides: {env: {...}}}` — osobny plik proxy
+      dla każdego środowiska.
+
+    Args:
+        optimizers_list: Wpisy z `parameters_grid.optimizers` — łańcuchy
+            znaków albo słowniki w jednym z trzech formatów wyżej.
+        environments: Lista nazw środowisk (`parameters_grid.environments`).
+        exp_id: Identyfikator eksperymentu — wchodzi w nazwy plików proxy.
+        configs_dir: Korzeń `configs/` projektu (zapis trafia do `configs/optimizer/`).
 
     Returns:
-        (job_matrix, base_names):
-            - job_matrix: lista dict-ów `{"optimizer": <ref>, "environment": <env>,
-              "base_name": <bazowa_nazwa>}`. `<ref>` to `tmp/<proxy_name>` (gdy
-              są overrides) albo bazowa nazwa (gdy ich brak). `base_name` jest
-              używane do nazewnictwa katalogu runu i wpisu w RunRegistry —
-              zapewnia spójność z `parse_run_dir_name` (regex `(opt)_(env)_...`)
-              niezależnie od długiej ścieżki proxy.
-            - base_names: lista bazowych nazw (jak deklarowano w definicji),
-              w kolejności zgłoszenia, z duplikatami.
+        Para `(job_matrix, base_names)`:
+        - `job_matrix`: lista słowników
+          `{"optimizer": <ref>, "environment": <env>, "base_name": <orig>}`.
+          `<ref>` to nazwa pliku proxy (gdy są nadpisania) lub nazwa bazowa.
+          `base_name` zachowuje zgodność z `parse_run_dir_name`.
+        - `base_names`: lista nazw bazowych w kolejności zgłoszenia,
+          z duplikatami.
+
+    Raises:
+        ValueError: Gdy wpis nie jest łańcuchem znaków ani słownikiem
+            z kluczem `name`.
+        FileNotFoundError: Gdy bazowy `configs/optimizer/<name>.yaml` nie istnieje.
     """
     # Proxy YAML-e lądują flat w `configs/optimizer/` z prefiksem `_proxy_`.
     # Wcześniej w `tmp/`, ale slash w referencji Hydra-config-group powodował
@@ -195,18 +221,16 @@ SWEEP_KEYS = ("optimizers", "environments", "avoidances")
 
 
 def _collect_static_overrides(definition: dict) -> dict:
-    """Zbiera static overrides — wstrzykiwane na top-level manifestu jako
-    `# @package _global_` deep-merge.
+    """Zbierz nadpisania wstrzykiwane na najwyższym poziomie manifestu (głębokie scalanie).
 
-    Źródła (w kolejności priorytetu, ostatni wygrywa):
-    1. `parameters_grid.<klucz>` dla kluczy spoza {optimizers, environments,
-       avoidances} (np. `simulation`, `seed`, `logging`).
-    2. `static_overrides` (top-level) — pozwala wymusić wartości niezależne
-       od `parameters_grid`.
+    Args:
+        definition: Wczytana definicja eksperymentu (YAML).
 
-    Reference: Hydra docs §"Defaults List override syntax" — top-level klucze
-    w `# @package _global_` config-u nadpisują wartości z grup
-    `defaults:` przez deep-merge.
+    Returns:
+        Słownik nadpisań scalonych z dwóch źródeł (drugie ma pierwszeństwo):
+        1. `parameters_grid.<klucz>` dla kluczy spoza zbioru
+           {`optimizers`, `environments`, `avoidances`}.
+        2. `static_overrides` z poziomu najwyższego.
     """
     grid = definition.get("parameters_grid", {}) or {}
     overrides: dict = {}
@@ -223,16 +247,18 @@ PAIRING_MODES = ("crossed", "paired_only")
 
 
 def _resolve_pairing(definition: dict) -> str:
-    """Czyta i waliduje top-level `pairing` z definition (default: 'crossed').
+    """Zwróć tryb parowania z definicji (domyślnie `'crossed'`).
 
-    Tryby:
-      - 'crossed' (default, back-compat): pełen kartezjan
-        optimizer × environment × avoidance × seed.
-      - 'paired_only': filtr do par optimizer == avoidance, czyli
-        |optimizer ∩ avoidance| × environment × seed.
+    Args:
+        definition: Wczytana definicja eksperymentu (YAML).
+
+    Returns:
+        `'crossed'` — pełny iloczyn kartezjański
+        optymalizator × środowisko × unik × ziarno.
+        `'paired_only'` — filtr `optimizer == avoidance`.
 
     Raises:
-        ValueError: gdy wartość spoza zbioru `PAIRING_MODES`.
+        ValueError: Gdy wartość jest spoza `PAIRING_MODES`.
     """
     pairing = definition.get("pairing", "crossed")
     if pairing not in PAIRING_MODES:
@@ -248,16 +274,24 @@ def generate_yaml_content(
     definition: dict,
     job_matrix: list[dict],
 ) -> str:
-    """Buduje treść `manifest.yaml` (i `experiment_generated/<exp>.yaml`).
+    """Zbuduj treść `manifest.yaml` (oraz `experiment_generated/<exp>.yaml`).
 
-    Format Option A: pary (optimizer × environment) są w `job_matrix`
-    (top-level), nie w `hydra.sweeper.params`. Pozostałe wymiary
-    (avoidance × seed) zostają w sweeper.params dla kartezjańskiego rozwinięcia
-    przez `experiments/run_subprocess.py`.
+    Pary (optymalizator × środowisko) trafiają na najwyższy poziom jako
+    `job_matrix`; pozostałe wymiary (unik × ziarno) lądują w
+    `hydra.sweeper.params` i są rozwijane przez `run_subprocess.py`.
 
-    Tryb `pairing: paired_only` (top-level definition) zapisany do
-    `experiment_meta.pairing` — `run_subprocess.py` filtruje wtedy jobs do par
-    `pair["base_name"] == avoidance` przed wykonaniem.
+    Args:
+        exp_id: Identyfikator eksperymentu — używany w `experiment_meta.id`
+            i `sweep.dir`.
+        definition: Wczytana definicja eksperymentu (YAML).
+        job_matrix: Wynik `expand_optimizers_for_environments`.
+
+    Returns:
+        Pełna treść manifestu YAML do zapisu na dysk.
+
+    Raises:
+        ValueError: Gdy `job_matrix` jest puste, brak `avoidances` w siatce
+            albo tryb `paired_only` nie ma żadnej pasującej pary.
     """
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     name = definition.get("name", "unnamed_experiment")
@@ -341,10 +375,9 @@ hydra:
     n_jobs: 6
     # backend `loky` (zamiast `multiprocessing`) używa fork-and-exec
     # (czysty Python interpreter per-worker), co eliminuje współdzielenie
-    # globalnego stanu C++ PyBullet między workerami. Patologia "drony stoją
-    # w PyBullet mimo poprawnie wygenerowanej trajektorii" (plan.md, Krok 2,
-    # H1 potwierdzona reprodukcją n_jobs=1) była efektem fork-share state z
-    # `backend: multiprocessing`.
+    # globalnego stanu C++ PyBullet między workerami. `multiprocessing` z
+    # default fork-share state powodował patologię „drony stoją w PyBullet
+    # mimo poprawnej trajektorii" w drugim+ jobie multirun.
     backend: loky
     prefer: processes
   sweeper:
@@ -354,6 +387,20 @@ hydra:
 """
 
 def main():
+    """Wczytaj definicję YAML i wygeneruj manifest, pliki proxy oraz `RunRegistry`.
+
+    Efekty uboczne:
+        - Tworzy pliki proxy w `configs/optimizer/_proxy_<exp_id>_*.yaml`.
+        - Zapisuje `configs/experiment_generated/<exp_id>.yaml` (konfiguracja Hydra).
+        - Zapisuje `results/<exp_id>/manifest.yaml` (kopię) oraz
+          `results/<exp_id>/original_definition.yaml`.
+        - Inicjalizuje `results/<exp_id>/registry.db` rekordami w stanie PENDING.
+
+    Wyjścia:
+        Kończy z kodem 1, gdy: brak pliku definicji, błąd parsowania YAML,
+        niepełna siatka parametrów, nieznany tryb `pairing`, albo
+        `paired_only` zawiera optymalizatory bez odpowiednika w `avoidances`.
+    """
     parser = argparse.ArgumentParser(description="Generator statycznych konfiguracji z pliku definicji YAML.")
     parser.add_argument("definition_file", type=str, help="Ścieżka do pliku YAML z definicją eksperymentu")
     args = parser.parse_args()
@@ -441,12 +488,11 @@ def main():
     else:
         total_runs = runs_count * len(job_matrix) * len(avoid_names)
 
-    # --- Sweep params dla RunRegistry: generowane DOKŁADNIE z definicji
-    # eksperymentu YAML, nie z hardcoded list. Liczba wpisów PENDING musi się
-    # zgadzać z liczbą wystartowanych jobów, inaczej `mark_started/completed`
-    # (UPDATE w RunRegistry) trafią w nieistniejące wiersze i registry pozostanie
-    # niespójny z parquet-em. Patrz plan.md, Krok 6 — bug z 0 wpisami w
-    # results/exp_20260426_b9b56922_complex_test/registry.db.
+    # Sweep params dla RunRegistry generowane DOKŁADNIE z definicji eksperymentu
+    # (nie z hardcoded list) — liczba wpisów PENDING musi się zgadzać z liczbą
+    # wystartowanych jobów, inaczej `mark_started/completed` (UPDATE w
+    # RunRegistry) trafiają w nieistniejące wiersze i registry rozjeżdża się
+    # z parquetem.
     runs = int(definition.get("runs_per_configuration", 1))
 
     # Bazowe nazwy optymalizatorów — spójne ze sposobem, w jaki

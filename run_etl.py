@@ -1,11 +1,11 @@
-"""ETL pipeline: agregacja surowych wynikow eksperymentu + analiza statystyczna.
+"""Potok ETL: agregacja surowych wyników eksperymentu i analiza statystyczna.
 
-Uzycie:
+Użycie:
     python run_etl.py results/exp_20260506_377919c3_per_env_test
 
-Pipeline:
-    1. ExperimentAggregator  — zbiera CSV/HDF5 z runow do analysis.db
-    2. ExperimentAnalyzer    — testy statystyczne, wykresy, raport (MD + PDF)
+Etapy potoku:
+    1. `ExperimentAggregator` — zbiera CSV/HDF5 z uruchomień do `analysis.db`.
+    2. `ExperimentAnalyzer` — testy statystyczne, wykresy, raport (MD + PDF).
 """
 from __future__ import annotations
 
@@ -19,6 +19,15 @@ from src.analysis.analyzer.ExperimentAnalyzer import ExperimentAnalyzer
 
 
 def main(experiment_dir: str) -> None:
+    """Uruchom pełny potok ETL na katalogu eksperymentu.
+
+    Args:
+        experiment_dir: Ścieżka do katalogu `results/exp_<id>/` z
+            podkatalogami pojedynczych uruchomień (pliki CSV/HDF5).
+
+    Raises:
+        SystemExit: Gdy `experiment_dir` nie wskazuje istniejącego katalogu.
+    """
     path = Path(experiment_dir)
     if not path.is_dir():
         print(f"Blad: katalog nie istnieje: {path}", file=sys.stderr)
@@ -29,11 +38,9 @@ def main(experiment_dir: str) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # 1. Agregacja danych
     agg = ExperimentAggregator()
     agg.aggregate(str(path))
 
-    # 2. Analiza danych
     anl = ExperimentAnalyzer()
     anl.analyze(str(path))
 

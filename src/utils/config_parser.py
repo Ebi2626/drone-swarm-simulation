@@ -1,7 +1,10 @@
+"""Parsery wartości z Hydry — `DroneModel`, `Physics`, koordynaty `np.ndarray`."""
 import numpy as np
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 
+
 def _parse_drone_model(model_input) -> DroneModel:
+    """Zamień `str/DroneModel` na enum; nieznane wartości ⇒ `CF2X` z ostrzeżeniem."""
     if isinstance(model_input, DroneModel):
         return model_input
     
@@ -15,6 +18,7 @@ def _parse_drone_model(model_input) -> DroneModel:
     return DroneModel.CF2X
 
 def _parse_physics(physics_input) -> Physics:
+    """Zamień `str/Physics` na enum; nieznane wartości ⇒ `PYB` z ostrzeżeniem."""
     if isinstance(physics_input, Physics):
         return physics_input
         
@@ -28,12 +32,15 @@ def _parse_physics(physics_input) -> Physics:
     return Physics.PYB
 
 def _parse_coordinates(coords_input):
+    """Zamień Hydra `ListConfig` na `np.ndarray`; `None` ⇒ `None`."""
     if coords_input is None:
         return None
     # Needed to cast to list() to fix Hydra ListConfig issue
     return np.array(list(coords_input))
 
+
 def sanitize_init_params(drone_model, physics, start_xyzs, end_xyzs, initial_rpys):
+    """Zwróć ujednoliconą krotkę `(DroneModel, Physics, start, end, rpys)` z surowych wejść."""
     return (
         _parse_drone_model(drone_model),
         _parse_physics(physics),

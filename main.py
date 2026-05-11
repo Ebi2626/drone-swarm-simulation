@@ -1,4 +1,10 @@
 # flake8: noqa: E402
+"""Hydra entry point — orkiestracja pojedynczego runa symulacji.
+
+`ExperimentRunner` wczytuje strategię danych (Generation lub Replay), buduje
+PyBullet world, kontrolery `SwarmFlightController` (offline trajectory +
+opcjonalnie online avoidance) i wykonuje pętlę symulacji z logowaniem CSV/HDF5.
+"""
 import warnings
 warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
 
@@ -27,7 +33,25 @@ import pybullet as p
 
 
 class ExperimentRunner:
+    """Orkiestrator pojedynczego runa: data prep → PyBullet world → sim loop.
+
+    Odczytuje konfigurację Hydra, strategię przygotowania danych
+    (`GenerationDataStrategy` lub `ReplayDataStrategy`), referencję do
+    `SeedRegistry` oraz wszystkie kontrolery i logger inicjalizowane
+    przez `prepare_experiment` / `initialize_world`.
+    """
+
     def __init__(self, cfg: DictConfig, data_strategy: ExperimentDataStrategy, seeds=SeedRegistry):
+        """Zachowaj referencje do konfiguracji i wczytaj parametry symulacji.
+
+        Args:
+            cfg: Top-level config Hydra (`simulation`, `environment`, `optimizer`,
+                `avoidance`, `visualization`, `logging` sekcje).
+            data_strategy: Strategy do `prepare_data` (generuje świat lub
+                ładuje z archiwum CSV).
+            seeds: `SeedRegistry` dostarczający subseedy dla optimizer/avoidance/
+                environment/sampling.
+        """
         self.cfg = cfg
         self.data_strategy = data_strategy
         self.seeds=seeds
@@ -87,15 +111,21 @@ class ExperimentRunner:
         # wewnętrznych węzłów kontrolnych optymalizowanych przez metaheurystykę.
         # Wcześniej oba pola dzieliły wartość, więc kontroler dostawał ~28
         # punktów na trajektorię ~600m → ~21 m między próbkami, za rzadko dla
-        # PID 48 Hz (patrz plan.md, Krok 4). Default 200 daje ~3 m / próbkę.
+        # PID 48 Hz wymaga ~3 m między próbkami przy track ~600m. Default 200.
         self.number_of_waypoints = cfg.simulation.get("dense_samples", 200)
 
-    # =========================================================================
-    # PRZYGOTOWANIE EKSPERYMENTU
-    # =========================================================================
-
     def prepare_experiment(self, seeds: SeedRegistry):
-        """Przygotowuje wszystkie wymagane dane i komponenty dla symulacji."""
+        """Zainicjalizuj logger, deleguj `data_strategy.prepare_data` i utwórz kontrolery.
+
+        Side-effects:
+            Ustawia `self.logger`, `self.input_handler`, `self.world_data`,
+            `self.obstacles_data`, `self.drones_trajectories` (przez strategy),
+            oraz `self.trajectory_controller` (+ opcjonalnie
+            `dynamic_obstacle_trajectory_controller`).
+
+        Args:
+            seeds: SeedRegistry (przekazany do data_strategy).
+        """
         if self.cfg.simulation.gui:
             self.input_handler = InputHandler(self.num_drones)
 
@@ -117,7 +147,12 @@ class ExperimentRunner:
         self._init_trajectory_following_algorithm()
 
     def _init_trajectory_following_algorithm(self):
-        """Inicjalizuje kontrolery trajektorii dla dronów i (opcjonalnie) przeszkód."""
+        """Zbuduj `SwarmFlightController` dla głównego roju i (opcjonalnie)
+        dla dynamicznych przeszkód.
+
+        Wywoływane z `prepare_experiment` po `data_strategy.prepare_data`.
+        Online avoidance jest aktywowane gdy `cfg.avoidance.enable=True`.
+        """
         shared_params = {
             "ctrl_freq": self.ctrl_freq,
             "collision_radius": 0.5,
@@ -165,12 +200,13 @@ class ExperimentRunner:
                 },
             )
 
-    # =========================================================================
-    # INICJALIZACJA ŚWIATA
-    # =========================================================================
-
     def initialize_world(self):
-        """Tworzy środowisko PyBullet z odpowiednią liczbą agentów."""
+        """Zinstancjuj `cfg.environment` (PyBullet world) z N agentami.
+
+        N = `num_drones` (główny rój) + `num_dynamic_obstacles` (jeśli
+        `cfg.simulation.dynamic_obstacles=True`). Pozycje start/end dla
+        przeszkód = pozycje end/start dronów (head-on scenariusz).
+        """
         if self.use_dynamic_obstacles:
             all_initial_xyzs = np.vstack((self.start_positions, self.end_positions))
             all_end_xyzs = np.vstack((self.end_positions, self.start_positions))
@@ -201,12 +237,12 @@ class ExperimentRunner:
             num_dynamic_obstacles=self.num_dynamic_obstacles
         )
 
-    # =========================================================================
-    # POMOCNICZE METODY PĘTLI
-    # =========================================================================
-
     def _update_camera(self, drone_states: list):
-        """Aktualizuje pozycję kamery podążając za wybranym dronem."""
+        """Wyśrodkuj kamerę GUI na `tracked_drone_id`. No-op gdy `camera_follow=False`.
+
+        Args:
+            drone_states: Lista state wektorów (PyBullet format) per agent.
+        """
         if not self.cfg.visualization.camera_follow:
             return
         update_camera_position(
@@ -217,26 +253,28 @@ class ExperimentRunner:
         )
 
     def _init_active_drones(self):
-        """Inicjalizuje zbiór aktywnych dronów głównego roju."""
+        """Wypełnij `self.active_drones = {0..num_drones-1}` i wczytaj `acceptance_radius`."""
         self.active_drones = set(range(self.num_drones))
         self.acceptance_radius = self.trajectory_controller.params.get(
             "acceptance_radius", 0.2
         )
 
     def _process_collisions(self, sim_time: float, current_step: int):
-        """Przetwarza kolizje — loguje i usuwa z aktywnych tylko drony głównego roju.
+        """Wykryj i obsłuż kolizje z dwóch źródeł, dla każdej drona głównego roju.
 
-        Trzy źródła kolizji:
-        1. Fizyczne kontakty PyBullet'a (`get_detailed_collisions`) — drone
-           styka się z ground/ceiling/obstacle/drugim dronem.
-        2. Proximity-based inter-drone (`get_inter_drone_proximity_collisions`,
-           Krok 2 plan.md 2026-05-07) — drony są ≤ INTER_DRONE_COLLISION_THRESHOLD_M
-           od siebie. Łapie scenariusz w którym drony nie zdążyły się zetknąć
-           fizycznie, bo PID się nasyca + downwash bayli i obie spadają na
-           ziemię (kolizja maskowana jako ground hit).
+        Źródła:
+        1. Fizyczne kontakty PyBullet — `get_detailed_collisions()`.
+        2. Proximity inter-drone — `get_inter_drone_proximity_collisions()`
+           (łapie scenariusz „drony za blisko, oba PID się nasycają i spadają",
+           gdzie LCP impulse maskuje kolizję jako ground hit).
 
-        Po kolizji: dron usunięty z `active_drones`, silniki + LiDAR
-        wyłączone w `trajectory_controller.disable_drone(d_id)`.
+        Side-effects:
+            Per kolizję: log + disable silników/LiDARu + usunięcie z
+            `active_drones` + zamknięcie otwartego rekordu uniku.
+
+        Args:
+            sim_time: Bieżący czas symulacji [s].
+            current_step: Numer kroku PyBullet od początku runa.
         """
         # 1. Fizyczne kontakty
         for d_id, o_id in self.environment.get_detailed_collisions():
@@ -263,12 +301,22 @@ class ExperimentRunner:
     def _handle_collision(
         self, d_id: int, o_id: int, sim_time: float, current_step: int
     ) -> None:
-        """Wspólna ścieżka logowania kolizji (fizycznej i proximity-based)."""
+        """Wykonaj akcje po kolizji drona `d_id` z obiektem `o_id`.
+
+        Idempotentne: wielokrotne wywołanie dla tego samego `d_id` jest
+        bezpieczne (`disable_drone` ma własny guard).
+
+        Args:
+            d_id: Indeks drona w głównym roju.
+            o_id: PyBullet body ID obiektu uderzonego (drone/ground/obstacle).
+            sim_time: Bieżący czas symulacji [s].
+            current_step: Numer kroku PyBullet.
+        """
         if self.logger:
             already_crashed = d_id in self.logger.crashed_drones
             self.logger.log_collision(sim_time, d_id, o_id)
-            # Krok 3.4 plan.md: zamknij ewentualny otwarty rekord uniku
-            # outcome'em `collided_*` (klasyfikacja po `env.get_body_role`).
+            # Zamknij ewentualny otwarty rekord uniku outcome'em `collided_*`
+            # (klasyfikacja po `env.get_body_role`).
             self._update_evasion_collision_outcome(d_id, o_id)
             # Disable silniki + LiDAR ZARAZ po pierwszej kolizji
             # (idempotentne — `disable_drone` może być wołane wielokrotnie).
@@ -321,7 +369,12 @@ class ExperimentRunner:
         )
 
     def _process_arrivals(self, drone_states: list, sim_time: float):
-        """Sprawdza czy drony głównego roju dotarły do celu."""
+        """Usuń z `active_drones` te, które weszły w `acceptance_radius` od celu.
+
+        Args:
+            drone_states: Stany dronów głównego roju (PyBullet format).
+            sim_time: Bieżący czas symulacji [s] (do logu).
+        """
         try:
             radius = float(np.squeeze(self.acceptance_radius))
         except (TypeError, ValueError):
@@ -339,13 +392,18 @@ class ExperimentRunner:
                 print(f"[INFO] Dron {d_id} osiągnął cel w czasie {sim_time:.2f}s.")
 
     def _get_all_drone_states(self) -> list:
-        """Zwraca stany wszystkich total_agents agentów ze środowiska."""
+        """Zbierz state vectory PyBullet dla wszystkich `total_agents` agentów.
+
+        Returns:
+            Lista 20-elementowych state vectorów (pos[0:3], quat[3:7],
+            rpy[7:10], vel[10:13], ang_vel[13:16], rpm[16:20]).
+        """
         return [
             self.environment._getDroneStateVector(d) for d in range(self.total_agents)
         ]
 
     def _split_states(self, all_states: list) -> tuple[list, list]:
-        """Rozdziela stany wszystkich agentów na drony i przeszkody."""
+        """Podziel listę state vectorów na (drone_states, obstacle_states)."""
         drone_states = all_states[: self.num_drones]
         obstacle_states = (
             all_states[self.num_drones :] if self.use_dynamic_obstacles else []
@@ -355,16 +413,28 @@ class ExperimentRunner:
     def _merge_actions(
         self, drone_actions: np.ndarray, obstacle_actions: np.ndarray | None
     ) -> np.ndarray:
-        """Scala akcje dronów i przeszkód w jedną tablicę dla env.step()."""
+        """Połącz akcje dronów i przeszkód w jeden array dla `env.step()`.
+
+        Args:
+            drone_actions: `(num_drones, 4)` RPM commands.
+            obstacle_actions: `(num_dynamic_obstacles, 4)` lub `None`.
+
+        Returns:
+            `(total_agents, 4)` jeśli obstacle_actions jest niepuste,
+            inaczej `drone_actions` bez zmian.
+        """
         if obstacle_actions is None:
             return drone_actions
         return np.vstack((drone_actions, obstacle_actions))
 
-    # =========================================================================
-    # GŁÓWNA PĘTLA SYMULACJI
-    # =========================================================================
-
     def run(self):
+        """Wykonaj główną pętlę symulacji do `duration_sec` lub crash wszystkich.
+
+        Side-effects:
+            - PyBullet stepuje fizykę (chyba że `is_running=False` w trybie GUI).
+            - Logger zapisuje per-step state.
+            - Po pętli: `logger.save()`, `environment.close()`, raport runtime.
+        """
         print("Running experiment...")
         self.initialize_world()
 
@@ -472,9 +542,6 @@ class ExperimentRunner:
         self.environment.close()
 
 
-# =============================================================================
-# PUNKTY WEJŚCIA
-# =============================================================================
 
 
 def _get_registry_job_key(cfg: DictConfig) -> dict | None:

@@ -1,9 +1,9 @@
 """AxisChooser — deterministyczna heurystyka wyboru osi uniku.
 
-Refactor 2026-05-02 (Single-Arc Deflection): hierarchical decomposition problemu.
-Pytanie "którędy uciec?" (dyskretne: right/left/up/down) jest oddzielone od
-"jak daleko?" (ciągłe: magnitude). Dyskretną decyzję podejmujemy analitycznie
-przed search'em — nie ma sensu eksplorować jej przez evolutionary algos.
+Hierarchical decomposition: pytanie „którędy uciec?" (dyskretne: right/left/
+up/down) jest oddzielone od „jak daleko?" (ciągłe: magnitude). Dyskretną
+decyzję podejmujemy analitycznie przed search'em — eksploracja jej przez
+evolutionary algos byłaby nieefektywna.
 
 Score per oś:
     score = w_clearance * clearance_norm
@@ -61,6 +61,29 @@ class AxisChooser:
         secondary_block_cone_deg: float = 20.0,
         secondary_block_range_m: float = 10.0,
     ) -> None:
+        """Skonfiguruj wagi punktacji osi i progi blokowania.
+
+        Args:
+            w_clearance: Waga znormalizowanej dostępnej przestrzeni
+                wzdłuż osi (większa wartość ⇒ silniejszy nacisk na
+                manewr w „luzie").
+            w_anti_threat: Waga komponentu anty-prędkościowego względem
+                wektora ruchu zagrożenia.
+            w_secondary_blocking: Waga współczynnika blokowania osi przez
+                drugorzędne zagrożenia w roju.
+            sticky_hint_threshold: Próg utrzymania osi z poprzedniego planu
+                — gdy `score(hint) ≥ próg × score(best)`, zwracamy `hint`.
+            secondary_block_cone_deg: Kąt półstożka wokół osi do
+                kwalifikacji drugorzędnego zagrożenia jako blokującego [°].
+            secondary_block_range_m: Promień zasięgu drugorzędnych
+                zagrożeń [m].
+
+        Raises:
+            ValueError: Gdy któraś waga jest ujemna albo
+                `sticky_hint_threshold ∉ [0, 1]`,
+                `secondary_block_cone_deg ∉ (0, 90)`,
+                `secondary_block_range_m < 0`.
+        """
         if min(w_clearance, w_anti_threat, w_secondary_blocking) < 0:
             raise ValueError("Wagi AxisChooser muszą być nieujemne.")
         if not 0.0 <= sticky_hint_threshold <= 1.0:
@@ -83,12 +106,18 @@ class AxisChooser:
         self,
         context: "EvasionContext",
     ) -> tuple[str, NDArray[np.float64]]:
-        """Wybierz oś uniku.
+        """Wybierz oś uniku najlepszą wg punktacji (z uwzględnieniem sticky-axis).
 
-        :return: `(axis_name, axis_unit_vector_3d)`. `axis_unit_vector_3d` jest
-            znormalizowany do długości 1.0 (zawsze).
+        Args:
+            context: `EvasionContext` z `drone_state`, `threat`,
+                `search_space_min/max`, `secondary_threats` i opcjonalnym
+                `preferred_axis_hint`.
+
+        Returns:
+            Krotka `(axis_name, axis_unit_vector)`:
+            - `axis_name ∈ {'right', 'left', 'up', 'down'}`,
+            - `axis_unit_vector` `(3,)` — zawsze unormowany do długości 1.
         """
-        # Compute forward (drone heading XY) i lateral_xy (perpendicular).
         v = np.asarray(context.drone_state.velocity, dtype=np.float64)
         v_xy = np.array([v[0], v[1], 0.0], dtype=np.float64)
         v_xy_norm = float(np.linalg.norm(v_xy))
@@ -96,7 +125,7 @@ class AxisChooser:
             forward_xy = v_xy / v_xy_norm
         else:
             forward_xy = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        # +90° rotation in XY plane (matches sign convention of dawnego A*).
+        # +90° CCW rotation in XY plane → „right" relative to drone heading.
         lateral_xy = np.array(
             [-forward_xy[1], forward_xy[0], 0.0], dtype=np.float64
         )
@@ -108,7 +137,6 @@ class AxisChooser:
             "down": np.array([0.0, 0.0, -1.0], dtype=np.float64),
         }
 
-        # Threat velocity unit (None jeśli zagrożenie stoi/quasi-stoi).
         t_vel = np.asarray(
             context.threat.obstacle_state.velocity, dtype=np.float64
         )
@@ -122,7 +150,6 @@ class AxisChooser:
         bbox_max = np.asarray(context.search_space_max, dtype=np.float64)
         secondary_threats = list(getattr(context, "secondary_threats", []))
 
-        # Score every axis.
         clearances: dict[str, float] = {}
         scores_raw: dict[str, dict[str, float]] = {}
         for name in _AXES_NAMES:
@@ -158,7 +185,6 @@ class AxisChooser:
         best_name = max(scores.keys(), key=lambda n: scores[n])
         best_score = scores[best_name]
 
-        # Sticky hint (anti-flip-flop).
         hint = getattr(context, "preferred_axis_hint", None)
         if (
             hint in scores
@@ -176,14 +202,10 @@ class AxisChooser:
         bbox_min: NDArray[np.float64],
         bbox_max: NDArray[np.float64],
     ) -> float:
-        """Dystans od `drone_pos` do brzegu bbox w kierunku `axis_unit` [m].
+        """Maksymalny dystans od `drone_pos` w kierunku `axis_unit` w obrębie bbox [m].
 
-        Liczymy `t_max` taki że `drone_pos + t_max * axis_unit` jest jeszcze
-        w bbox. Dla każdej osi i = 0,1,2 (X, Y, Z):
-            jeśli axis[i] > 0: t_i = (bbox_max[i] - drone[i]) / axis[i]
-            jeśli axis[i] < 0: t_i = (bbox_min[i] - drone[i]) / axis[i]
-            jeśli axis[i] = 0: nieograniczony w tym wymiarze.
-        Wynik = min(t_i across i).
+        Dla każdej osi `i ∈ {0, 1, 2}` (X, Y, Z) liczymy `t_i`, po którym
+        `drone_pos + t_i × axis_unit` opuszcza bbox; wynik = `min(t_i)`.
         """
         t_max = float("inf")
         for i in range(3):
@@ -204,12 +226,11 @@ class AxisChooser:
         axis_unit: NDArray[np.float64],
         secondary_threats: list,
     ) -> float:
-        """1.0 jeśli żaden secondary threat nie blokuje osi, 0.3 jeśli tak.
+        """`1.0`, gdy żadne drugorzędne zagrożenie nie blokuje osi; `0.3` w przeciwnym razie.
 
-        Threat blokuje gdy:
-        - jest w obrębie `secondary_block_range_m` od `drone_pos`,
-        - vector od drone_pos do threat ma cos angle do axis_unit
-          >= self.secondary_block_cone_cos (czyli threat leży w cone'ie ±θ wokół osi).
+        Zagrożenie blokuje, gdy jest w obrębie `secondary_block_range_m` od
+        drona oraz wektor `drone → threat` ma cos kąta do `axis_unit`
+        większy lub równy `secondary_block_cone_cos`.
         """
         for st in secondary_threats:
             obs_pos = np.asarray(

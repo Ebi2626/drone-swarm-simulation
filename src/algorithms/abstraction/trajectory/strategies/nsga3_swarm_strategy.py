@@ -1,8 +1,9 @@
 """
-Swarm Evolution Strategy Orchestrator.
-Główny punkt wejścia dla strategii NSGA-III.
-Wersja B-Spline Control Polygon - optymalizator ewaluuje węzły kontrolne krzywej,
-co gwarantuje 100% bezpieczeństwo wygładzonej trajektorii.
+NSGA-III strategy entry point. Wersja B-Spline Control Polygon — optymalizator
+operuje na węzłach kontrolnych krzywej (nie na próbkach po wygładzeniu), więc
+ograniczenia kolizji liczone na wieloboku kontrolnym są zachowawcze: krzywa
+B-Spline leży w convex hull swojego control polygon (de Boor 1978), zatem
+feasibility punktów kontrolnych implikuje feasibility krzywej.
 """
 
 import logging
@@ -13,7 +14,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 from numpy.typing import NDArray
 
-# Pymoo imports
 from pymoo.core.callback import Callback
 from pymoo.core.problem import Problem
 from pymoo.algorithms.moo.nsga3 import NSGA3
@@ -28,8 +28,6 @@ from src.algorithms.abstraction.trajectory.strategies.shared.StraightLineNoiseSa
 from src.algorithms.abstraction.trajectory.strategies.shared.bspline_utils import generate_bspline_batch
 from src.algorithms.abstraction.trajectory.strategies.timing_utils import TimingCollector
 from src.utils.optimization_history_writer import OptimizationHistoryWriter
-
-# Komponenty wewnętrzne
 from src.algorithms.abstraction.trajectory.objective_constrains import VectorizedEvaluator
 from src.algorithms.abstraction.trajectory.strategies.nsga3_utils.decision_maker import (
     DecisionStrategyProtocol, 
@@ -44,13 +42,15 @@ from src.utils.SeedRegistry import SeedRegistry
 logger = logging.getLogger(__name__)
 
 
-# --- Klasa Problemu Pymoo ---
-
 class SwarmOptimizationProblem(Problem):
+    """Problem pymoo dla planowania trajektorii roju.
+
+    Zmienne decyzyjne: węzły kontrolne B-spline `XYZ` per dron per
+    wewnętrzny waypoint, spłaszczone do `n_var = n_drones × n_inner × 3`.
+    5 obiektywów, 3 ograniczenia nierównościowe — definicje w
+    `VectorizedEvaluator`.
     """
-    Definicja problemu optymalizacyjnego (Wersja B-Spline Control Polygon).
-    Zmienne decyzyjne to bezpośrednio węzły kontrolne krzywej B-Spline.
-    """
+
     def __init__(
         self,
         n_drones: int,
@@ -62,19 +62,30 @@ class SwarmOptimizationProblem(Problem):
         min_altitude: float | None = None,
         max_altitude: float | None = None,
     ):
+        """Skonfiguruj wymiar zmiennych i granice klipowania.
+
+        Args:
+            n_drones: Rozmiar roju.
+            n_inner_points: Liczba wewnętrznych węzłów per dron.
+            world_data: Granice świata symulacji (do `xl`/`xu`).
+            evaluator: Współdzielony `VectorizedEvaluator` używany w `_evaluate`.
+            start_pos: `(n_drones, 3)` pozycje startowe — doklejane w `_evaluate`.
+            target_pos: `(n_drones, 3)` pozycje docelowe — doklejane w `_evaluate`.
+            min_altitude: Opcjonalny dolny limit Z [m]; `None` ⇒ wartość
+                wyliczona z endpointów + marginesu nad ziemią.
+            max_altitude: Opcjonalny górny limit Z [m]; `None` ⇒ wartość
+                wyliczona z endpointów + marginesu pod sufitem.
+        """
         self.n_drones = n_drones
         self.n_inner_points = n_inner_points
         self.evaluator = evaluator
 
-        # Przechowujemy Start i Cel do doklejenia w _evaluate
         self.starts = start_pos
         self.targets = target_pos
 
-        # Liczba zmiennych decyzyjnych: N_Drones * Inner_Points * 3 (XYZ)
         n_var = n_drones * n_inner_points * 3
 
-        # Rozszerzamy granice o margines
-        margin = 10.0  # Zmniejszony margines, by punkty kontrolne nie uciekały w nieskończoność
+        margin = 10.0
         xl_one_point = np.array(world_data.min_bounds, dtype=float) - margin
         xu_one_point = np.array(world_data.max_bounds, dtype=float) + margin
 
@@ -97,30 +108,30 @@ class SwarmOptimizationProblem(Problem):
         logger.info(f"[Problem B-Spline] Granice Z: {xl_one_point[2]:.2f} - {xu_one_point[2]:.2f} "
               f"(endpoint Z range: [{min_endpoint_z:.2f}, {max_endpoint_z:.2f}])")
 
-        # Powielamy granice
         xl = np.tile(xl_one_point, n_drones * n_inner_points)
         xu = np.tile(xu_one_point, n_drones * n_inner_points)
 
         super().__init__(n_var=n_var, n_obj=5, n_ieq_constr=3, xl=xl, xu=xu)
 
     def _evaluate(self, x: NDArray, out: Dict[str, Any], *args, **kwargs) -> None:
+        """Hook pymoo: dekoduj `x`, doklej endpointy, deleguj do `VectorizedEvaluator`.
+
+        Args:
+            x: `(pop_size, n_var)` populacja w spłaszczonym formacie pymoo.
+            out: Słownik wyjściowy modyfikowany w miejscu — wypełniany
+                kluczami `"F"` i `"G"` przez `VectorizedEvaluator.evaluate`.
+        """
         pop_size = x.shape[0]
-        
-        # 1. Dekodowanie zmiennych (Inner Control Points)
+
         inner_waypoints = x.reshape(pop_size, self.n_drones, self.n_inner_points, 3)
-        
-        # 2. Doklejanie Startu i Celu (Tworzenie pełnego wieloboku kontrolnego)
+
         starts_bc = np.tile(self.starts[None, :, None, :], (pop_size, 1, 1, 1))
         targets_bc = np.tile(self.targets[None, :, None, :], (pop_size, 1, 1, 1))
-        
-        # Control Polygon: Start -> Inner Nodes -> Target
+
         control_polygon = np.concatenate([starts_bc, inner_waypoints, targets_bc], axis=2)
 
-        # 3. Ewaluacja bezpośrednio na węzłach kontrolnych (Broad-Phase Collision)
         self.evaluator.evaluate(control_polygon, out)
 
-
-# --- Helper: Dynamiczne partycje ---
 
 class _HistoryCallback(Callback):
     """Pymoo callback — loguje stan populacji po każdej generacji.
@@ -144,6 +155,12 @@ class _HistoryCallback(Callback):
         self._gen_t0: float = time.monotonic()
 
     def notify(self, algorithm):
+        """Hook pymoo wywoływany po każdej generacji NSGA-III.
+
+        Args:
+            algorithm: Bieżący stan algorytmu pymoo (`algorithm.pop`,
+                `algorithm.evaluator`).
+        """
         import time
 
         pop = algorithm.pop
@@ -194,9 +211,17 @@ class _HistoryCallback(Callback):
             )
         )
 def calculate_n_partitions(pop_size: int, n_obj: int) -> int:
-    """
-    Wylicza optymalną liczbę partycji (p) dla metody Das-Dennis,
-    aby liczba punktów referencyjnych (H) była jak najbliższa pop_size.
+    """Dobierz liczbę partycji `p` Das-Dennis tak, by `H ≈ pop_size`.
+
+    Wzór: `H = C(n_obj + p - 1, p)`. Funkcja iteruje `p` rosnąco i wybiera
+    wartość minimalizującą `|H - pop_size|`.
+
+    Args:
+        pop_size: Docelowy rozmiar populacji NSGA-III.
+        n_obj: Liczba obiektywów problemu.
+
+    Returns:
+        Najlepsza liczba partycji `p ≥ 1`.
     """
     best_p = 1
     min_diff = float('inf')
@@ -216,23 +241,42 @@ def calculate_n_partitions(pop_size: int, n_obj: int) -> int:
             
     return max(1, best_p)
 
-# --- Główna Funkcja Strategii ---
 
 def nsga3_swarm_strategy(
-    *, 
+    *,
     start_positions: NDArray[np.float64],
     target_positions: NDArray[np.float64],
-    obstacles_data: ObstaclesData, 
-    world_data: WorldData, 
-    number_of_waypoints: int, 
-    drone_swarm_size: int, 
+    obstacles_data: ObstaclesData,
+    world_data: WorldData,
+    number_of_waypoints: int,
+    drone_swarm_size: int,
     algorithm_params: Optional[Dict[str, Any]] = None,
     timing: Optional["TimingCollector"] = None,
     seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
-    
+    """Wygeneruj trajektorię roju algorytmem NSGA-III (Deb & Jain 2014).
 
-    # --- Konfiguracja pomiaru czasu ---
+    Implementacja `TrajectoryStrategyProtocol`. Po znalezieniu frontu
+    Pareto wybiera jedno rozwiązanie strategią `decision_mode`
+    (default `"knee_point"`; alternatywy: `"safety"`, `"equal"`).
+
+    Args:
+        start_positions: `(N, 3)` pozycje startowe dronów [m].
+        target_positions: `(N, 3)` pozycje docelowe dronów [m].
+        obstacles_data: Geometria przeszkód statycznych.
+        world_data: Granice świata symulacji.
+        number_of_waypoints: Docelowa liczba punktów `W` (po B-spline).
+        drone_swarm_size: Rozmiar roju `N`.
+        algorithm_params: Hiperparametry NSGA-III — `pop_size`, `n_gen`,
+            `eta_c`, `eta_m`, `crossover_prob`, `mutation_prob`,
+            `n_inner_waypoints`, `decision_mode`, `noise_std_xy/_z`.
+        timing: Opcjonalny `TimingCollector` dla pomiaru faz.
+        seeds: `SeedRegistry` z subseedami `sampling` i `optimizer`.
+
+    Returns:
+        `(N, W, 3)` wygładzona trajektoria; w razie braku rozwiązań
+        Pareto zwraca trajektorię awaryjną (linia prosta).
+    """
     local_timing = False
     if timing is None:
         try:
@@ -247,8 +291,6 @@ def nsga3_swarm_strategy(
 
     try:
         with _measure("total_optimization"):
-            
-            # 1. Konfiguracja Parametrów
             params = algorithm_params or {}
             pop_size = params.get("pop_size", 100)
             n_gen = params.get("n_gen", 100)
@@ -268,8 +310,7 @@ def nsga3_swarm_strategy(
             # niesprawiedliwe porównanie metaheurystyk i `res.X is None`
             # w pymoo (patrz plan.md, Krok 3).
             termination = get_termination("n_gen", n_gen)
-                        
-            # 2. NSGA-III Setup
+
             n_partitions = calculate_n_partitions(pop_size, n_obj=5)
             ref_dirs = get_reference_directions("das-dennis", 5, n_partitions=n_partitions)
             actual_pop_size = ref_dirs.shape[0]
@@ -282,7 +323,6 @@ def nsga3_swarm_strategy(
 
             logger.info(f"[NSGA-III B-Spline] Start. Pop: {pop_size} (Ref: {actual_pop_size}), Gen: {n_gen}, Control Pts: {n_inner}")
 
-            # 3. Inicjalizacja
             with _measure("initialization"):
                 evaluator = VectorizedEvaluator(
                     obstacles=obstacles_data,
@@ -327,8 +367,7 @@ def nsga3_swarm_strategy(
                     mutation=PM(eta=eta_m, prob=mutation_prob),
                     eliminate_duplicates=True
                 )
-            
-            # 4. Optymalizacja
+
             with _measure("optimization"):
                 callback = _HistoryCallback(writer, problem=problem)
                 try:
@@ -346,7 +385,6 @@ def nsga3_swarm_strategy(
                 finally:
                     writer.close()
 
-            # 5. Wybór rozwiązania i wygładzanie
             if res.X is not None and len(res.X) > 0:
                 with _measure("decision_and_reconstruction"):
                     dm: DecisionStrategyProtocol
@@ -360,14 +398,11 @@ def nsga3_swarm_strategy(
                         
                         best_idx = dm.select_best(res.F, res.G)
                         best_genotype_flat = res.X[best_idx]
-                        
-                        # Rekonstrukcja wieloboku kontrolnego
+
                         inner = best_genotype_flat.reshape(1, drone_swarm_size, n_inner, 3)
                         s = start_positions[None, :, None, :]
                         t = target_positions[None, :, None, :]
                         best_control_points = np.concatenate([s, inner, t], axis=2)
-                        # --- B-SPLINE RECONSTRUCTION ---
-                        # Przekształcenie węzłów kontrolnych w ciągłą i gładką trajektorię
                         final_traj = generate_bspline_batch(best_control_points, num_samples=number_of_waypoints)
                         
                         logger.info(f"[NSGA-III] Wybrano rozwiązanie indeks: {best_idx}")

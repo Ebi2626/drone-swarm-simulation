@@ -1,4 +1,4 @@
-"""Buduje reference Pareto sets cross-run (Faza 3 plan.md).
+"""Buduje reference Pareto sets cross-run dla porównania algorytmów MOO.
 
 W absencji prawdziwego "true Pareto front" (typowo używanego w benchmarkach
 ZDT/DTLZ z znaną postacią analityczną) standard literaturowy dla problemów
@@ -26,20 +26,25 @@ logger = logging.getLogger(__name__)
 
 
 # Margin ε w `r* = nadir + ε · (nadir − ideal)` (Ishibuchi 2018, Eq. 4).
-# ε=0.1 to środek zalecanego pasma [0.05, 0.2]; dla 5-obj w forest/urban
-# objective space jest dobrze unormowany przez nasze ograniczenia, więc
-# margines 10% wystarcza by każde feasible rozwiązanie było zdominowane
-# przez r* (warunek konieczny żeby HV było > 0).
-DEFAULT_REF_POINT_MARGIN = 0.1
+# Wartość 0.5 zgodna z zaleceniem Ishibuchi 2018 §4 dla benchmarków z
+# wąskimi front'ami (ε ∈ [0.5, 1.0]) — niższe ε powoduje że front'y leżą
+# całkowicie poza r*-box i HV degeneruje do 0.
+DEFAULT_REF_POINT_MARGIN = 0.5
 
 
 def build_reference_pareto_sets(conn: sqlite3.Connection, experiment_dir: Path) -> dict[tuple[str, int], np.ndarray]:
-    """Buduje reference set R per (environment, n_obj) z last-gen feasible-ND
-    fronts wszystkich runów. Wpisuje R do `reference_pareto_sets` ORAZ
-    reference point r* do `reference_points`.
+    """Zbuduj merged ND reference set R per `(environment, n_obj)` z last-gen wszystkich runów.
+
+    Wpisuje R do `reference_pareto_sets` i reference point `r*` do
+    `reference_points` (idempotentnie — usuwa stare wiersze przed wstawieniem).
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        experiment_dir: Katalog eksperymentu (parametr zachowany dla zgodności
+            sygnatury — ścieżki h5 odczytywane są z `runs.source_path`).
 
     Returns:
-        dict[(env, n_obj) -> R: ndarray (|R|, n_obj)] dla wygody backfill'u.
+        Mapa `(env, n_obj) → R (|R|, n_obj)` ułatwiająca dalszy backfill.
     """
     runs = conn.execute(
         "SELECT run_id, source_path, environment FROM runs ORDER BY environment, run_id"
@@ -127,7 +132,7 @@ def build_reference_pareto_sets(conn: sqlite3.Connection, experiment_dir: Path) 
 def load_reference_set(
     conn: sqlite3.Connection, environment: str, n_obj: int
 ) -> Optional[np.ndarray]:
-    """Wczytuje R z DB. Zwraca None jeśli brak."""
+    """Wczytaj `R (|R|, n_obj)` z `reference_pareto_sets`; `None`, gdy brak."""
     rows = conn.execute(
         """
         SELECT point_idx, objective_j, value
@@ -150,7 +155,7 @@ def load_reference_set(
 def load_reference_point(
     conn: sqlite3.Connection, environment: str, n_obj: int
 ) -> Optional[np.ndarray]:
-    """Wczytuje r* (nadir+ε·range) z DB. Zwraca None gdy brak."""
+    """Wczytaj `r*` (nadir + ε·range) z `reference_points`; `None`, gdy brak."""
     rows = conn.execute(
         """
         SELECT objective_j, value FROM reference_points
@@ -170,8 +175,7 @@ def load_reference_point(
 def load_ideal_point(
     conn: sqlite3.Connection, environment: str, n_obj: int
 ) -> Optional[np.ndarray]:
-    """Wczytuje z* = min(R, axis=0) z `reference_points.ideal_value`. Zwraca
-    None gdy brak (np. backfill z legacy DB bez tej kolumny)."""
+    """Wczytaj `z* = min(R, axis=0)` z `reference_points.ideal_value`; `None`, gdy brak."""
     rows = conn.execute(
         """
         SELECT objective_j, ideal_value FROM reference_points
@@ -194,9 +198,17 @@ def backfill_moo_quality_with_reference(
     conn: sqlite3.Connection,
     reference_sets: dict[tuple[str, int], np.ndarray],
 ) -> None:
-    """Re-liczy GD/IGD+/HV per generacja dla każdego runu i UPDATE'uje
-    `iteration_metrics`. Następnie odświeża `run_metrics.gd_final`,
-    `run_metrics.igd_plus`, `run_metrics.hypervolume` z last-gen.
+    """Przelicz GD / IGD+ / HV per generacja względem `reference_sets` i odśwież agregaty.
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        reference_sets: Mapa `(env, n_obj) → R` (zwykle z
+            `build_reference_pareto_sets`).
+
+    Efekty uboczne:
+        UPDATE w `iteration_metrics` (per-gen) oraz w `run_metrics`
+        (`gd_final`, `igd_plus`, `hypervolume`, `hypervolume_normalized`)
+        z wartości last-gen.
 
     HV liczone z reference_point r* załadowanego z `reference_points`
     (Ishibuchi 2018). Jeśli r* nie istnieje dla danego (env, n_obj), HV
@@ -233,13 +245,11 @@ def backfill_moo_quality_with_reference(
             compute_baseline_metrics=False,
         )
 
-    # Re-trigger iteration_metrics + run_metrics dla wszystkich runów,
-    # żeby pochwycić nowe GD/IGD+/HV. Po refaktorze 2026-05-08:
-    # `populate_run_metrics` NIE odnosi się do `final_objective`/`total_threat_cost`/
-    # `total_turn_penalty` (domena `populate_offline_objectives`), więc re-run
-    # tej funkcji jest bezpieczny — nie wymazuje F-vector z poprzedniego cyklu.
-    # `populate_offline_objectives` jest tu wywoływany ponownie żeby gwarantować
-    # poprawne wartości po backfill (defensive idempotent re-write).
+    # Re-trigger iteration_metrics + run_metrics dla wszystkich runów, żeby
+    # pochwycić nowe GD/IGD+/HV. `populate_run_metrics` NIE pisze do kolumn
+    # F-vector (domena `populate_offline_objectives`), więc re-run jest
+    # bezpieczny — nie wymazuje F z poprzedniego cyklu. `populate_offline_objectives`
+    # wołany ponownie jako defensive idempotent re-write.
     from src.analysis.db.populate_iteration_metrics import populate_iteration_metrics
     from src.analysis.db.populate_run_metrics import populate_run_metrics
     from src.analysis.db.populate_offline_objectives import populate_offline_objectives
@@ -255,12 +265,8 @@ def backfill_moo_quality_with_reference(
             populate_offline_objectives(conn, run_id, h5_path_run)
 
 
-# ---------------------------------------------------------------------------
-# Helpery
-# ---------------------------------------------------------------------------
-
-
 def _peek_n_obj(h5_path: Path) -> Optional[int]:
+    """Zwróć `n_obj` (liczbę kolumn `objectives_matrix`) z h5; `None` przy braku/błędzie."""
     try:
         import h5py
     except ImportError:  # pragma: no cover
@@ -278,6 +284,7 @@ def _peek_n_obj(h5_path: Path) -> Optional[int]:
 
 
 def _last_gen_feasible_front(h5_path: Path) -> Optional[np.ndarray]:
+    """Zwróć ND-front feasible rozwiązań z ostatniej generacji w `h5_path`; `None` przy braku."""
     """Zwraca feasible non-dominated front z last gen lub None."""
     try:
         import h5py
@@ -328,6 +335,7 @@ def _last_gen_feasible_front(h5_path: Path) -> Optional[np.ndarray]:
 
 
 def _non_dominated(F: np.ndarray) -> np.ndarray:
+    """Zwróć podzbiór `F` zawierający rozwiązania niezdominowane (`O(n²)`)."""
     """Pareto-front (rows of F nie zdominowane przez żadny inny row).
 
     Preferuje `pymoo.util.nds.non_dominated_sorting.NonDominatedSorting`

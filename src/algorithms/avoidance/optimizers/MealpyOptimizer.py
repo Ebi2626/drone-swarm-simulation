@@ -1,4 +1,4 @@
-"""IPathOptimizer wrapper na mealpy (SSA, OOA, …) — Faza 2.
+"""IPathOptimizer wrapper na mealpy (SSA, OOA, …) dla online avoidance.
 
 Wykorzystuje natywną terminację czasową mealpy (`termination={"max_time": s}`),
 zamiast cooperative `budget.check_or_raise()` — mealpy honoruje to
@@ -104,7 +104,7 @@ class MealpyOptimizer(IPathOptimizer):
     def __init__(
         self,
         algorithm_factory: Callable[..., Any],
-        n_inner_waypoints: int = 5,  # Re-deklaracja dla spójności z BSplineYZGenes
+        n_inner_waypoints: int = 5,
         epoch: int = 10,
         pop_size: int = 20,
         min_compute_time_s: float = 0.05,
@@ -197,11 +197,10 @@ class MealpyOptimizer(IPathOptimizer):
             best_x = np.asarray(best_agent.solution, dtype=np.float64)
             best_fitness = float(best_agent.target.fitness)
 
-            # Filtr sentinel-cost (regression fix 2026-05-02): jeśli best_fitness
-            # przekroczył próg sentinel (1e9 × min waga), to znaczy że WSZYSTKIE
-            # candidates w populacji były infeasible — `decode_genes` na nich
-            # wracał None i fitness leciał na sentinel. Zwracamy `no_feasible`
-            # żeby drone wiedział że NIE znaleźliśmy planu (kontynuacja TRACKING).
+            # Filtr sentinel-cost: jeśli best_fitness przekroczył próg sentinel
+            # (1e9 × min waga), wszystkie candidates w populacji były infeasible
+            # (`decode_genes` zwracało None → sentinel fitness). Zwracamy
+            # `no_feasible` żeby drone wiedział że plan nie istnieje (TRACKING).
             SENTINEL_THRESHOLD = 1e8
             if best_fitness > SENTINEL_THRESHOLD:
                 return OptimizationResult(
@@ -232,16 +231,15 @@ class MealpyOptimizer(IPathOptimizer):
                     extra={"reason": "best_decode_returned_none"},
                 )
 
-            # Common-contract `extra` dict (Krok 4 fairness 2026-05-03):
-            # `evaluations_completed`, `generations_completed`, `best_fitness`,
-            # `wallclock_s`, `algorithm`, `reason` muszą być w każdym
-            # `OptimizationResult.extra` z 4 optymalizatorów.
+            # Common-contract `extra` dict: `evaluations_completed`,
+            # `generations_completed`, `best_fitness`, `wallclock_s`,
+            # `algorithm`, `reason` MUSZĄ być w każdym `OptimizationResult.extra`
+            # ze wszystkich 4 optymalizatorów online (porównywalność per-trigger).
             elapsed = time.perf_counter() - t_start
 
-            # Convergence trace (Krok 3.3b plan.md): mealpy zachowuje best-so-far
-            # per generację w `algo.history.list_global_best_fit`. Jest to lista
-            # `mealpy.utils.target.Target` lub bezpośrednio float'ów — robust
-            # extraction (Target.fitness lub plain float).
+            # Convergence trace: mealpy zachowuje best-so-far per generację
+            # w `algo.history.list_global_best_fit` jako listę `Target` lub
+            # plain floatów — robust extraction obsługuje obie postacie.
             trace_raw = getattr(algo.history, "list_global_best_fit", []) or []
             convergence_trace: list[float] = []
             for entry in trace_raw:

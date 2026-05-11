@@ -56,7 +56,13 @@ optimizer:
   max_generations: 10000           # effectively unreachable; budget.check_or_raise() binds
   coe1: 0.8                        # waga lidera w cross-swarm crossover (Eq. 14, paper Shi 2020)
   coe2: 0.2                        # waga własnej pozycji; coe1 + coe2 == 1 (paper Sec. 1)
-  threshold_ratio: 0.5             # threshold_dynamic = initial_fit · ratio (separator faz globalnej/lokalnej)
+  threshold_ratio: 0.5             # adaptive: threshold = best_feasible × (1 + ratio).
+                                   # Slack 50% nad best → podroje w obrębie 50%
+                                   # od best wpadają w LOCAL (refinement); dalsze
+                                   # zostają w GLOBAL (eksploracja). Ratio 0.5
+                                   # jest liberalny — większość podrojów zwykle
+                                   # w LOCAL (sensowne dla online z tight budget).
+                                   # Stricter (np. 0.1) zwiększyłby dywersyfikację.
   step_global_frac: 0.10           # 10% zakresu genów na krok eksploracji globalnej (Eq. 7)
   step_local_frac: 0.03            # 3% zakresu genów na krok eksploitacji lokalnej (Eq. 8)
   min_compute_time_s: 0.05         # poniżej tego budżetu zwracamy timed_out od razu

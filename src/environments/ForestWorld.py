@@ -7,6 +7,8 @@ from src.environments.abstraction.generate_world_boundaries import WorldData
 from src.utils.config_parser import sanitize_init_params
 
 class ForestWorld(SwarmBaseWorld):
+    """Środowisko leśne — przeszkody to walce (drzewa) generowane z `obstacles_data`."""
+
     def __init__(
         self,
         world_data: WorldData,
@@ -41,26 +43,22 @@ class ForestWorld(SwarmBaseWorld):
             **kwargs
         )
 
-    # ------------------------------------------------------------------ #
-    # Implementacja rysowania przeszkód (drzew)                          #
-    # ------------------------------------------------------------------ #
     def draw_obstacles(self):
+        """Wystaw wszystkie drzewa (walce) w PyBullet zgodnie z `obstacles.data`."""
         print("[DEBUG]: Drawing obstacles")
-        self._create_forrest(self.obstacles.data) 
-
-    # ------------------------------------------------------------------ #
-    # Geometria przeszkód (bez zmian)                                    #
-    # ------------------------------------------------------------------ #
+        self._create_forrest(self.obstacles.data)
 
     def _create_forrest(self, obstacles: np.ndarray):
+        """Iteruj po wierszach `obstacles` i wystaw `_create_tree` dla każdego."""
         for i in range(obstacles.shape[0]):
             self._create_tree(obstacles[i, :])
 
     def _create_tree(self, obstacle: np.ndarray):
+        """Wystaw pojedynczy walec PyBullet z parametrów `(x, y, z, radius, height)`."""
         x, y, z = obstacle[0], obstacle[1], obstacle[2]
         radius, height = obstacle[3], obstacle[4]
-        color = [0.5, 0.8, 0.3, 1.0]  # Zielony kolor dla drzewa
-                
+        color = [0.5, 0.8, 0.3, 1.0]
+
         base_z = z + height / 2
 
         collision_shape = p.createCollisionShape(

@@ -1,3 +1,9 @@
+"""Dwuwarstwowy budżet czasu dla optymalizatorów online avoidance.
+
+`TimeBudget` to kooperacyjny limit (optymalizator dobrowolnie sprawdza
+`check_or_raise()`); `hard_deadline` jest zewnętrznym wyłącznikiem opartym
+o `SIGALRM` na wypadek, gdy kooperacja zawiedzie.
+"""
 from __future__ import annotations
 
 import logging
@@ -11,17 +17,19 @@ logger = logging.getLogger(__name__)
 
 
 class BudgetExceeded(Exception):
-    """Cooperative budget exhaustion — raised by `TimeBudget.check_or_raise`.
+    """Wyjątek wyrzucany przez `TimeBudget.check_or_raise` po przekroczeniu limitu.
 
-    Optimizers powinny tę wyjątek łapać u góry własnego `optimize()` i zwracać
+    Optymalizatory powinny łapać go u góry `optimize()` i zwracać
     `OptimizationResult(status="timed_out", waypoints=None | best_so_far)`.
     """
 
 
 class HardDeadlineExceeded(Exception):
-    """Outer SIGALRM circuit breaker — bezpieczeństwo na wypadek gdy cooperative
-    check zawiedzie (bug w optimizerze, deadlock w native code, mealpy ignoruje
-    `max_time` itd.). Nigdy nie powinno się zdarzyć w normalnym przebiegu.
+    """Wyjątek z handlera `SIGALRM` w `hard_deadline` — twardy wyłącznik czasowy.
+
+    Sygnał, że limit kooperacyjny zawiódł (bug w optymalizatorze, deadlock
+    w kodzie natywnym, biblioteka ignoruje `max_time`). Normalny przebieg
+    nigdy nie powinien tu trafić.
     """
 
 
@@ -29,16 +37,15 @@ class HardDeadlineExceeded(Exception):
 class TimeBudget:
     """Kooperacyjny budżet czasu dla iteracyjnych optymalizatorów.
 
-    Kontrakt:
-      - `optimize()` woła `budget.check_or_raise()` co N iteracji (granularność
-        zdefiniowana w configu — `budget_check_every_n_nodes` dla AStara, natywne
-        `max_time` dla mealpy).
-      - Sprawdzenie kosztuje ~50 ns (jeden odczyt `perf_counter` + odejmowanie),
-        więc można dorzucić bez obawy o hot-loop.
+    Optymalizator wywołuje `check_or_raise()` co N iteracji (granularność
+    zdefiniowana w jego konfiguracji). Pojedyncze sprawdzenie kosztuje
+    ~50 ns, można je wstawiać w hot-loopie bez wpływu na wydajność.
+    Twardy sufit czasowy zapewnia `hard_deadline()` (SIGALRM) na poziomie
+    `GenericOptimizingAvoidance`.
 
-    Ten obiekt jest *kooperacyjny* — wymaga współpracy optymalizatora. Twardy
-    sufit gwarantujący przerwanie w razie buga zapewnia `hard_deadline()`
-    (SIGALRM) na poziomie wrappera `GenericOptimizingAvoidance`.
+    Pola:
+        max_seconds: Limit czasu od `start` [s].
+        start: Znacznik startu (`time.perf_counter()`).
     """
 
     max_seconds: float
@@ -46,20 +53,29 @@ class TimeBudget:
 
     @classmethod
     def start_now(cls, max_seconds: float) -> "TimeBudget":
+        """Utwórz budżet zaczynający odliczanie od chwili wywołania.
+
+        Args:
+            max_seconds: Limit czasu [s].
+        """
         return cls(max_seconds=float(max_seconds), start=time.perf_counter())
 
     @property
     def elapsed(self) -> float:
+        """Czas wallclock od `start` [s]."""
         return time.perf_counter() - self.start
 
     @property
     def remaining(self) -> float:
+        """Pozostały budżet [s]; może być ujemny po przekroczeniu limitu."""
         return self.max_seconds - self.elapsed
 
     def exceeded(self) -> bool:
+        """`True` gdy `elapsed ≥ max_seconds`."""
         return self.elapsed >= self.max_seconds
 
     def check_or_raise(self) -> None:
+        """Wyrzuć `BudgetExceeded`, jeśli budżet jest wyczerpany."""
         if self.elapsed >= self.max_seconds:
             raise BudgetExceeded(
                 f"Cooperative budget {self.max_seconds:.3f}s exceeded "
@@ -69,29 +85,31 @@ class TimeBudget:
 
 @contextmanager
 def hard_deadline(seconds: float):
-    """Outer circuit breaker oparty o `SIGALRM`.
+    """Twardy wyłącznik czasowy oparty o `SIGALRM` (zewnętrzna warstwa budżetu).
 
-    Kontrakt:
-      - Ustawia `setitimer(ITIMER_REAL, seconds)` w momencie wejścia w blok.
-      - Po przekroczeniu czasu sygnał odpala handler → `HardDeadlineExceeded`.
-      - Po wyjściu z bloku timer kasowany (`setitimer(ITIMER_REAL, 0)`),
-        oryginalny handler `SIGALRM` przywracany — bezpieczne zagnieżdżanie.
+    Po przekroczeniu `seconds` handler sygnału wyrzuca `HardDeadlineExceeded`.
+    Timer jest kasowany po wyjściu z bloku, oryginalny handler `SIGALRM`
+    przywracany — bezpieczne zagnieżdżanie.
+
+    Args:
+        seconds: Limit czasu [s]; `≤ 0` ⇒ blok bez ograniczenia.
 
     Ograniczenia:
-      - SIGALRM działa tylko w **main-thread procesu**. W naszej topologii
-        (subprocess wrapper z Kroku 5c) avoidance leci w main-thread workera,
-        więc OK. Per-proces — 6 workerów ma 6 niezależnych alarmów, brak
-        crosstalk.
-      - Long-running native code (numba @njit bez powrotu do Pythona) opóźnia
-        odpalenie sygnału aż do powrotu do interpretera. Nasze kernele są
-        single-step (μs), więc w praktyce nie problem.
-      - `seconds <= 0` lub brak `signal.SIGALRM` (Windows) → no-op, blok wykonuje
-        się bez ograniczenia. Logujemy WARNING raz (na pierwsze takie wywołanie).
+        - `SIGALRM` działa tylko w wątku głównym procesu (akceptowalne, bo
+          unik leci w wątku głównym workera).
+        - Długo wykonujący się kod natywny (numba `@njit` bez powrotu do
+          interpretera) opóźni odpalenie sygnału do powrotu z natywki.
+        - Brak `SIGALRM`/`setitimer` (Windows) ⇒ blok wykonuje się bez
+          ograniczenia; ostrzeżenie logowane raz.
 
-    Użycie::
+    Raises:
+        HardDeadlineExceeded: Po przekroczeniu czasu wewnątrz bloku.
 
+    Przykład:
+        ```python
         with hard_deadline(1.5):
             result = optimizer.optimize(problem, budget=TimeBudget.start_now(1.0))
+        ```
     """
     if seconds <= 0.0:
         yield

@@ -6,6 +6,8 @@ from src.trajectory.ConstantSpeedProfile import ConstantSpeedProfile
 from src.trajectory.CruiseDecelProfile import CruiseDecelProfile
 
 class BSplineTrajectory:
+    """B-Spline cubic interpolacja waypointów + profil prędkości (trapezoid / constant / cruise+decel)."""
+
     def __init__(
         self,
         waypoints: np.ndarray,
@@ -14,22 +16,20 @@ class BSplineTrajectory:
         constant_speed: bool = False,
         decel_at_end: bool = False,
     ):
-        """
-        Inicjalizuje trajektorię B-Spline na podstawie punktów zoptymalizowanych przez NSGA-III
-        lub punktów z lokalnego planera A*.
+        """Zbuduj `BSplineTrajectory` z waypointów i wybierz profil prędkości.
 
-        :param waypoints: Tablica numpy o wymiarach (N, 3) zawierająca punkty trasy.
-        :param cruise_speed: Maksymalna (przelotowa) prędkość drona [m/s].
-        :param max_accel: Maksymalne dopuszczalne przyspieszenie drona [m/s^2].
-        :param constant_speed: Jeśli True, używa profilu bez fazy przyspieszania
-            (drone wchodzi w trajektorię z v ≈ cruise_speed). Stosowane dla
-            lokalnych manewrów uniku — trapezoidalny profil z v(0)=0 powodowałby
-            gwałtowne hamowanie na starcie.
-        :param decel_at_end: Modyfikator do `constant_speed=True` — gdy True,
-            używa `CruiseDecelProfile` (cruise + faza hamowania do v=0 na końcu)
-            zamiast `ConstantSpeedProfile` (stała vel + nieciągły step v→0).
-            Ramp hamowania eliminuje skok |a|(t) na rejoin pointcie (Bug #2,
-            plan.md). Ignorowane gdy `constant_speed=False`.
+        Args:
+            waypoints: `(N, 3)` punkty trasy.
+            cruise_speed: Prędkość przelotowa [m/s].
+            max_accel: Maks. dopuszczalne przyspieszenie [m/s²].
+            constant_speed: `True` ⇒ profil bez fazy rampy startowej (online evasion).
+            decel_at_end: Modyfikator do `constant_speed=True` — `True` ⇒
+                `CruiseDecelProfile` (rampa hamowania na końcu); `False` ⇒
+                `ConstantSpeedProfile` (skok `v → 0` na końcu).
+
+        Efekty uboczne:
+            Buduje `tck` (splprep), liczy `arc_length`, `total_duration`
+            i ewentualnie `kinematic_clamp` z bezpiecznym profilem.
         """
         self.waypoints = waypoints
         # Ekspozycja parametrów dla downstream (np. `WeightedSumFitness._curvature_cost`
@@ -51,7 +51,7 @@ class BSplineTrajectory:
         self.arc_length = self._calculate_arc_length()
 
         if constant_speed and decel_at_end:
-            # Kinematic safety (Bug #2 plan, Krok 5): klamruje cruise_speed do
+            # Kinematic safety: klamruje cruise_speed do
             # `sqrt(0.5 · max_accel / κ_max)` żeby na cruise lateral_accel = v²·κ
             # ≤ 0.5·max_accel; dec rate dostosowany żeby total ≤ max_accel.
             safe_cruise, safe_decel = self._kinematic_safe_profile_params(
@@ -90,21 +90,22 @@ class BSplineTrajectory:
         curvature_safety_factor: float = 0.5,
         n_samples: int = 100,
     ) -> tuple[float, float]:
-        """Zwraca (safe_cruise, effective_decel) zachowujące |a_total| ≤ max_accel.
+        """Zwróć `(safe_cruise, effective_decel)` zachowujące `|a_total| ≤ max_accel`.
 
-        Krzywizna 3D: κ = ‖r' × r''‖ / ‖r'‖³ (niezależna od parametryzacji).
-        Akceleracja na krzywej dla v(t):
-            a_lateral = v² · κ (centripetal)
-            a_longitudinal = v' (tangencjalna, fixed przez profil)
-            |a_total| = sqrt(a_lat² + a_long²) ≤ max_accel
+        Budżetuje `curvature_safety_factor × max_accel` na lateral acc
+        (`v² · κ_max`); resztę przeznacza na hamowanie longitudinalne.
 
-        Strategia: budżetujemy `S = curvature_safety_factor` na lateral.
-            v_safe² · κ_max ≤ S · max_accel  ⇒  v_safe = sqrt(S · max_accel / κ_max)
-            actual_lateral = final_cruise² · κ_max (≤ S · max_accel)
-            effective_decel = sqrt(max_accel² - actual_lateral²)
+        Args:
+            tck: `tck` z `splprep`.
+            requested_cruise: Żądana prędkość przelotowa [m/s].
+            max_accel: Maks. dopuszczalna akceleracja [m/s²].
+            curvature_safety_factor: Ułamek `max_accel` zarezerwowany
+                na centripetal acc (`(0, 1]`).
+            n_samples: Liczba próbek `u ∈ [0.05, 0.95]` do estymacji `κ_max`.
 
-        Gdy `requested_cruise` < `v_safe` (krzywa wystarczająco prosta), nie
-        klamrujemy — w `effective_decel` używamy actual_lateral z requested_cruise.
+        Returns:
+            `(safe_cruise, effective_decel)`; gdy krzywa jest praktycznie
+            prosta (`κ_max → 0`), zwraca `(requested_cruise, max_accel)`.
         """
         if tck is None:
             return float(requested_cruise), float(max_accel)
@@ -129,10 +130,7 @@ class BSplineTrajectory:
         return final_cruise, effective_decel
 
     def _calculate_arc_length(self, num_samples: int = 1000) -> float:
-        """
-        Oblicza całkowitą długość krzywej B-Spline poprzez całkowanie numeryczne
-        (sumę odległości euklidesowych między gęsto próbkowanymi punktami).
-        """
+        """Wylicz długość krzywej B-Spline jako sumę dystansów `num_samples` próbek."""
         u_samples = np.linspace(0, 1.0, num_samples)
         
         # splev dla tablicy 'u' zwraca listę [tablica_x, tablica_y, tablica_z]
@@ -146,12 +144,14 @@ class BSplineTrajectory:
         return float(np.sum(np.linalg.norm(diffs, axis=1)))
 
     def get_state_at_time(self, t_flight: float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Pobiera docelową pozycję i wektor prędkości dla danego czasu lotu.
-        Wykorzystywane bezpośrednio przez kontroler PID w każdym kroku symulacji.
-        
-        :param t_flight: Aktualny czas trwania misji (po odjęciu czasu hover).
-        :return: Tuple (target_pos, target_vel) jako wektory numpy (3,).
+        """Zwróć `(target_pos, target_vel)` dla zadanego `t_flight` (po odjęciu hover).
+
+        Args:
+            t_flight: Czas lotu od startu trajektorii [s].
+
+        Returns:
+            Krotka `(pos (3,), vel (3,))`. Po osiągnięciu końca trasy
+            `vel = 0`.
         """
         # 1. Pobierz przebyty dystans i aktualną skalarną prędkość z profilu trapezowego
         current_distance, current_speed = self.profile.get_state(t_flight)
@@ -184,9 +184,17 @@ class BSplineTrajectory:
         return pos, target_vel
     
     def get_state_at_distance(self, distance: float, target_speed: float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Pobiera docelową pozycję i wektor prędkości na podstawie przebytej drogi (s).
-        Umożliwia śledzenie ścieżki (Path Following) z pominięciem profilu czasu.
+        """Zwróć `(target_pos, target_vel)` po przebytej drodze `distance` [m].
+
+        Path-Following bez profilu czasowego — używa `target_speed` jako
+        skalarnej prędkości. `vel = 0` po dotarciu na koniec trasy.
+
+        Args:
+            distance: Przebyta droga [m].
+            target_speed: Zadana prędkość skalarne [m/s].
+
+        Returns:
+            Krotka `(pos (3,), vel (3,))`.
         """
         if self.arc_length <= 1e-6:
             u = 1.0

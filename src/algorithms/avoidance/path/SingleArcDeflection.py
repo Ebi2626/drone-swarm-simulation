@@ -1,12 +1,11 @@
-"""SingleArcDeflection — minimal-DOF path representation dla evolutionary avoidance.
+"""SingleArcDeflection — minimal-DOF path representation dla evolutionary
+avoidance. Geometryczne wymuszenie single-hump shape: drone wybiera JEDNĄ oś
+(przez `AxisChooser`), JEDEN punkt peak deflection (gen `magnitude`), JEDNĄ
+pozycję wzdłuż trasy (gen `peak_position`). Zigzag, multi-bend, kombinacje
+Y+Z są **niemożliwe geometrycznie**.
 
-Refactor 2026-05-02 (zastępuje `BSplineYZGenes`). Geometryczne wymuszenie
-single-hump shape: drone wybiera JEDNĄ oś (przez `AxisChooser`), JEDEN punkt
-peak deflection (gen `magnitude`), JEDNĄ pozycję wzdłuż trasy (gen `peak_position`).
-Zigzag, multi-bend, kombinacje Y+Z są **niemożliwe geometrycznie**.
-
-Search space: gene_dim = 2 (zamiast 10 z BSplineYZGenes):
-    magnitude     ∈ [magnitude_min_m, magnitude_max_m]   [m]
+Search space: gene_dim = 2:
+    magnitude     ∈ [magnitude_min_m, magnitude_max_m]    [m]
     peak_position ∈ [peak_position_min, peak_position_max] [u along start→rejoin]
 
 Mapowanie genów → spline (5 waypoints):
@@ -14,16 +13,15 @@ Mapowanie genów → spline (5 waypoints):
     2. start  = context.drone_state.position
     3. rejoin = context.rejoin_point
     4. peak   = lerp(start, rejoin, peak_position) + magnitude × axis_unit
-    5. q1     = lerp(start, peak, 0.5)   ← pomocnicze
-    6. q3     = lerp(peak, rejoin, 0.5)  ← pomocnicze
-    7. waypoints = [start, q1, peak, q3, rejoin]   (5 pkt — wystarczy dla cubic spline)
-    8. floor/ceiling clamp na peak.z
-    9. BSplineTrajectory(constant_speed=True, decel_at_end=True)
-   10. min_applied_cruise_ratio filter (regression fix 2026-05-01)
+    5. q1, q3 = punkty pomocnicze przez lerp 0.5 między [start, peak] / [peak, rejoin]
+    6. waypoints = [start, q1, peak, q3, rejoin]
+    7. floor/ceiling clamp na peak.z
+    8. BSplineTrajectory(constant_speed=True, decel_at_end=True)
+    9. min_applied_cruise_ratio filter (drop severely clamped splines)
 
-Reference: similar prioritized-axis decomposition w klasycznych collision
-avoidance papers (Fiorini-Shiller VO 1998), z analytical trajectory shape
-zamiast full optimization (Mehdi et al. 2017 "Reactive Avoidance for UAVs").
+Reference: prioritized-axis decomposition w klasycznych collision avoidance
+papers (Fiorini-Shiller VO 1998), z analytical trajectory shape zamiast
+full optimization (Mehdi et al. 2017 "Reactive Avoidance for UAVs").
 """
 from __future__ import annotations
 
@@ -63,6 +61,27 @@ class SingleArcDeflection(IPathRepresentation):
         ceiling_safe_margin_m: float = 1.0,
         min_applied_cruise_ratio: float = 0.4,
     ) -> None:
+        """Skonfiguruj zakresy genów, marginesy i filtr wykonalności kinematycznej.
+
+        Args:
+            axis_chooser: Strategia wyboru osi uniku (wstrzykiwana przez Hydra).
+            magnitude_min_m, magnitude_max_m: Zakres genu `magnitude` —
+                amplituda peak deflection [m].
+            peak_position_min, peak_position_max: Zakres genu
+                `peak_position` — położenie szczytu na odcinku
+                `start → rejoin`, w `[0, 1]`.
+            evasion_speed_multiplier: Mnożnik prędkości przelotowej
+                w fazie uniku.
+            floor_safe_margin_m, ceiling_safe_margin_m: Marginesy
+                bezpieczeństwa nad podłogą / pod sufitem [m].
+            min_applied_cruise_ratio: Minimalny stosunek `applied/requested`
+                cruise; spliny po kinematic clampingu poniżej tego progu
+                są odrzucane.
+
+        Raises:
+            ValueError: Gdy zakresy genów są niemonotoniczne / poza
+                dopuszczalnym przedziałem albo marginesy są ujemne.
+        """
         if magnitude_min_m <= 0 or magnitude_max_m <= magnitude_min_m:
             raise ValueError(
                 f"magnitude bounds invalid: min={magnitude_min_m}, max={magnitude_max_m}"
@@ -87,15 +106,15 @@ class SingleArcDeflection(IPathRepresentation):
         self.ceiling_safe_margin = float(ceiling_safe_margin_m)
         self.min_applied_cruise_ratio = float(min_applied_cruise_ratio)
 
-    # ---------------------- Evolutionary contract ---------------------- #
-
     def gene_dim(self, context: "EvasionContext") -> int:
+        """Wymiar genu dla `SingleArcDeflection` — zawsze 2."""
         return 2
 
     def gene_bounds(
         self,
         context: "EvasionContext",
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Zwróć granice `(lb, ub)` `(2,)` dla `magnitude` i `peak_position`."""
         lb = np.array(
             [self.magnitude_min, self.peak_position_min], dtype=np.float64
         )
@@ -109,6 +128,17 @@ class SingleArcDeflection(IPathRepresentation):
         genes: NDArray[np.float64],
         context: "EvasionContext",
     ) -> BSplineTrajectory | None:
+        """Zdekoduj geny `(2,)` na 5-waypointowy `BSplineTrajectory`.
+
+        Args:
+            genes: `(magnitude, peak_position)` — clipowane do skonfigurowanych
+                zakresów.
+            context: `EvasionContext` z aktualnym stanem drona i punktem powrotu.
+
+        Returns:
+            Gładki spline manewru lub `None`, gdy budowa się nie udała
+            (zdegenerowany splajn, zbyt agresywny clamping kinematyczny).
+        """
         if len(genes) != 2:
             logger.error(
                 f"SingleArcDeflection.decode_genes: expected 2 genes, got {len(genes)}"
@@ -141,8 +171,6 @@ class SingleArcDeflection(IPathRepresentation):
 
         return self._build_spline(waypoints, context)
 
-    # ------------------- A*-style contract (legacy) ------------------- #
-
     def waypoints_to_spline(
         self,
         waypoints: NDArray[np.float64],
@@ -150,9 +178,22 @@ class SingleArcDeflection(IPathRepresentation):
         *,
         axis_name: str | None = None,
     ) -> BSplineTrajectory | None:
-        """Thin BSpline builder dla `GenericOptimizingAvoidance` po
-        `optimize() → OptimizationResult.waypoints`. Używa tej samej budowy +
-        clamp + filter jak `decode_genes`, ale bezpośrednio z surowych waypts.
+        """Zbuduj `BSplineTrajectory` bezpośrednio z gotowych waypointów.
+
+        Używane przez `GenericOptimizingAvoidance` po
+        `optimize() → OptimizationResult.waypoints`. Dzieli z `decode_genes`
+        ten sam kod budowy splajnu + filtr kinematycznej wykonalności.
+
+        Args:
+            waypoints: `(W, 3)` punkty trasy uniku; `W ≥ 4` wymagane.
+            context: `EvasionContext` (potrzebny do `cruise_speed`/`max_accel`
+                z `base_spline`).
+            axis_name: Niewykorzystywany przez tę reprezentację — przyjmowany
+                dla zgodności z protokołem.
+
+        Returns:
+            `BSplineTrajectory` lub `None`, gdy sekwencja jest za krótka albo
+            kinematic clamping odrzucił spline.
         """
         if waypoints is None or len(waypoints) < 4:
             logger.warning(
@@ -161,8 +202,6 @@ class SingleArcDeflection(IPathRepresentation):
             )
             return None
         return self._build_spline(np.asarray(waypoints, dtype=np.float64), context)
-
-    # --------------------------- helpers ------------------------------ #
 
     def _build_spline(
         self,
@@ -189,7 +228,9 @@ class SingleArcDeflection(IPathRepresentation):
             )
             return None
 
-        # Filter kinematycznej wykonalności (regression fix 2026-05-01 #2).
+        # Filter kinematycznej wykonalności: odrzuć spline'y które po
+        # kinematic clamping mają applied_cruise znacznie mniejszą niż
+        # requested — drone i tak nie nadąży za nimi w kontrolerze.
         clamp = getattr(spline, "kinematic_clamp", None)
         if clamp is not None:
             req = float(clamp.get("requested_cruise", evasion_cruise))

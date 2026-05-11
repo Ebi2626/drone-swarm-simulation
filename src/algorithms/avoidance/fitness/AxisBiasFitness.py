@@ -7,23 +7,14 @@ from src.algorithms.avoidance.interfaces import IFitnessEvaluator
 
 
 class AxisBiasFitness(IFitnessEvaluator):
-    """Heurystyka wyboru osi uniku — używana wyłącznie przez `AStarOptimizer`.
-
-    Heurystyka wyboru osi uniku (right/left/up/down) na podstawie:
+    """Heurystyka wyboru osi uniku (right/left/up/down) na podstawie:
       - dostępnej przestrzeni wzdłuż osi (`space`),
       - anty-prędkościowego bias z progiem szumu (`anti_threshold`),
       - tie-breaku po `prefer_axis_order`.
 
-    Sticky-axis (utrzymanie osi z poprzedniego planu) jest realizowany
-    przez `AStarOptimizer._pick_preferred_axis` — to fitness wybierany
-    jest TYLKO gdy nie ma poprzedniego hintu lub jest niewykonalny.
-
-    `evaluate(spline, …)` celowo zostawione jako `NotImplementedError` z
-    klasy bazowej — `AStarOptimizer` nie potrzebuje skalarnego fitness pełnej
-    trajektorii (jego heurystyka kosztu jest wbudowana w bias gridowy w
-    `UAV3DGridSearch.distance_between`). Ewolucyjne optymalizatory (Faza 2)
-    dostaną `WeightedSumFitness` jako osobną klasę z pełną implementacją
-    `evaluate()`.
+    Skalarny `evaluate(spline, …)` z bazowej `IFitnessEvaluator` celowo
+    zostaje `NotImplementedError` — ten fitness wybiera tylko oś, nie ocenia
+    pełnej trajektorii. Pełną ocenę robi `WeightedSumFitness`.
     """
 
     def __init__(
@@ -35,14 +26,25 @@ class AxisBiasFitness(IFitnessEvaluator):
         axis_anti_obsvel_gain: float = 1.0,
         anti_threshold: float = 0.15,
     ) -> None:
+        """Skonfiguruj kolejność osi i wagi heurystyki.
+
+        Args:
+            prefer_axis_order: Kolejność preferowanych osi przy remisach.
+            bias_preferred, bias_perpendicular, bias_oppose: Wagi
+                wymagane przez kontrakt `IFitnessEvaluator`.
+            axis_anti_obsvel_gain: Mnożnik komponentu anty-prędkościowego.
+            anti_threshold: Próg szumu — poniżej anty-prędkościowy
+                komponent jest ignorowany (zapobiega oscylacjom przy
+                małych ruchach przeszkody).
+        """
         self.prefer_axis_order = list(prefer_axis_order)
         self.bias_preferred = float(bias_preferred)
         self.bias_perpendicular = float(bias_perpendicular)
         self.bias_oppose = float(bias_oppose)
         self.axis_anti_obsvel_gain = float(axis_anti_obsvel_gain)
-        # Próg szumu w składowej anty-obs_vel — patrz regresja Fazy 6 (incydent
-        # „dron 0 → ziemia" z 2026-04-22, test:
-        # `test_pick_preferred_axis_noise_level_obs_vz_does_not_override_prefer_axis_order`).
+        # Próg szumu w składowej anty-obs_vel — bez niego mikro-fluktuacje
+        # `obs_vz` nadpisują `prefer_axis_order` i wpychają drona w ziemię
+        # (test: `test_pick_preferred_axis_noise_level_obs_vz_does_not_override_prefer_axis_order`).
         self.anti_threshold = float(anti_threshold)
 
         # Tie-break score per oś (0…0.1) — preferowana oś z `prefer_axis_order`
@@ -53,6 +55,7 @@ class AxisBiasFitness(IFitnessEvaluator):
         }
 
     def order_score(self, axis_name: str) -> float:
+        """Tie-break score `0…0.1` dla osi `axis_name` zgodnie z `prefer_axis_order`."""
         return self._order_scores.get(axis_name, 0.0)
 
     def axis_score(
@@ -63,6 +66,7 @@ class AxisBiasFitness(IFitnessEvaluator):
         obs_vel_hat: NDArray[np.float64] | None,
         order_score: float,
     ) -> float:
+        """Patrz `IFitnessEvaluator.axis_score`. Wyższy wynik = oś korzystniejsza."""
         axis_hat = axis_dir / (np.linalg.norm(axis_dir) + 1e-9)
         if obs_vel_hat is not None:
             anti = max(0.0, -float(np.dot(axis_hat, obs_vel_hat)))

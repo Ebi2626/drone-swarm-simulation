@@ -32,23 +32,21 @@ _NAN = float("nan")
 
 
 class GenericOptimizingAvoidance(BaseAvoidance):
-    """Strategy implementujący `BaseAvoidance` przez kompozycję 4 sub-strategii.
-
-    Architektura zgodna ze specyfikacją z `plan.md` (Faza 1):
+    """Strategy implementujący `BaseAvoidance` przez kompozycję 4 sub-strategii:
       - `IObstaclePredictor` — model przyszłej pozycji przeszkody.
       - `IPathRepresentation` — konwersja waypointów (lub genów) na BSpline.
-      - `IFitnessEvaluator` — koszt / ocena trajektorii (dla AStara: tylko axis_score).
-      - `IPathOptimizer` — silnik wybierający waypointy (AStar w Fazie 1;
-        NSGA-III/MSFFOA/SSA/OOA w Fazie 2).
+      - `IFitnessEvaluator` — koszt / ocena trajektorii.
+      - `IPathOptimizer` — silnik wybierający waypointy (NSGA3/MSFFOA/SSA/OOA
+        Online).
 
     Wszystkie sub-strategy są instancjowane przez Hydrę (`_target_` w yaml),
     więc podmiana algorytmu nie wymaga ingerencji w żaden plik .py.
 
-    Mechanizm budżetu (zob. `plan.md` → Engineering Notes):
+    Mechanizm budżetu czasu:
       - Cooperative `TimeBudget` przekazywany do `optimize()` — primary defense.
       - SIGALRM `hard_deadline(time_budget_s × hard_kill_factor)` jako outer
         circuit breaker — odpala się gdy cooperative zawiedzie (bug w optimizerze,
-        deadlock w native code). Po stripowaniu zwracamy fallback bez planu
+        deadlock w native code). Po przerwaniu zwracamy fallback bez planu
         (TRACKING kontynuuje), eksperyment się nie wiesza.
     """
 
@@ -64,6 +62,26 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         name: str = "Generic Optimizing Avoidance",
         **kwargs,
     ) -> None:
+        """Skomponuj 4 sub-strategie i ustaw budżet czasu.
+
+        Args:
+            predictor: Implementacja `IObstaclePredictor` — model przyszłej
+                pozycji przeszkody.
+            path_representation: Implementacja `IPathRepresentation` —
+                konwersja waypointów lub genów na `BSplineTrajectory`.
+            fitness: Implementacja `IFitnessEvaluator` — koszt trajektorii.
+            optimizer: Implementacja `IPathOptimizer` — silnik wybierający
+                waypointy.
+            time_budget_s: Limit czasu kooperacyjnego dla `optimize()` [s].
+            hard_kill_factor: Mnożnik dla zewnętrznego limitu `SIGALRM`
+                (efektywny limit = `time_budget_s × hard_kill_factor`).
+            sampling_seed: Ziarno dla pre-generacji populacji startowej;
+                `None` ⇒ `default_rng()` bez seedu.
+            name: Etykieta strategii (do logów).
+            **kwargs: Trafiają do `self.params` (czytane np. przez
+                `SwarmFlightController` — progi `trigger_ttc`,
+                `evasion_time_min` itd.).
+        """
         # `**kwargs` trafia do `self.params` przez `BaseAvoidance.__init__` —
         # to tam `TrajectoryFollowingAlgorithm` szuka progów wyzwolenia
         # (`trigger_ttc`, `trigger_distance_base`, `evasion_time_min`,
@@ -91,9 +109,13 @@ class GenericOptimizingAvoidance(BaseAvoidance):
     def compute_evasion_plan(
         self, context: EvasionContext
     ) -> Tuple[EvasionPlan | None, OnlineOptimizationRecord]:
+        """Pełny przebieg planowania uniku: pre-populacja → optimize → BSpline → record.
+
+        Patrz `BaseAvoidance.compute_evasion_plan` — kontrakt zwracanej krotki.
+        """
         t_plan_start = time.perf_counter()
-        # Convergence trace zerowany na każdy trigger — następny optimizer.optimize
-        # podstawi swój trace przez `result.extra["convergence_trace"]`.
+        # Trace zerowany na każdy trigger — optimizer.optimize podstawi swój
+        # przez `result.extra["convergence_trace"]`.
         self.last_convergence_trace = []
 
         # Pre-generacja populacji ceteris paribus: jeśli optimizer deklaruje
@@ -111,7 +133,7 @@ class GenericOptimizingAvoidance(BaseAvoidance):
                     * (ub - lb)[None, :]
                 )
             except NotImplementedError:
-                pass  # path_repr nie wspiera genów (np. legacy BSplineSmoother)
+                pass  # path_repr nie wspiera genów — pomijamy populację
 
         problem = PathProblem(
             context=context,
@@ -123,7 +145,6 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         budget = TimeBudget.start_now(self.time_budget_s)
         hard_seconds = self.time_budget_s * self.hard_kill_factor
 
-        # Outer circuit breaker — patrz `budget.hard_deadline` docstring.
         try:
             with hard_deadline(hard_seconds):
                 result = self.optimizer.optimize(problem, budget)
@@ -146,7 +167,7 @@ class GenericOptimizingAvoidance(BaseAvoidance):
             return None, record
 
         # Common-contract trace: optimizer może wystawić `convergence_trace`
-        # w `extra` (lista per-gen best_fitness). AStar nie wystawia → pusto.
+        # w `extra` (lista per-gen best_fitness); brak ⇒ pusta lista.
         trace = list(result.extra.get("convergence_trace", []) or [])
         self.last_convergence_trace = [float(x) for x in trace]
 
@@ -203,10 +224,6 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         )
         return plan, record
 
-    # ---------------------------------------------------------------------- #
-    # Common-contract record builder (Krok 3.3)                              #
-    # ---------------------------------------------------------------------- #
-
     def _build_record(
         self,
         *,
@@ -217,16 +234,27 @@ class GenericOptimizingAvoidance(BaseAvoidance):
         fallback_status: str | None = None,
         fallback_reason: str | None = None,
     ) -> OnlineOptimizationRecord:
-        """Konstruuje `OnlineOptimizationRecord` dla 1 trigger'a.
+        """Zbuduj `OnlineOptimizationRecord` dla pojedynczego trigger'a.
 
-        Optimizer wystawia w `result.extra` common-contract pola:
-        `algorithm`, `best_fitness`, `evaluations_completed`,
-        `generations_completed`, `wallclock_s`, `reason`. Brakujące są wypełniane
-        sentinelami (NaN / ""), co pozwala śledzić triggery które wyleciały
-        z hard-deadline'em zanim optimizer zdążył zwrócić wynik.
+        Optymalizator wystawia w `result.extra` standardowe pola
+        (`algorithm`, `best_fitness`, `evaluations_completed`,
+        `generations_completed`, `wallclock_s`, `reason`); brakujące
+        są wypełniane sentinelami (`NaN` / `""`).
 
-        Grupa B (decision) wypełniana z `plan` lub sentinelami gdy plan=None.
-        Grupa D (outcome) zostaje na `pending` — uzupełnia integrator.
+        Args:
+            context: Kontekst trigger'a.
+            result: Wynik optymalizacji albo `None` (gdy zewnętrzny SIGALRM
+                przerwał przed zwrotem).
+            plan: Zbudowany plan uniku lub `None` (gdy budowa się nie udała).
+            wallclock_s: Faktyczny czas planowania [s].
+            fallback_status: Override statusu (`"failed"` / `"timed_out"`)
+                — używane przy hard-deadline lub awarii budowy splajnu.
+            fallback_reason: Override pola `reason` rekordu.
+
+        Returns:
+            `OnlineOptimizationRecord` z wypełnioną grupą A (optymalizator)
+            i B (decyzja); grupa D (outcome) zostaje na `"pending"` —
+            uzupełnia integrator po BLEND_END lub kolizji.
         """
         extra: dict[str, Any] = result.extra if result is not None else {}
 
@@ -244,10 +272,9 @@ class GenericOptimizingAvoidance(BaseAvoidance):
 
         if plan is not None:
             spline = plan.evasion_spline
-            # `plan.preferred_axis` zwracane przez `AxisChooser._choose`:
-            # {'right','left','up','down'}. Normalizujemy magic string
-            # "unknown" → "" (puste = NULL po stronie ETL/CSV) — pojawia się
-            # gdy avoidance nie wstawił `axis_chosen` do `OptimizationResult.extra`.
+            # `plan.preferred_axis` ∈ {right, left, up, down}; magic "unknown"
+            # (gdy optimizer nie wstawił `axis_chosen` w extra) normalizujemy
+            # do "" → NULL po stronie ETL/CSV.
             chosen_axis = (
                 str(plan.preferred_axis)
                 if plan.preferred_axis in ("right", "left", "up", "down")

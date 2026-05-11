@@ -26,6 +26,12 @@ class OptimizationHistoryWriter:
     """
 
     def __init__(self, output_dir: str):
+        """Skonfiguruj writer i odpal wątek konsumenta z queue (`maxsize=200`).
+
+        Args:
+            output_dir: Katalog docelowy `optimization_history.h5`
+                (tworzony, gdy brak).
+        """
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -39,33 +45,22 @@ class OptimizationHistoryWriter:
         )
         self._thread.start()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def put_generation_data(self, data: dict) -> None:
-        """Enqueue a generation snapshot without blocking the caller longer
-        than necessary.
+        """Wrzuć snapshot generacji do kolejki (`block=True, timeout=5.0`).
 
-        Parameters
-        ----------
-        data : dict
-            Must contain NumPy arrays, e.g.
-            ``{"objectives_matrix": np.ndarray, "decisions_matrix": np.ndarray}``.
+        Args:
+            data: Słownik `{nazwa_datasetu: np.ndarray}` zgodny ze schematem
+                `HistorySnapshotBuilder.build_payload`.
         """
         self._queue.put(data, block=True, timeout=5.0)
 
     def close(self) -> None:
-        """Send a poison-pill, wait for the consumer to drain, and flush
-        any remaining buffered data."""
+        """Wyślij sentinel kończący, poczekaj na drain i flush bufora."""
         self._queue.put(_SENTINEL)
         self._thread.join()
 
-    # ------------------------------------------------------------------
-    # Consumer internals
-    # ------------------------------------------------------------------
-
     def _consumer_loop(self) -> None:
+        """Pętla konsumenta — buforuje generacje do `_BUFFER_FLUSH_SIZE` i flushuje."""
         buffer: list[dict] = []
 
         while True:
@@ -87,6 +82,7 @@ class OptimizationHistoryWriter:
                 buffer.clear()
 
     def _flush(self, buffer: list[dict]) -> None:
+        """Wyślij `buffer` do HDF5 (gdy `h5py` dostępne) lub fallback na NPZ."""
         self._flush_counter += 1
         timestamp = int(time.time() * 1000)
         chunk_name = f"chunk_{self._flush_counter:04d}_{timestamp}"
@@ -96,16 +92,15 @@ class OptimizationHistoryWriter:
         else:
             self._flush_npz(buffer, chunk_name)
 
-    # ---- HDF5 backend ------------------------------------------------
-
     def _flush_hdf5(self, buffer: list[dict], chunk_name: str) -> None:
+        """Dopisz wszystkie klucze z `buffer` do extendowalnych datasetów w HDF5."""
         path = os.path.join(self.output_dir, "optimization_history.h5")
         keys = buffer[0].keys()
 
         with h5py.File(path, "a") as f:
             for key in keys:
-                # ZMIANA: Używamy np.stack zamiast np.concatenate, aby zachować 
-                # wymiar generacji (Generacja x Osobnik x Cechy)
+                # np.stack (nie concatenate) zachowuje wymiar generacji →
+                # finalny shape (Gen × Pop × Features).
                 stacked = np.stack([entry[key] for entry in buffer], axis=0)
 
                 if key in f:
@@ -126,14 +121,12 @@ class OptimizationHistoryWriter:
                     )
         print(f"[HISTORY] Flushed {len(buffer)} generations to HDF5.")
 
-    # ---- NPZ backend ------------------------------------------------
-
     def _flush_npz(self, buffer: list[dict], chunk_name: str) -> None:
+        """Fallback NPZ — chunk per flush w `optimization_history_npz/<chunk>.npz`."""
         npz_dir = os.path.join(self.output_dir, "optimization_history_npz")
         os.makedirs(npz_dir, exist_ok=True)
 
         keys = buffer[0].keys()
-        # ZMIANA: Używamy np.stack również w fallbacku
         arrays = {
             key: np.stack([entry[key] for entry in buffer], axis=0)
             for key in keys

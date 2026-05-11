@@ -7,11 +7,20 @@ from scipy.spatial.transform import Rotation
 
 @dataclass(slots=True)
 class LidarHit:
+    """Pojedyncze trafienie LiDAR z metadanymi celu i prędkości.
+
+    Attributes:
+        object_id: PyBullet `bodyUniqueId` trafionego obiektu.
+        distance: Odległość trafienia [m] (skalowana do `MAX_RANGE`).
+        hit_position: `(3,)` punkt trafienia w world frame.
+        ray_direction: `(3,)` jednostkowy wektor kierunku promienia (po rotacji drona).
+        velocity: `(3,)` prędkość liniowa trafionego ciała `[vx, vy, vz]`.
+    """
     object_id: int
     distance: float
     hit_position: NDArray[np.float64]
     ray_direction: NDArray[np.float64]
-    velocity: NDArray[np.float64]  # Dodany wektor prędkości [vx, vy, vz]
+    velocity: NDArray[np.float64]
 
 
 class LidarSensor:
@@ -31,6 +40,7 @@ class LidarSensor:
     _num_rays: int = 0
 
     def __init__(self, physics_client_id: int) -> None:
+        """Powiąż sensor z klientem PyBullet i zainicjalizuj cache kierunków promieni."""
         self._client_id: int = physics_client_id
 
         if LidarSensor._base_ray_directions is None:
@@ -46,6 +56,7 @@ class LidarSensor:
 
     @staticmethod
     def _compute_ray_directions() -> NDArray[np.float64]:
+        """Zwróć `(N, 3)` jednostkowe kierunki promieni dla wypełnionego stożka 30°."""
         # Definicja gęstych, koncentrycznych pierścieni dla litego stożka.
         # Szczyt stożka ma 30 stopni rozwarcia (maksymalnie 15 stopni od osi centralnej).
         # Taki układ pozwala na gładkie skalowanie sił odpychających w metodzie APF.
@@ -98,7 +109,15 @@ class LidarSensor:
         ])
 
     def scan(self, drone_position: NDArray[np.float64], drone_orientation_quat: NDArray[np.float64] | None = None) -> list[LidarHit]:
-        """Skan lidarowy z jednego drona uwzględniający jego orientację."""
+        """Wykonaj skan LiDAR z `drone_position` z uwzględnieniem orientacji drona.
+
+        Args:
+            drone_position: `(3,)` pozycja drona w world frame.
+            drone_orientation_quat: `(4,)` quaternion `(x, y, z, w)`; `None` ⇒ brak rotacji.
+
+        Returns:
+            Lista `LidarHit` wyłącznie dla promieni, które trafiły obiekt.
+        """
         origin = np.asarray(drone_position, dtype=np.float64)
         
         # Fallback na wypadek braku podanej orientacji (zachowuje wsteczną kompatybilność API)
@@ -121,15 +140,22 @@ class LidarSensor:
         return self._parse_raw_results(results)
 
     def process_batch_results(
-        self, 
+        self,
         raw_results: list[tuple],
-        logger=None, 
-        current_time: float = 0.0, 
+        logger=None,
+        current_time: float = 0.0,
         drone_id: int = -1
     ) -> list[LidarHit]:
-        """
-        Przetwarza surowe wyniki z zewnętrznego batcha.
-        Opcjonalnie automatycznie loguje trafienia do SimulationLogger.
+        """Sparsuj surowe wyniki z `batch_ray_test`; opcjonalnie zaloguj trafienia.
+
+        Args:
+            raw_results: Wyjście `pybullet.rayTestBatch`.
+            logger: `SimulationLogger` lub `None`.
+            current_time: Czas symulacji [s] (do logu).
+            drone_id: Identyfikator drona (do logu).
+
+        Returns:
+            Lista `LidarHit`.
         """
         hits = self._parse_raw_results(raw_results)
         
@@ -176,6 +202,7 @@ class LidarSensor:
         physics_client_id: int,
         orientations_quat: NDArray[np.float64] | None = None
     ) -> list[tuple]:
+        """Wykonaj jeden `rayTestBatch` dla `positions (N, 3)` z opcjonalnymi rotacjami."""
         n_drones = positions.shape[0]
         num_rays = LidarSensor._num_rays
         origins = positions[:, np.newaxis, :]
@@ -204,6 +231,7 @@ class LidarSensor:
         )
 
     def draw_debug_lines(self, drone_position: NDArray[np.float64]) -> None:
+        """Narysuj wiązkę promieni LiDAR w GUI PyBullet (zielony — miss, czerwony — hit)."""
         if not self._last_raw_results:
             return
 
@@ -250,6 +278,7 @@ class LidarSensor:
                 )
 
     def clear_debug_lines(self) -> None:
+        """Usuń wszystkie linie debug dotychczas narysowane przez `draw_debug_lines`."""
         for line_id in self._debug_ray_ids:
             p.removeUserDebugItem(line_id, physicsClientId=self._client_id)
         self._debug_ray_ids.clear()

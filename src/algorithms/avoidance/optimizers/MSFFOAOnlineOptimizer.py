@@ -18,10 +18,14 @@ Adaptacje vs paper:
     wokół 0).
   - Brak smell-space transform (Sec. 3) — operujemy bezpośrednio na YZ-deltach
     BSplineYZGenes. Skalowanie kroku rekompensuje brak smell-to-physical mappingu.
-  - Threshold (granica między fazą globalną a lokalną) skalibrowany dynamicznie
-    z `initial_fitness * threshold_ratio` — paper podaje threshold jako stały
-    parametr, ale bezwzględna wartość zależy od skali fitness, którą znamy
-    dopiero po inicjalizacji.
+  - Threshold ADAPTACYJNY per generacja (analog jak w `core_msffoa`):
+    `threshold = best_feasible_swarm_fit × (1 + threshold_ratio)`. Paper podaje
+    stały próg, ale `WeightedSumFitness` z sentinel 1e9 dla niezdekodowalnych
+    wprowadza nieciągłość rzędu 1e9 między infeasible a feasible. Statyczny
+    próg `initial_fit × ratio` przy infeasible init pop dawał threshold ~5e8,
+    co blokowało fazę LOCAL (wszystkie podroje w GLOBAL → brak refinement
+    → timeout → brak EvasionPlan → kolizja drona). Adaptacyjny próg eliminuje
+    tę degenerację.
 
 Kontrakt budżetu:
   - `budget.check_or_raise()` wywoływane na początku każdej generacji.
@@ -56,6 +60,14 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
         większe niż offline, bo online ma mniej generacji do konwergencji).
     """
 
+    # Sentinel-cost: `WeightedSumFitness.evaluate` zwraca 1e9 dla niezdekodowalnych
+    # genów (decode_genes is None). Próg 1e8 oddziela feasible (~O(1)-O(50))
+    # od infeasible. Używany w 3 miejscach: kalibracja threshold, filtr wyniku
+    # i recovery best-so-far po BudgetExceeded.
+    _SENTINEL_THRESHOLD: float = 1e8
+    # Dolne ograniczenie threshold — chroni przed degeneracją do 0 gdy best≈0.
+    _THRESHOLD_FLOOR: float = 1e-3
+
     def __init__(
         self,
         n_inner_waypoints: int = 5,
@@ -70,6 +82,32 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
         min_compute_time_s: float = 0.05,
         rng: np.random.Generator | int | None = None,
     ) -> None:
+        """Skonfiguruj parametry MSFOA i waliduj zgodność z paperem Shi et al. 2020.
+
+        Args:
+            n_inner_waypoints: K — liczba waypointów wewnątrz B-spline
+                (spójnie z `path_representation`).
+            pop_size: Łączny rozmiar populacji; musi dzielić się przez
+                `n_swarms`.
+            n_swarms: Liczba podrojów `G`; `pop_size / G = P` osobników na rój.
+            max_generations: Górny limit iteracji (cooperative budget zwykle
+                przerywa wcześniej).
+            coe1, coe2: Wagi krzyżowania międzyrojowego (Eq. 14); muszą
+                spełniać `coe1 + coe2 = 1`.
+            threshold_ratio: Tolerancja względna wokół best feasible —
+                `threshold = best × (1 + ratio)`. Sterowanie podziałem
+                GLOBAL/LOCAL (Eq. 5-8).
+            step_global_frac, step_local_frac: Skala kroku jako ułamek
+                zakresu genu (`ub - lb`); ustawiana wyższa niż w offline
+                z uwagi na krótki budżet online.
+            min_compute_time_s: Minimalny budżet [s] do uruchomienia
+                optymalizacji; poniżej zwracany `timed_out`.
+            rng: Ziarno deterministyczne dla `np.random.default_rng`.
+
+        Raises:
+            ValueError: Gdy parametry naruszają warunki paperu (suma `coe`,
+                podzielność `pop_size` przez `n_swarms`, dodatniość kroków).
+        """
         if abs((coe1 + coe2) - 1.0) > 1e-6:
             raise ValueError(
                 f"MSFOA paper (Shi et al. 2020) wymaga coe1 + coe2 = 1, "
@@ -100,9 +138,27 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
 
     @property
     def population_size(self) -> int:
+        """Łączny rozmiar populacji `G × P`."""
         return self.pop_size
 
     def optimize(self, problem: PathProblem, budget: TimeBudget) -> OptimizationResult:
+        """Uruchom MSFOA na YZ-genach w ramach `budget` i zwróć najlepsze waypointy.
+
+        Args:
+            problem: `PathProblem` z fitness, predyktorem i opcjonalną
+                populacją startową `(pop_size, K)`.
+            budget: Kooperatywny budżet czasu — sprawdzany na początku każdej
+                generacji.
+
+        Returns:
+            `OptimizationResult`:
+              - `"ok"` z `waypoints` i `extra` (algorytm `"MSFOA"`,
+                `convergence_trace`, `n_swarms`),
+              - `"timed_out"`, gdy budżet < `min_compute_time_s` albo
+                `BudgetExceeded` (wtedy próbujemy zwrócić best-so-far),
+              - `"failed"`, gdy populacja nie miała feasible kandydata albo
+                wystąpił nieoczekiwany wyjątek.
+        """
         t_start = time.perf_counter()
 
         if budget.remaining < self.min_compute_time_s:
@@ -122,9 +178,8 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             K = int(path_repr.gene_dim(ctx))
             assert lb.shape == (K,) and ub.shape == (K,), "gene_bounds shape mismatch"
 
-            # === Inicjalizacja populacji (ceteris paribus) ==========================
-            # Jeśli `GenericOptimizingAvoidance` wygenerował wspólną populację,
-            # używamy jej bezpośrednio. Fallback: wewnętrzna U(lb, ub).
+            # Ceteris paribus: gdy GenericOptimizingAvoidance wygenerował
+            # wspólną populację, używamy jej; inaczej fallback U(lb, ub).
             if (
                 problem.initial_population is not None
                 and problem.initial_population.shape == (self.pop_size, K)
@@ -146,12 +201,22 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
             global_best_fit = float(swarm_best_fit[global_best_idx])
             global_best_pos = swarm_best_pos[global_best_idx].copy()
 
-            # Convergence trace: po każdej generacji append'ujemy global_best_fit
-            # (Krok 3.3b plan.md). Index 0 = stan po inicjalizacji (pre-loop).
+            # Convergence trace: index 0 = stan po inicjalizacji (pre-loop),
+            # kolejne wpisy = global_best_fit po każdej generacji.
             convergence_trace: list[float] = [global_best_fit]
 
-            # Threshold dynamiczny — separuje fazę globalną od lokalnej.
-            threshold = max(1e-3, global_best_fit * self.threshold_ratio)
+            # Threshold ADAPTACYJNY — `best_feasible × (1 + threshold_ratio)`.
+            # Anchor pre-loop: mediana feasible w init pop (robust na outliery)
+            # lub heurystyczny fallback gdy cała init pop infeasible (rzadkie,
+            # ale możliwe przy aggresive safe_clearance lub wąskiej geometrii
+            # threat). Wartość fallback (10.0) jest niska względem sentinel
+            # (1e9), więc każdy infeasible (≥1e9) > threshold → all GLOBAL
+            # przez początkową fazę poszukiwania feasibility; gdy znajdziemy
+            # pierwsze feasible, _update_adaptive_threshold w pętli przeskaluje
+            # threshold na faktyczną skalę feasible.
+            threshold = self._compute_adaptive_threshold(
+                swarm_best_fit, fallback_anchor=10.0
+            )
 
             # Anizotropowe step (per-gene zakres = ub - lb).
             step_global = (ub - lb) * self.step_global_frac  # (K,)
@@ -159,9 +224,7 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
 
             generations_completed = 0
 
-            # === Pętla generacji =================================================
             for gen in range(self.max_generations):
-                # COOPERATIVE BUDGET CHECK
                 budget.check_or_raise()
 
                 # ---- Phase 1: search around swarm_best (Eq. 7-8) ----
@@ -217,15 +280,20 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     global_best_fit = float(swarm_best_fit[cur_global_idx])
                     global_best_pos = swarm_best_pos[cur_global_idx].copy()
 
+                # Adaptacyjna re-kalibracja threshold na podstawie bieżącego
+                # stanu liderów (Eq. 18-19 elitism już zaaplikowane). No-op
+                # gdy żaden lider nie jest feasible (zachowuje poprzednią wartość).
+                threshold = self._compute_adaptive_threshold(
+                    swarm_best_fit, fallback_anchor=threshold
+                )
+
                 generations_completed = gen + 1
                 convergence_trace.append(global_best_fit)
 
-            # === Wynik ===========================================================
-            # Filtr sentinel-cost (regression fix 2026-05-02): jeśli global_best_fit
-            # > sentinel threshold → wszystkie candidates infeasible (decode_genes
-            # zwracał None), wracamy `no_feasible` zamiast próbować decode best.
-            SENTINEL_THRESHOLD = 1e8
-            if global_best_fit > SENTINEL_THRESHOLD:
+            # Filtr sentinel-cost: gdy global_best_fit > sentinel, wszystkie
+            # candidates były infeasible (decode_genes → None) — wracamy
+            # `no_feasible` zamiast próbować decode'ować best.
+            if global_best_fit > self._SENTINEL_THRESHOLD:
                 return OptimizationResult(
                     waypoints=None,
                     elapsed_s=time.perf_counter() - t_start,
@@ -250,7 +318,6 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                     extra={"reason": "best_decode_returned_none"},
                 )
 
-            # Common-contract `extra` dict (Krok 4 fairness 2026-05-03).
             elapsed = time.perf_counter() - t_start
             return OptimizationResult(
                 waypoints=np.asarray(best_spline.waypoints, dtype=np.float64),
@@ -275,13 +342,12 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                 f"MSFFOAOnlineOptimizer: d{ctx.drone_id} — BudgetExceeded "
                 f"po {elapsed:.3f}s ({e})"
             )
-            # Best-so-far recovery (regression fix 2026-05-03): zwracamy
-            # `status="ok"` jeśli mamy feasible best — `GenericOptimizingAvoidance`
-            # odrzuca wszystko poza "ok", więc bez tego poprawne best-so-far
-            # waypoints były marnowane. Sentinel filter odrzuca infeasible.
-            SENTINEL_THRESHOLD = 1e8
+            # Best-so-far recovery: zwracamy `status="ok"` gdy mamy feasible
+            # best — `GenericOptimizingAvoidance` odrzuca wszystko poza "ok",
+            # bez tego poprawne best-so-far waypoints byłyby marnowane przy
+            # timeoutcie. Sentinel filter odrzuca infeasible.
             try:
-                if global_best_fit < SENTINEL_THRESHOLD:
+                if global_best_fit < self._SENTINEL_THRESHOLD:
                     best_spline = path_repr.decode_genes(global_best_pos, ctx)
                     if best_spline is not None:
                         return OptimizationResult(
@@ -331,15 +397,55 @@ class MSFFOAOnlineOptimizer(IPathOptimizer):
                 extra={"reason": f"exception: {type(e).__name__}: {e}"},
             )
 
+    def _compute_adaptive_threshold(
+        self,
+        swarm_best_fit: NDArray[np.float64],
+        fallback_anchor: float,
+    ) -> float:
+        """Adaptacyjna kalibracja threshold (Eq. 5-8) — relatywna do best feasible.
+
+        Semantyka:
+            ``threshold = best_feasible_swarm_fit × (1 + threshold_ratio)``
+
+        Konsekwencja w `is_global = swarm_best_fit > threshold`:
+        - Najlepszy feasible podrój (fit = best_feasible) < threshold → LOCAL.
+        - Podroje w obrębie ``threshold_ratio`` od best → LOCAL (refinement).
+        - Podroje dalej → GLOBAL (eksploracja).
+
+        Gdy żaden lider nie jest feasible (wszystkie ≥ _SENTINEL_THRESHOLD),
+        używamy `fallback_anchor` (na ogół poprzednia wartość threshold lub
+        heurystyka pre-loop). Każde infeasible (~1e9) ≫ jakikolwiek sensowny
+        threshold, więc wszystkie podroje i tak są w GLOBAL — wybór konkretnej
+        wartości nie wpływa na zachowanie, ale zachowanie poprzedniej wartości
+        daje spójny log.
+
+        Powód adaptacji: stały próg z paperu zakłada gładki krajobraz fitness;
+        sentinel WeightedSumFitness (1e9 dla niezdekodowalnych) wprowadza skok
+        rzędu 1e9 między infeasible a feasible — statyczny próg `init_fit *
+        ratio` był albo niewykonalny (pod feasible floor), albo blokował fazę
+        LOCAL na zawsze.
+        """
+        feasible = swarm_best_fit < self._SENTINEL_THRESHOLD
+        if feasible.any():
+            anchor = float(np.min(swarm_best_fit[feasible]))
+        else:
+            anchor = float(fallback_anchor)
+        return max(self._THRESHOLD_FLOOR, anchor * (1.0 + self.threshold_ratio))
+
     @staticmethod
     def _eval_batch(
         pop: NDArray[np.float64],
         problem: PathProblem,
     ) -> NDArray[np.float64]:
-        """Ocena batcha — sekwencyjna (online: pop_size~20, koszt znikomy).
+        """Oceń `(N, K)` batch genów sekwencyjnie (online: `N ≈ 20`, koszt znikomy).
 
-        :param pop: (N, K) macierz genów.
-        :return: (N,) fitness wartości (lower = better, 1e9 dla niezdekodowalnych).
+        Args:
+            pop: `(N, K)` macierz genów.
+            problem: `PathProblem` z `path_repr` i `fitness`.
+
+        Returns:
+            `(N,)` wartości fitness; mniej = lepiej, `1e9` dla
+            niezdekodowalnych.
         """
         out = np.empty(len(pop), dtype=np.float64)
         for i, x in enumerate(pop):

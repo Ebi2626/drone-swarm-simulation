@@ -1,4 +1,4 @@
-# src/analysis/db/utils.py
+"""Pomocniki ETL: parsowanie nazw katalogów runów i bezpieczne konwersje typów."""
 from pathlib import Path
 import re
 
@@ -6,7 +6,20 @@ RUN_DIR_PATTERN = re.compile(
     r"^(?P<optimizer>.+?)_(?P<environment>forest|urban)_(?P<avoidance>.+?)_seed(?P<seed>\d+)$"
 )
 
+
 def parse_run_dir_name(run_dir_name: str) -> dict:
+    """Wyłuskaj `optimizer / environment / avoidance / seed / algorithm_pair` z nazwy katalogu.
+
+    Args:
+        run_dir_name: Nazwa katalogu w formacie
+            `<opt>_<env>_<avoidance>_seed<N>`.
+
+    Returns:
+        Słownik z polami `optimizer, environment, avoidance, seed, algorithm_pair`.
+
+    Raises:
+        ValueError: Gdy nazwa katalogu nie pasuje do `RUN_DIR_PATTERN`.
+    """
     match = RUN_DIR_PATTERN.match(run_dir_name)
     if not match:
         raise ValueError(f"Niepoprawna nazwa runu: {run_dir_name}")
@@ -18,6 +31,7 @@ def parse_run_dir_name(run_dir_name: str) -> dict:
 
 
 def list_run_directories(experiment_dir: str | Path) -> list[Path]:
+    """Zwróć posortowane katalogi runów w `experiment_dir` zgodne z `RUN_DIR_PATTERN`."""
     experiment_dir = Path(experiment_dir).expanduser().resolve()
     return sorted(
         path for path in experiment_dir.iterdir()

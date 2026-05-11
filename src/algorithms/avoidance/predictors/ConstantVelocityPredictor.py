@@ -24,12 +24,24 @@ class ConstantVelocityPredictor(IObstaclePredictor):
     """
 
     def predict_state(self, threat: ThreatAlert, t_offset: float) -> KinematicState:
-        # Sequential cooperative planning (2026-05-01): jeśli `threat` ma
-        # przypisaną `trajectory` (np. evasion spline planowanego wcześniej
-        # drona w tym samym ticku), używamy jej dokładnie zamiast liniowej
-        # ekstrapolacji. To jest kluczowe dla cooperative avoidance — bez tego
-        # drone B (planowany później) traktuje drone A jako "lecący prosto"
-        # mimo że A wykonuje już skręt uniku.
+        """Przewiduj stan przeszkody w czasie `now + t_offset`.
+
+        Args:
+            threat: Aktualna obserwacja zagrożenia (z LiDAR-u → `ThreatAnalyzer`).
+                Gdy `threat.trajectory` jest ustawione, użyte jest dokładne
+                samplowanie splajnu (cooperative planning); w pozostałych
+                przypadkach — liniowa ekstrapolacja `pos += vel · t`.
+            t_offset: Horyzont predykcji [s].
+
+        Returns:
+            `KinematicState` z przewidywaną pozycją i prędkością — promień
+            kopiowany z `threat.obstacle_state`.
+        """
+        # Sequential cooperative planning: jeśli `threat` ma przypisaną
+        # `trajectory` (np. evasion spline drona planowanego wcześniej w tym
+        # samym ticku), używamy jej dokładnie zamiast liniowej ekstrapolacji.
+        # Bez tego drone B (planowany później) traktowałby drone A jako
+        # „lecący prosto" mimo że A wykonuje już skręt uniku.
         traj = threat.trajectory
         if traj is not None and hasattr(traj, "get_state_at_time"):
             t_local = threat.trajectory_start_offset + float(t_offset)
@@ -63,17 +75,25 @@ class ConstantVelocityPredictor(IObstaclePredictor):
         drone_state: KinematicState,
         threat: ThreatAlert,
     ) -> float:
-        """TTC z relatywnej kinematyki w jednej osi closing-speed.
+        """Oblicz TTC z relatywnej kinematyki w osi closing-speed.
 
-        Definicja zgodna z `ThreatAnalyzer.jit_analyze_hits`:
-            closing_speed = ((v_drone − v_obs) · r̂) gdzie r̂ = (p_obs − p_drone)/|·|
-            TTC = |p_obs − p_drone| / closing_speed gdy closing > 0, inaczej +inf
+        Definicja spójna z `ThreatAnalyzer.jit_analyze_hits`:
 
-        Identyczna definicja jest tu replikowana (a nie importowana z
-        ThreatAnalyzer) celowo: planner online'owy może być wołany z
-        zewnętrznym `ThreatAlert`, którego TTC zostało wyliczone wcześniej
-        — ten predictor zwraca SWÓJ pomiar niezależny, użyteczny gdy
-        predictor jest wymieniony na inny model bez zmiany ThreatAnalyzera.
+            r̂ = (p_obs − p_drone) / ‖p_obs − p_drone‖
+            closing_speed = (v_drone − v_obs) · r̂
+            TTC = ‖p_obs − p_drone‖ / closing_speed,  gdy closing_speed > 0
+
+        Replikujemy definicję (zamiast importu) celowo: planer może być
+        wywołany ze starszym `ThreatAlert`, w którym TTC policzono
+        wcześniejszym kodem. Predyktor zwraca własny, świeży pomiar.
+
+        Args:
+            drone_state: Aktualny stan kinematyczny drona.
+            threat: Aktualna obserwacja zagrożenia.
+
+        Returns:
+            TTC w sekundach; `+inf` gdy zagrożenie się oddala
+            (`closing_speed ≤ 0.1 m/s`).
         """
         rel_pos = threat.obstacle_state.position - drone_state.position
         dist = float(np.linalg.norm(rel_pos))

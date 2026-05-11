@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""
-Subprocess-based experiment runner — workaround dla H1'' (plan.md, Krok 5c).
+"""Subprocess-based experiment runner — workaround dla globalnego stanu PyBullet.
 
 Multi-run w jednym procesie Python (Hydra multirun + joblib, niezależnie od
-backend / n_jobs / `reuse=False`) prowadzi do patologii "drony stoją
+backend / n_jobs / `reuse=False`) prowadzi do patologii „drony stoją
 w PyBullet" w drugim i kolejnych jobach. Force-cleanup `p.resetSimulation` /
 `p.disconnect` / `gc.collect` nie pomaga — globalny stan akumuluje się
 w libbullet C-level lub innym module zewnętrznym (gym-pybullet-drones,
@@ -23,9 +22,8 @@ import argparse
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
-from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import yaml
 
@@ -34,15 +32,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def run_one_job(args: Dict[str, str]) -> tuple[Dict[str, str], int]:
-    """Wywołuje single `python main.py` w fresh subprocess.
+    """Uruchom pojedyncze wywołanie `python main.py` w osobnym podprocesie.
 
-    Args są przekazywane jako Hydra overrides. `hydra.run.dir` jest
-    wymuszony, by trafiał do `results/{exp_id}/{base_name}_{env}_{avoid}_seed{seed}/`,
-    czyli tej samej struktury co Hydra-multirun produkował dotychczas.
-    Pole `base_name` (krótka nazwa, np. "msffoa") jest używane do nazewnictwa
-    katalogu zamiast pełnej ścieżki proxy (`tmp/exp_..._msffoa_forest_0`),
-    żeby `parse_run_dir_name` regex pasował i nie wprowadzać `/` do path
-    component.
+    Args:
+        args: Słownik z kluczami `exp_id`, `optimizer`, `environment`,
+            `avoidance`, `seed` (przekazywane jako nadpisania Hydra) oraz
+            opcjonalnie `base_name` (skrócona nazwa katalogu) i
+            `extra_overrides` (dodatkowe nadpisania Hydra z linii poleceń).
+
+    Returns:
+        Para `(args, returncode)` — kopia wejściowych argumentów (do
+        logowania) oraz kod wyjścia podprocesu (0 = sukces).
     """
     exp_id = args["exp_id"]
     base_name = args.get("base_name", args["optimizer"])
@@ -70,7 +70,6 @@ def run_one_job(args: Dict[str, str]) -> tuple[Dict[str, str], int]:
         "hydra.mode=RUN",
         f"hydra.run.dir=results/{exp_id}/{subdir}",
     ]
-    # extra_overrides przekazane przez --override z CLI
     cmd.extend(args.get("extra_overrides", []))
 
     proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
@@ -78,15 +77,22 @@ def run_one_job(args: Dict[str, str]) -> tuple[Dict[str, str], int]:
 
 
 def parse_sweep_params(manifest_path: Path) -> Dict[str, Any]:
-    """Wczytuje manifest.yaml i wyciąga listę par (optimizer, environment) +
-    pozostałe wymiary kartezjańskie (avoidance, seed).
+    """Wczytaj `manifest.yaml` i zwróć parametry siatki przebiegów.
 
-    Format Option A (preferowany): top-level `job_matrix` z jawnymi parami,
-    `hydra.sweeper.params` zawiera tylko `avoidance` + `seed`.
+    Args:
+        manifest_path: Ścieżka do `manifest.yaml` wygenerowanego przez
+            `prepare_experiment.py`.
 
-    Format legacy (back-compat): `hydra.sweeper.params` zawiera
-    `optimizer` + `environment` + `avoidance` + `seed`. Pary tworzone jako
-    pełny iloczyn kartezjański.
+    Returns:
+        Słownik z kluczami:
+            - `job_matrix`: lista par `{optimizer, environment, base_name?}`.
+            - `avoidances`: lista nazw algorytmów uniku.
+            - `seeds`: lista ziaren losowości.
+            - `pairing`: `'crossed'` (iloczyn kartezjański) albo
+              `'paired_only'` (filtr `base_name == avoidance`).
+
+    Raises:
+        ValueError: Gdy wpis w `job_matrix` nie ma wymaganych kluczy.
     """
     manifest = yaml.safe_load(manifest_path.read_text())
     sweep = manifest.get("hydra", {}).get("sweeper", {}).get("params", {})
@@ -126,6 +132,12 @@ def parse_sweep_params(manifest_path: Path) -> Dict[str, Any]:
 
 
 def main() -> int:
+    """Wczytaj manifest, rozwiń macierz zadań i uruchom je równolegle w podprocesach.
+
+    Returns:
+        Kod wyjścia: 0 gdy wszystkie zadania zakończyły się sukcesem,
+        1 gdy co najmniej jedno padło albo brakuje manifestu.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exp_id", help="ID eksperymentu wygenerowane przez prepare_experiment.py")
     parser.add_argument("--n-jobs", type=int, default=6,

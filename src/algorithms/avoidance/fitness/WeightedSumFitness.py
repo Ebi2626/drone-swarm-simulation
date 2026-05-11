@@ -1,6 +1,6 @@
-"""IFitnessEvaluator dla optymalizatorów ewolucyjnych (Faza 2).
+"""IFitnessEvaluator dla optymalizatorów ewolucyjnych w fazie online avoidance.
 
-Skalarna ważona suma 4 składowych zgodnie ze specyfikacją:
+Skalarna ważona suma 4 składowych:
     cost = w_safety · C_safety + w_energy · C_energy
          + w_jerk · C_jerk + w_symmetry · C_symmetry
 
@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 
 class WeightedSumFitness(IFitnessEvaluator):
     """Skalarna ważona suma — `IFitnessEvaluator.evaluate` dla optymalizatorów
-    ewolucyjnych. AStar tej klasy NIE używa (`axis_score` zaimplementowane
-    minimalnie dla zgodności kontraktu z `IPathOptimizer._pick_preferred_axis`).
+    ewolucyjnych. `axis_score` zaimplementowane minimalnie dla zgodności
+    kontraktu z `IPathOptimizer._pick_preferred_axis`.
     """
 
     def __init__(
@@ -55,14 +55,28 @@ class WeightedSumFitness(IFitnessEvaluator):
         w_symmetry: float = 1.0,
         safe_clearance_m: float = 1.5,
         n_samples: int = 32,
-        # Parametry AxisBiasFitness-style — używane TYLKO przez `axis_score`
-        # (gdyby evolutionary fitness był wymieniony jako axis-picker). W
-        # praktyce rzadko aktywowane — domyślne wartości jak w AxisBiasFitness.
         prefer_axis_order: list[str] | tuple[str, ...] = ("right", "left", "up", "down"),
         bias_preferred: float = 1.0,
         bias_perpendicular: float = 1.4,
         bias_oppose: float = 2.5,
     ) -> None:
+        """Skonfiguruj wagi 4 składowych i parametry sticky-axis.
+
+        Args:
+            w_safety, w_energy, w_jerk, w_symmetry: Nieujemne wagi
+                ważonej sumy. Skala C_* jest niezrównoważona — domyślne
+                wartości oddają empirycznie dobrane proporcje.
+            safe_clearance_m: Minimalny dystans od przeszkody [m] —
+                naruszenie generuje karę kwadratową.
+            n_samples: Liczba próbek po B-spline (jednolita siatka
+                `u ∈ [0, 1]`).
+            prefer_axis_order, bias_preferred, bias_perpendicular,
+            bias_oppose: Parametry trybu `axis_score` (rzadko używane —
+                ten fitness przede wszystkim ocenia pełne spliny).
+
+        Raises:
+            ValueError: Gdy którakolwiek `w_*` jest ujemna.
+        """
         if min(w_safety, w_energy, w_jerk, w_symmetry) < 0:
             raise ValueError("Wagi WeightedSumFitness muszą być nieujemne.")
         self.w_safety = float(w_safety)
@@ -81,24 +95,26 @@ class WeightedSumFitness(IFitnessEvaluator):
             a: (n - i) / (10.0 * n) for i, a in enumerate(self.prefer_axis_order)
         }
 
-    # -------------------------- Evolutionary --------------------------------- #
-
     def evaluate(
         self,
         candidate: "BSplineTrajectory | None",
         context: EvasionContext,
         predictor: IObstaclePredictor,
     ) -> float:
-        """Skalar fitness; LOWER = better. Kontrakt jak w `IFitnessEvaluator`.
+        """Zwróć skalarny fitness ważoną sumą 4 składowych (mniej = lepiej).
 
-        :param candidate: BSpline z `IPathRepresentation.decode_genes` lub
-            `None` gdy dekodowanie zawiodło — wtedy zwracamy ekstremalną karę.
-        :param context: pełny `EvasionContext`.
-        :param predictor: `IObstaclePredictor` do estymacji pozycji przeszkody w czasie.
+        Args:
+            candidate: B-spline z `IPathRepresentation.decode_genes` lub
+                `None` (zdekodowanie zawiodło) — wtedy zwracana jest
+                ekstremalna kara `≈ 4e9 × max(w_*)`.
+            context: Pełny `EvasionContext`.
+            predictor: Estymator pozycji przeszkody w funkcji czasu.
+
+        Returns:
+            Skalarna wartość kosztu — `0` ⇒ idealna trasa, sentinel ~`1e9`
+            sygnalizuje zdegenerowanego kandydata.
         """
         components = self.evaluate_components(candidate, context, predictor)
-        # Ekstremalna kara dla niezdekodowalnych — `evaluate_components` zwraca
-        # wektor sentinelowy (1e9, 1e9, 1e9, 1e9), więc skalar też jest ekstremalny.
         return float(
             self.w_safety * components[0]
             + self.w_energy * components[1]
@@ -112,15 +128,21 @@ class WeightedSumFitness(IFitnessEvaluator):
         context: EvasionContext,
         predictor: IObstaclePredictor,
     ) -> NDArray[np.float64]:
-        """Wektor [c_safety, c_energy, c_jerk, c_symmetry] (przed wagami).
+        """Zwróć surowy `(4,)` wektor `[c_safety, c_energy, c_jerk, c_symmetry]` przed wagami.
 
-        Zaprojektowane dla `NSGA3OnlineOptimizer` (multi-objective NSGA-III) —
-        zwraca surowe składowe by pymoo mógł budować Pareto-front. SOO
-        (`MealpyOptimizer`, `MSFFOAOnlineOptimizer`) wołają `evaluate` które
-        wewnętrznie składa to przez wagi.
+        Używane przez `NSGA3OnlineOptimizer` do budowy frontu Pareto;
+        warianty SOO (`MealpyOptimizer`, `MSFFOAOnlineOptimizer`) wołają
+        `evaluate`, który ten wektor agreguje wagami.
 
-        :return: shape (4,). Sentinel `[1e9]*4` gdy `candidate is None` lub
-                 ścieżka degeneracyjna (numerical error w splev).
+        Args:
+            candidate: B-spline kandydata albo `None` przy zdegenerowanym
+                kandydacie.
+            context: Pełny `EvasionContext`.
+            predictor: Estymator pozycji przeszkody.
+
+        Returns:
+            `(4,)` składowe kosztu; sentinel `[1e9, 1e9, 1e9, 1e9]` przy
+            braku kandydata lub błędach numerycznych w `splev`.
         """
         SENTINEL = np.full(4, 1e9, dtype=np.float64)
         if candidate is None:
@@ -135,8 +157,8 @@ class WeightedSumFitness(IFitnessEvaluator):
             duration = float(candidate.total_duration)
             t_samples = u * duration
 
-            # Multi-threat c_safety: primary threat + secondary_threats (other drones).
-            # Bez secondary_threats (back-compat) liczymy tylko primary.
+            # Multi-threat c_safety: primary threat + secondary_threats (inne
+            # drony). Pusta lista secondary ⇒ liczymy tylko primary.
             all_threats = [context.threat] + list(getattr(context, "secondary_threats", []))
             c_safety = 0.0
             for threat in all_threats:
@@ -169,49 +191,49 @@ class WeightedSumFitness(IFitnessEvaluator):
         pos: NDArray[np.float64],  # (N, 3)
         context: EvasionContext,
     ) -> float:
-        """Kara za odchylenie od osi `preferred_axis_hint` (sticky-axis).
+        """Kara za odchylenie kandydata od osi `preferred_axis_hint` (sticky-axis).
 
-        Jeśli `preferred_axis_hint` jest `None` — koszt = 0 (optymalizator
-        ma swobodę). Jeśli ustawiony — penalizujemy projekcję spline'u na
-        oś PRZECIWNĄ do hintu (np. hint=right → penalty na spline_y < start_y).
+        Args:
+            pos: `(N, 3)` próbki splajnu po `splev`.
+            context: `EvasionContext`; gdy `preferred_axis_hint is None`,
+                koszt = 0 (planer ma swobodę).
+
+        Returns:
+            Σ kwadratów projekcji przeciwnej do hintu — `0` przy braku hintu
+            albo gdy spline w pełni leży po stronie zgodnej z hintem.
         """
         hint = context.preferred_axis_hint
         if hint is None:
             return 0.0
 
         start = np.asarray(context.drone_state.position, dtype=np.float64)
-        # Centrum manewru — punkty względem startu.
-        rel = pos - start[None, :]  # (N, 3)
+        rel = pos - start[None, :]
 
-        # Definicje osi w lokalnym frame:
-        # - "up" / "down": Z-axis
-        # - "right" / "left": kierunek prostopadły do v_drone w XY (zgodny z AStar)
+        # Lokalne osie: up/down = Z; right/left = perpendicular do v_drone w XY.
         v = np.asarray(context.drone_state.velocity, dtype=np.float64)
         v_xy = np.array([v[0], v[1], 0.0])
         v_xy_norm = float(np.linalg.norm(v_xy))
         if v_xy_norm > 1e-6:
             forward = v_xy / v_xy_norm
-            lateral = np.array([-forward[1], forward[0], 0.0])  # +90° rotation in XY
+            lateral = np.array([-forward[1], forward[0], 0.0])  # +90° CCW = "right"
         else:
             lateral = np.array([0.0, 1.0, 0.0])
 
         if hint in ("up", "down"):
             sign = 1.0 if hint == "up" else -1.0
-            # Projekcja na Z; karzemy projekcję o przeciwnym znaku do hintu.
-            proj = rel[:, 2] * sign  # >0 zgodne z hintem, <0 przeciwne
+            proj = rel[:, 2] * sign
         elif hint in ("right", "left"):
             sign = 1.0 if hint == "right" else -1.0
             proj = (rel @ lateral) * sign
         else:
             return 0.0
 
-        # Kara = suma kwadratów części „przeciwnej" do hintu.
+        # Kara = Σ|projekcji przeciwnej do hintu|² (positive proj = zgodne z hintem).
         wrong_side = np.maximum(0.0, -proj)
         return float(np.sum(wrong_side ** 2))
 
-    # -------------------------- A* axis_score (cooperative kontrakt) -------- #
-
     def order_score(self, axis_name: str) -> float:
+        """Tie-break score `0…0.1` dla `axis_name` zgodnie z `prefer_axis_order`."""
         return self._order_scores.get(axis_name, 0.0)
 
     def axis_score(
@@ -222,10 +244,9 @@ class WeightedSumFitness(IFitnessEvaluator):
         obs_vel_hat: NDArray[np.float64] | None,
         order_score: float,
     ) -> float:
-        """Cooperative axis-score (analogicznie jak `AxisBiasFitness`) — używane
-        WYŁĄCZNIE jeśli `WeightedSumFitness` byłby wpięty jako axis-picker do
-        `AStarOptimizer` (mało prawdopodobne; AStar w yaml-ach Fazy 2 zwykle
-        ma wpięty `AxisBiasFitness`). Zachowane dla type-safety kontraktu.
+        """Score osi (analog `AxisBiasFitness`) — używany rzadko, dla zgodności kontraktu.
+
+        Pełny opis kontraktu: `IFitnessEvaluator.axis_score`.
         """
         axis_hat = axis_dir / (np.linalg.norm(axis_dir) + 1e-9)
         if obs_vel_hat is not None:

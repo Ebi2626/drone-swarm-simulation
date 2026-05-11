@@ -8,6 +8,14 @@ from src.environments.abstraction.generate_obstacles import ObstaclesData
 from src.environments.abstraction.generate_world_boundaries import WorldData
 
 class SwarmBaseWorld(BaseAviary):
+    """Bazowe środowisko PyBullet dla roju — granice świata, podłoga, sufit, agenci.
+
+    Łączy główny rój (`primary_num_drones`) i opcjonalnych dynamicznych
+    obstakli (`num_dynamic_obstacles`) jako jednorodne ciała PyBullet,
+    rozróżniane semantycznie przez `is_dynamic_obstacle`/`get_body_role`.
+    Konkretne klasy potomne implementują `draw_obstacles` (las, miasto, …).
+    """
+
     def __init__(
         self,
         world_data: WorldData,
@@ -47,10 +55,6 @@ class SwarmBaseWorld(BaseAviary):
             initial_rpys=initial_rpys,
             **filtered_kwargs
         )
-    # ------------------------------------------------------------------ #
-    # Reset & render                                                     #
-    # ------------------------------------------------------------------ #
-
     def reset(self, seed=None, options=None):
         print("[DEBUG]: SwarmBaseWorld Reset()")
         obs, info = super().reset(seed=seed, options=options)
@@ -69,28 +73,29 @@ class SwarmBaseWorld(BaseAviary):
         if self.GUI:
             p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
 
-    # ------------------------------------------------------------------ #
-    # Helpers: role / indexing                                           #
-    # ------------------------------------------------------------------ #
-
     def get_primary_agent_indices(self):
+        """Zwróć listę indeksów `[0, primary_num_drones)` — głównych dronów roju."""
         return list(range(self.primary_num_drones))
 
     def get_dynamic_obstacle_indices(self):
+        """Zwróć indeksy dynamicznych obstakli `[primary, total)`; pusta przy wyłączonych."""
         if not self.dynamic_obstacles_enabled:
             return []
         return list(range(self.primary_num_drones, self.total_agents))
 
     def is_dynamic_obstacle(self, agent_idx: int) -> bool:
+        """`True`, gdy `agent_idx` mieści się w zakresie dynamicznych obstakli."""
         return self.dynamic_obstacles_enabled and self.primary_num_drones <= agent_idx < self.total_agents
 
     def get_agent_index_from_body_id(self, body_id: int):
+        """Mapuj `body_id` PyBullet na indeks agenta; `None`, gdy nie należy do dronów."""
         for idx, drone_body_id in enumerate(self.DRONE_IDS):
             if drone_body_id == body_id:
                 return idx
         return None
 
     def get_body_role(self, body_id: int) -> str:
+        """Zwróć semantyczną rolę ciała: `drone / dynamic_obstacle / ground / ceiling / static_obstacle`."""
         agent_idx = self.get_agent_index_from_body_id(body_id)
         if agent_idx is not None:
             return "dynamic_obstacle" if self.is_dynamic_obstacle(agent_idx) else "drone"
@@ -99,10 +104,6 @@ class SwarmBaseWorld(BaseAviary):
         if body_id == self.ceiling_body_id:
             return "ceiling"
         return "static_obstacle"
-
-    # ------------------------------------------------------------------ #
-    # Building world geometry                                            #
-    # ------------------------------------------------------------------ #
 
     def _clear_default_plane(self):
         print("[DEBUG] Deleting default plane...")
@@ -166,10 +167,7 @@ class SwarmBaseWorld(BaseAviary):
             self._create_ceiling()
         print("[DEBUG] Environment setup complete.")
 
-    # ------------------------------------------------------------------ #
-    # Needed by BaseAviary / Gymnasium                                   #
-    # ------------------------------------------------------------------ #
-
+    # BaseAviary / Gymnasium hook.
     def _addObstacles(self):
         self._clear_default_plane()
         self._setup_environment()
@@ -220,25 +218,20 @@ class SwarmBaseWorld(BaseAviary):
     def _computeInfo(self):
         return {"answer": 42}
 
-    # ------------------------------------------------------------------ #
-    # ABSTRAKCJA                                                         #
-    # ------------------------------------------------------------------ #
-
     @abstractmethod
     def draw_obstacles(self) -> None:
+        """Wystaw przeszkody w PyBullet — implementowane przez klasy potomne."""
         raise NotImplementedError
 
-    # ------------------------------------------------------------------ #
-    # COLLISIONS                                                         #
-    # ------------------------------------------------------------------ #
-
     def get_detailed_collisions(self, include_dynamic_obstacles: bool = False):
-        """
-        Zwraca listę kolizji jako:
-            (agent_idx, other_body_id)
+        """Zwróć listę `(agent_idx, other_body_id)` z fizycznych kontaktów PyBullet.
 
-        Domyślnie raportuje kolizje tylko dla głównych dronów.
-        Jeśli include_dynamic_obstacles=True, sprawdza wszystkich agentów.
+        Args:
+            include_dynamic_obstacles: `True` ⇒ uwzględnij dynamiczne
+                obstakle jako agentów źródłowych; domyślnie tylko `primary_num_drones`.
+
+        Returns:
+            Zbiór par bez duplikatów (kontakt z samym sobą wykluczony).
         """
         collisions = []
         max_agent_idx = self.NUM_DRONES if include_dynamic_obstacles else self.primary_num_drones
@@ -258,12 +251,14 @@ class SwarmBaseWorld(BaseAviary):
         return list(set(collisions))
 
     def get_agent_collisions(self, include_dynamic_obstacles: bool = False):
-        """
-        Zwraca kolizje agent-agent jako:
-            (agent_idx, other_agent_idx)
+        """Zwróć kolizje agent-agent jako `(agent_idx, other_agent_idx)`.
 
-        Przydatne, jeśli później będziesz chciał odróżniać:
-        dron-vs-dron, dron-vs-dynamic_obstacle, dynamic_obstacle-vs-dynamic_obstacle.
+        Args:
+            include_dynamic_obstacles: Patrz `get_detailed_collisions`.
+
+        Returns:
+            Zbiór par agent-agent bez duplikatów; pomija ciała statyczne
+            (ground/ceiling/static obstacles).
         """
         collisions = []
         for agent_idx, other_body_id in self.get_detailed_collisions(
@@ -274,18 +269,13 @@ class SwarmBaseWorld(BaseAviary):
                 collisions.append((agent_idx, other_agent_idx))
         return list(set(collisions))
 
-    # ------------------------------------------------------------------ #
-    # PROXIMITY-BASED inter-drone collision detection (2026-05-07)       #
-    # ------------------------------------------------------------------ #
-    # Threshold rozszerzony 0.15m → 0.5m (2026-05-07, decyzja A z
-    # "near-miss" anomalii — zob. test_near_miss_drones_must_log_inter_drone
-    # _event_not_ground). Geneza:
-    # - Empirycznie (`/tmp/measure_repulsion_threshold.py`) PyBullet LCP
-    #   solver generuje contact impulse BINARNIE przy dist≤0.12m (cylinder
-    #   collision shape r=0.06m).
-    # - 0.15m (1.25× contact) łapał TYLKO scenariusze fizycznego styku.
-    #   Tracił "near-miss" gdzie drony są blisko (0.5-2m), nie dotykają,
-    #   ale przy zbliżeniu PID wpada w niestabilność i drone spada
+    # PROXIMITY-BASED inter-drone collision detection.
+    # Threshold 0.5m derivowany z PyBullet LCP solver: contact impulse
+    # generuje się BINARNIE przy dist≤0.12m (cylinder collision shape r=0.06m).
+    # 0.15m (1.25× contact) łapał tylko fizyczny styk; tracił „near-miss"
+    # gdzie drony są blisko (0.5-2m), nie dotykają, ale przy zbliżeniu PID
+    # wpada w niestabilność i drone spada (test:
+    # `test_near_miss_drones_must_log_inter_drone_event_not_ground`).
     #   ("Te '0' to kolizje między dronami" — user 2026-05-07).
     # - 0.5m (~4.2× contact) łapie również near-miss, dodaje ~70ms
     #   wyprzedzenia przy v=5m/s, vs 30ms dla 0.15m. Generuje minimalne
@@ -296,13 +286,17 @@ class SwarmBaseWorld(BaseAviary):
     def get_inter_drone_proximity_collisions(
         self, threshold_m: float | None = None,
     ) -> list[tuple[int, int, float]]:
-        """Wykrywa pary primary-swarm dronów których odległość center-to-center
-        jest ≤ `threshold_m`. Komplementarne do `get_detailed_collisions`,
-        które wymagają fizycznego kontaktu (LCP).
+        """Wykryj pary dronów (primary) z odległością center-to-center ≤ `threshold_m`.
+
+        Komplementarne do `get_detailed_collisions`, który wymaga fizycznego
+        kontaktu (LCP) — proximity wyłapuje również near-miss.
+
+        Args:
+            threshold_m: Próg odległości [m]; `None` ⇒ `INTER_DRONE_COLLISION_THRESHOLD_M`.
 
         Returns:
-            Lista (agent_idx_a, agent_idx_b, distance_m), gdzie a < b.
-            Pusta gdy żadne pary nie kwalifikują.
+            Lista `(agent_idx_a, agent_idx_b, distance_m)` z `a < b`; pusta,
+            gdy żadne pary nie kwalifikują się.
         """
         if threshold_m is None:
             threshold_m = self.INTER_DRONE_COLLISION_THRESHOLD_M
@@ -328,14 +322,15 @@ class SwarmBaseWorld(BaseAviary):
     def get_all_inter_drone_collisions(
         self, threshold_m: float | None = None,
     ) -> list[tuple[int, int, float, str]]:
-        """Łączy fizyczne (LCP) i proximity-based wykrywanie kolizji dron-dron
-        do jednej spójnej listy. Każda krotka:
-            (agent_idx_a, agent_idx_b, distance_m, source)
-        gdzie `source ∈ {"contact", "proximity"}`.
+        """Połącz fizyczne (LCP) i proximity-based kolizje dron-dron do jednej listy.
 
-        Deduplikacja: jeśli para jest wykryta zarówno fizycznie jak i przez
-        proximity, raportujemy tylko raz z source="contact" (silniejszy
-        wskaźnik — fizycznie się stykają).
+        Args:
+            threshold_m: Próg dla wykrywania proximity (`None` ⇒ wartość domyślna).
+
+        Returns:
+            Lista `(agent_idx_a, agent_idx_b, distance_m, source)` z
+            `source ∈ {"contact", "proximity"}`. Para wykryta oboma metodami
+            raportowana jest raz jako `"contact"` (silniejszy wskaźnik).
         """
         # Fizyczne kontakty: agent-agent pairs z get_agent_collisions, tylko
         # primary drones (nie dynamic obstacles).

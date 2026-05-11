@@ -1,3 +1,15 @@
+"""Wektorowy ewaluator wielokryterialny dla planowania trajektorii roju.
+
+`VectorizedEvaluator.evaluate` liczy dla całej populacji jednocześnie:
+- 5 obiektywów (`F`): f1 trajectory cost, f2 height/angle, f3 threat,
+  f4 turn cost, f5 coordination — wszystkie minimalizowane.
+- 3 ograniczenia (`G`, konwencja pymoo `G ≤ 0` = wykonalne):
+  obstacle collisions, swarm collisions, kinematic penalty
+  (długość segmentu + acceleration limit).
+
+Konsumowany przez wszystkie strategie planowania offline (NSGA-III, MSFFOA,
+OOA, SSA) oraz `populate_offline_objectives` przy ETL.
+"""
 import numpy as np
 from typing import Dict, Any, Optional
 
@@ -16,7 +28,15 @@ from src.algorithms.abstraction.trajectory.strategies.shared.bspline_utils impor
 # nawet dla rozwiązań nieparujących.
 SWARM_COLLISION_TOLERANCE: float = 0.01
 
+
 class VectorizedEvaluator:
+    """Liczy 5 obiektywów i 3 ograniczenia dla całej populacji rozwiązań.
+
+    Trzymany pomiędzy generacjami; wystawia `last_objectives` /
+    `last_constraints` dla strategii SOO oraz akumulowany licznik NFE
+    (`individuals_evaluated`).
+    """
+
     def __init__(
         self,
         obstacles: Optional[ObstaclesData],
@@ -25,6 +45,21 @@ class VectorizedEvaluator:
         n_inner_points: int,
         params: dict
     ):
+        """Wczytaj geometrię świata i przygotuj cache stałych ewaluacji.
+
+        Args:
+            obstacles: Geometria przeszkód statycznych (cylindry/boksy);
+                `None` lub puste ⇒ brak przeszkód, f3 i obstacle G zwracają 0.
+            start_pos: `(N, 3)` pozycje startowe [m].
+            target_pos: `(N, 3)` pozycje docelowe [m].
+            n_inner_points: Liczba wewnętrznych węzłów kontrolnych B-spline'a
+                (bez endpointów `start`/`target`).
+            params: Słownik parametrów algorytmu — odczytywane klucze:
+                `k_factor`, `absolute_min_node_dist`,
+                `obstacle_safety_margin`, `preferred_height`,
+                `min_drone_distance`, `coordination_penalty_factor`,
+                `cruise_speed`, `max_accel`.
+        """
         self.params = params
         self.start_pos = start_pos    # shape: (NDrones, 3)
         self.target_pos = target_pos  # shape: (NDrones, 3)
@@ -36,7 +71,6 @@ class VectorizedEvaluator:
         self.evaluation_number = 0
         self.individuals_evaluated = 0
 
-        # --- 1. KINEMATYKA ---
         k_factor = float(self.params.get("k_factor", 2.0))
         abs_min = float(self.params.get("absolute_min_node_dist", 5.0))
 
@@ -50,7 +84,6 @@ class VectorizedEvaluator:
 
         print(f"[Evaluator] Dynamiczny limit dystansu węzłów: {self.max_node_distance:.2f}m (K={k_factor})")
 
-        # --- 2. INICJALIZACJA PRZESZKÓD ---
         safety_margin = float(self.params.get("obstacle_safety_margin", 0.5))
         self.obstacles_xy = np.zeros((0, 2), dtype=np.float64)
         self.obstacle_radii = np.zeros((0,), dtype=np.float64)
@@ -61,21 +94,18 @@ class VectorizedEvaluator:
             if obstacles.shape_type == ObstacleShape.CYLINDER:
                 self.obstacle_radii = data[:, 3].astype(np.float64) + safety_margin
             elif obstacles.shape_type == ObstacleShape.BOX:
-                # BOX → cylinder przybliżenie: promień opisanego okręgu
-                # (półprzekątna). Decyzja 2026-05-08: zachowujemy ten szybki
-                # schemat (vectorized cylindrical distance), świadomie
-                # akceptując że jest **konserwatywny** — drone w narożnikach
-                # BOX-u jest "wewnątrz" promienia opisanego choć poza ścianami.
-                # Skutek: f3_threat & obstacle_collisions w urban są nieco
-                # zawyżone, ale to pożądane (większy bufor bezpieczeństwa).
-                # Alternatywa (point-in-rectangle SDF) byłaby dokładniejsza
-                # ale ~3× wolniejsza w pętli vectorized — niewarte dla naszego
-                # safety_margin ≥ 1.0m, który dominuje konserwatyzm.
+                # BOX → cylinder przybliżenie przez promień opisanego okręgu
+                # (półprzekątna). Świadomie konserwatywne: drone w narożnikach
+                # BOX-u jest „wewnątrz" promienia opisanego choć poza ścianami,
+                # więc f3_threat & obstacle_collisions w urban są lekko
+                # zawyżone (większy bufor bezpieczeństwa). Alternatywa
+                # point-in-rectangle SDF byłaby ~3× wolniejsza w pętli
+                # vectorized — niewarte dla safety_margin ≥ 1.0m, który
+                # dominuje konserwatyzm.
                 half_lx = data[:, 3].astype(np.float64) / 2.0
                 half_wy = data[:, 4].astype(np.float64) / 2.0
                 self.obstacle_radii = np.sqrt(half_lx**2 + half_wy**2) + safety_margin
 
-        # Wektor idealnych ścieżek dla f_trajectoryShape
         self.ideal_vectors = self.target_pos[:, :2] - self.start_pos[:, :2]
         self.ideal_lengths = np.linalg.norm(self.ideal_vectors, axis=1)
         # Guard przeciwko `start ≡ target` (zdegenerowana misja) — bez tego
@@ -84,10 +114,15 @@ class VectorizedEvaluator:
         self._ideal_lengths_safe = np.maximum(self.ideal_lengths, 1e-9)
 
     def _f1_trajectory_cost(self, control_points: np.ndarray, lengths: np.ndarray) -> np.ndarray:
-        """
-        f_1(tau) - Koszt przebiegu: długość trasy + odległość od idealnej prostej.
-        control_points: (PopSize, NDrones, NControl, 3)
-        lengths: (PopSize, NDrones) 
+        """f₁: długość trasy + suma odchyleń XY od idealnej prostej `start → target`.
+
+        Args:
+            control_points: `(PopSize, NDrones, NControl, 3)` węzły kontrolne.
+            lengths: `(PopSize, NDrones)` długości łuku 3D B-spline'a
+                policzone wcześniej w `evaluate_bspline_trajectory_sync`.
+
+        Returns:
+            `(PopSize,)` skumulowany koszt po wszystkich dronach roju.
         """
         f_length = np.sum(lengths, axis=1) # (PopSize,)
         
@@ -110,9 +145,13 @@ class VectorizedEvaluator:
         return f_length + f_shape
 
     def _f2_height_angle_cost(self, control_points: np.ndarray) -> np.ndarray:
-        """
-        f_2(tau) - Koszt wysokości: utrzymanie preferowanej wysokości (zakładamy płaski teren w celach B-Spline) 
-                   + unikanie ostrych kątów w pionie.
+        """f₂: kara za odchylenie od `preferred_height` + sumaryczny kąt wznoszenia.
+
+        Args:
+            control_points: `(PopSize, NDrones, NControl, 3)` węzły kontrolne.
+
+        Returns:
+            `(PopSize,)` koszt sumaryczny po wszystkich dronach.
         """
         h_pref = float(self.params.get("preferred_height", 15.0))
         z_pts = control_points[..., 2]
@@ -130,9 +169,15 @@ class VectorizedEvaluator:
         return f_height + f_angle
 
     def _f3_threat_cost(self, control_points: np.ndarray) -> np.ndarray:
-        """
-        f_3(tau) - Koszt zagrożenia: przenikanie stref radarowych (przeszkód cylindrycznych).
-        Oparta na dystansach euklidesowych xy do przeszkód.
+        """f₃: penetracja stref bezpieczeństwa wokół przeszkód (XY, dystans euklidesowy).
+
+        Args:
+            control_points: `(PopSize, NDrones, NControl, 3)` węzły kontrolne.
+
+        Returns:
+            `(PopSize,)` skumulowana suma `max(0, radius − dist)` po
+            wszystkich parach (drone, waypoint, obstacle). `0` gdy brak
+            przeszkód w środowisku.
         """
         if len(self.obstacles_xy) == 0:
             return np.zeros(control_points.shape[0])
@@ -149,7 +194,15 @@ class VectorizedEvaluator:
         return np.sum(threats, axis=(1, 2, 3))
 
     def _f4_turn_cost(self, control_points: np.ndarray) -> np.ndarray:
-        """ f_4(tau) - Koszt ostrych zakrętów w płaszczyźnie poziomej. """
+        """f₄: suma kwadratów kątów między kolejnymi segmentami w płaszczyźnie XY.
+
+        Args:
+            control_points: `(PopSize, NDrones, NControl, 3)` węzły kontrolne.
+
+        Returns:
+            `(PopSize,)` Σ θ² po wszystkich załamaniach — penalizuje
+            ostre zakręty.
+        """
         xy_points = control_points[..., :2]
         vectors = np.diff(xy_points, axis=2)
         
@@ -163,10 +216,19 @@ class VectorizedEvaluator:
         return np.sum(angles**2, axis=(1, 2))
 
     def _f5_coordination_cost(self, control_points: np.ndarray, safe_dist: float, penalty: float) -> np.ndarray:
-        """ f_5(tau) - Koszt koordynacji roju (wykładnicza kara za zbliżenie).
+        """f₅: wykładnicza kara za zbliżenie się par dronów na dystans < `safe_dist`.
 
-        Każda para (i, j) liczona JEDEN raz przez maskę górnotrójkątną — bez tego
-        suma po (NDrones × NDrones) zawiera (i,j) i (j,i), zawyżając penalty 2×.
+        Każda para `(i, j)` liczona JEDEN raz dzięki masce górnotrójkątnej —
+        bez tego suma po `NDrones × NDrones` zliczyłaby `(i, j)` i `(j, i)`,
+        zawyżając karę dwukrotnie.
+
+        Args:
+            control_points: `(PopSize, NDrones, NControl, 3)` węzły kontrolne.
+            safe_dist: Minimalny bezpieczny dystans między dronami [m].
+            penalty: Mnożnik kary (`coordination_penalty_factor` z params).
+
+        Returns:
+            `(PopSize,)` skumulowana kara po wszystkich parach i waypointach.
         """
         PopSize, NDrones, NControl, _ = control_points.shape
         diff = control_points[:, :, np.newaxis, :, :] - control_points[:, np.newaxis, :, :, :]
@@ -184,52 +246,58 @@ class VectorizedEvaluator:
         return np.sum(a_ij * c_ij, axis=(1, 2, 3))
 
     def evaluate(self, control_points: np.ndarray, out: Dict[str, Any]):
+        """Policz `F` (5 obiektywów) i `G` (3 ograniczenia) dla całej populacji.
+
+        Wypełnia `out` zgodnie z konwencją pymoo (`out["F"]`, `out["G"]`)
+        i akumuluje `individuals_evaluated` (NFE) — używane przez ETL i
+        adaptery SOO.
+
+        Args:
+            control_points: `(PopSize, NDrones, NControl, 3)` węzły kontrolne
+                pełnego wieloboku kontrolnego (z dołączonymi `start` i `target`).
+            out: Słownik wynikowy modyfikowany w miejscu — po wywołaniu
+                zawiera klucze `"F"` o kształcie `(PopSize, 5)` (kolumny
+                `f1..f5`) i `"G"` `(PopSize, 3)` (`obstacle_collisions`,
+                `swarm_collisions − tolerance`, `kinematic_penalty`).
+        """
         self.evaluation_number += 1
         self.individuals_evaluated += int(control_points.shape[0])
         min_drone_dist = float(self.params.get("min_drone_distance", 2.0))
         penalty_factor = float(self.params.get("coordination_penalty_factor", 1.0))
 
-        # 1. Obliczenie długości i twardych kolizji za pomocą zoptymalizowanej numby
         obs_collisions, lengths, swarm_collisions_hard = evaluate_bspline_trajectory_sync(
             control_points,
             self.obstacles_xy,
             self.obstacle_radii,
             min_drone_dist
         )
-        
-        # 2. Ewaluacja funkcji optymalizacyjnych NSGA-III (Cele)
+
         f1 = self._f1_trajectory_cost(control_points, lengths)
         f2 = self._f2_height_angle_cost(control_points)
         f3 = self._f3_threat_cost(control_points)
         f4 = self._f4_turn_cost(control_points)
         f5 = self._f5_coordination_cost(control_points, min_drone_dist, penalty_factor)
 
-        # 3. Kary Kinematyczne
-        # 3a. Distance violation — segment B-spline'a nie może być zbyt długi
-        # (wcześniej ograniczał globalną krzywiznę przez maksymalny rozrzut).
+        # Distance violation: segment B-spline'a nie może być zbyt długi
+        # (ogranicza maksymalny rozrzut control points → ogranicza krzywiznę).
         diff1 = np.diff(control_points, axis=2)
         dist_violations = np.maximum(0.0, np.linalg.norm(diff1, axis=-1) - self.max_node_distance)
 
-        # 3b. Acceleration violation — TWARDY constraint na fizyczną
-        # acceleration (Kamień 2026-05-07). Wcześniej obecny `||diff2||`
-        # mierzył drugą różnicę skończoną control points w przestrzeni
-        # geometrycznej (m), NIE fizyczną m/s². Pozwalało to optimizer'owi
-        # generować B-spline'y z `||diff2||≤max_accel_limit` ale fizyczną
-        # `|a_lat| = v_cruise²·||diff2||/||diff1||² ≫ max_accel`. Drone
-        # PID tracking takiej trajektorii nasycał silniki, tracił attitude
-        # → spadał. Test:
-        # `test_kinematic_penalty_catches_physical_acceleration_violation`.
+        # Acceleration violation: twardy constraint na fizyczną acceleration.
+        # Naiwna druga różnica `||diff2||` mierzy geometryczną krzywiznę (m),
+        # nie fizyczną m/s². Optimizer mógł znajdować B-spline'y z
+        # `||diff2|| ≤ limit` ale `|a_lat| = v_cruise²·||diff2||/||diff1||² ≫
+        # max_accel` — drone PID nasycał silniki, tracił attitude i spadał.
+        # `compute_max_observed_acceleration` zwraca poprawną fizyczną wartość.
         cruise_speed = float(self.params.get("cruise_speed", 6.0))
         max_accel = float(self.params.get("max_accel", 2.0))
         max_obs_acc = compute_max_observed_acceleration(control_points, cruise_speed)
-        # max_obs_acc shape: (PopSize, NDrones)
         accel_violations = np.maximum(0.0, max_obs_acc - max_accel)
 
         kinematic_penalty = (
             np.sum(dist_violations, axis=(1, 2)) + np.sum(accel_violations, axis=1)
         )
 
-        # PRZYPISANIE DO WYJŚCIA NSGA-III
         out["F"] = np.column_stack([f1, f2, f3, f4, f5])
 
         out["G"] = np.column_stack([

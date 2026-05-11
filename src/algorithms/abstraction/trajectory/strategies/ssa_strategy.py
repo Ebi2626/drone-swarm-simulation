@@ -35,8 +35,6 @@ from mealpy.utils.target import Target
 from src.algorithms.abstraction.trajectory.objective_constrains import (
     VectorizedEvaluator,
 )
-
-# Wspólne komponenty z OOA / MSFFOA / NSGA-III
 from src.algorithms.abstraction.trajectory.strategies.nsga3_swarm_strategy import (
     SwarmOptimizationProblem,
 )
@@ -61,10 +59,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     pass
 
-
-# ---------------------------------------------------------------------------
-# Adapter problemu SSA — Hard Bounding (analogiczny do OOAProblemAdapter)
-# ---------------------------------------------------------------------------
 
 class SSAProblemAdapter(MealpyProblem):
     """
@@ -140,10 +134,6 @@ class SSAProblemAdapter(MealpyProblem):
         return float(self.evaluate_population(x_safe[np.newaxis, :])[0])
 
 
-# ---------------------------------------------------------------------------
-# Subklasa SSA z generacyjnym logowaniem historii
-# ---------------------------------------------------------------------------
-
 class LoggedOriginalSSA(OriginalSSA):
     """SSA z logowaniem per-gen + batchowaniem ewaluacji.
 
@@ -178,10 +168,6 @@ class LoggedOriginalSSA(OriginalSSA):
         self._history_writer = history_writer
         self._history_problem = history_problem
 
-    # ------------------------------------------------------------------
-    # Wewnętrzny helper: zaczepia F/G na targetach z batcha.
-    # ------------------------------------------------------------------
-
     def _attach_FG_to_agents(self, pop: List[Any], F: Optional[np.ndarray],
                              G: Optional[np.ndarray]) -> None:
         """Przyklejamy F/G do `agent._F_row/_G_row` (NIE do target).
@@ -206,10 +192,6 @@ class LoggedOriginalSSA(OriginalSSA):
                     agent._G_row = G[idx].copy()
                 except Exception:
                     pass
-
-    # ------------------------------------------------------------------
-    # Override 1: ewaluacja całej populacji w 1 batchu.
-    # ------------------------------------------------------------------
 
     def update_target_for_population(self, pop: List[Any] = None) -> List[Any]:  # type: ignore[override]
         # Fallback do mealpy'owej implementacji jeśli brak adaptera lub adapter
@@ -244,12 +226,6 @@ class LoggedOriginalSSA(OriginalSSA):
         self._attach_FG_to_agents(pop, F_arr, G_arr)
         self.nfe_counter += len(pop)
         return pop
-
-    # ------------------------------------------------------------------
-    # Override 2: ścieżka pojedynczego osobnika (initial pop, fallbacki).
-    # Po policzeniu Targetu doczytujemy F/G z cache scalar_adaptera (shape
-    # (1, M)) i przykleja je do `target._F_row/_G_row`.
-    # ------------------------------------------------------------------
 
     def generate_agent(self, solution: np.ndarray = None) -> Any:  # type: ignore[override]
         """Po standardowym `generate_agent` doczepia F/G z cache scalar_adapter
@@ -332,10 +308,6 @@ class LoggedOriginalSSA(OriginalSSA):
             logger.warning(f"[SSA] Warning: history logging failed at epoch {epoch}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Główna strategia SSA
-# ---------------------------------------------------------------------------
-
 def ssa_swarm_strategy(
     *,
     start_positions: NDArray[np.float64],
@@ -348,7 +320,30 @@ def ssa_swarm_strategy(
     timing: Optional["TimingCollector"] = None,
     seeds: SeedRegistry = None,
 ) -> NDArray[np.float64]:
+    """Wygeneruj trajektorię roju algorytmem SSA (Xue & Shen 2020, mealpy).
 
+    Implementacja `TrajectoryStrategyProtocol` używająca `mealpy.OriginalSSA`
+    przez adapter `SSAProblemAdapter` z trzywarstwowym clippingiem granic
+    (SSA bywa numerycznie niestabilne — Eq. 4 z paperu produkuje ±∞ przy
+    dużych różnicach pozycji).
+
+    Args:
+        start_positions: `(N, 3)` pozycje startowe [m].
+        target_positions: `(N, 3)` pozycje docelowe [m].
+        obstacles_data: Geometria przeszkód statycznych.
+        world_data: Granice świata symulacji.
+        number_of_waypoints: Docelowa liczba punktów `W` po B-spline.
+        drone_swarm_size: Rozmiar roju `N`.
+        algorithm_params: Hiperparametry — `pop_size`, `epochs` (`n_gen`),
+            `n_inner_waypoints`, `ST` (safety threshold, default 0.8),
+            `PD` (producent ratio, 0.2), `SD` (scout ratio, 0.1),
+            `objective_weights`, `penalty_weight`, `noise_std_xy/_z`.
+        timing: Opcjonalny `TimingCollector` faz.
+        seeds: `SeedRegistry` z subseedami `sampling` i `optimizer`.
+
+    Returns:
+        `(N, W, 3)` wygładzona trajektoria; w razie błędu — linia prosta.
+    """
     params = algorithm_params or {}
 
     local_timing = False

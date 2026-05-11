@@ -5,9 +5,6 @@ from src.algorithms.avoidance.ThreatAnalyzer.ThreatAnalyzer import KinematicStat
 from src.trajectory.BSplineTrajectory import BSplineTrajectory
 from src.algorithms.avoidance.BaseAvoidance import EvasionContext
 
-# --------------------------------------------------------------------------- #
-# KERNELS NUMBA                                                                #
-# --------------------------------------------------------------------------- #
 
 @njit(cache=True, fastmath=True)
 def jit_compute_flyby_arc(drone_pos_x: float, drone_pos_y: float, drone_pos_z: float,
@@ -125,19 +122,34 @@ def jit_build_dynamic_search_space(current_pos: np.ndarray, rejoin_point: np.nda
 
     return bbox_min, bbox_max
 
-# --------------------------------------------------------------------------- #
 
 class EvasionContextBuilder:
+    """Buduje `EvasionContext` (rejoin point + adaptacyjna przestrzeń poszukiwań).
+
+    Ciężkie obliczenia geometryczne wynesione do jąder Numba JIT;
+    `scipy.splev` pozostaje w Pythonie.
     """
-    Preprocesor akademicki dla algorytmów unikania kolizji.
-    Zoptymalizowany numerycznie: ciężkie jądra matematyczne skompilowane przez
-    Numba JIT, splev (FITPACK/Fortran) pozostaje po stronie Pythona.
-    """
+
     def __init__(self, t_min=2.0, t_max=4.0, rejoin_arc_m=8.0,
                  floor_margin=1.0, ceiling_margin=1.0, lateral_margin=4.0,
                  margin_velocity_gain: float = 0.05,
                  rejoin_flyby_safety_m: float = 3.0,
                  lateral_max_offset_m: float = 8.0):
+        """Skonfiguruj parametry geometryczne planera uniku.
+
+        Args:
+            t_min, t_max: Dolny i górny horyzont czasowy planowania [s].
+            rejoin_arc_m: Bazowy dystans łuku do punktu powrotu [m].
+            floor_margin, ceiling_margin: Marginesy bezpieczeństwa od
+                podłogi i sufitu świata [m].
+            lateral_margin: Margines lateralny przy budowie BBOX poszukiwań [m].
+            margin_velocity_gain: Mnożnik `|rel_vel|` dodawany do BBOX padding
+                (szybsze zagrożenia ⇒ większy bufor).
+            rejoin_flyby_safety_m: Dodatkowy bufor czasowy przy obliczaniu
+                punktu powrotu po przelocie obok zagrożenia [m].
+            lateral_max_offset_m: Twardy limit lateralnej odchyłki BBOX-u od
+                drona [m]; `≤ 0` wyłącza ograniczenie.
+        """
         self.t_min = t_min
         self.t_max = t_max
         self.rejoin_arc_m = rejoin_arc_m
@@ -146,11 +158,11 @@ class EvasionContextBuilder:
         self.lateral_margin = lateral_margin
         self.margin_velocity_gain = margin_velocity_gain
         self.rejoin_flyby_safety_m = rejoin_flyby_safety_m
-        # Hard cap na lateralną odchyłkę BBOX-u uniku od drona (Bug #2 plan,
-        # Krok 3c). Bez tego BBOX rośnie z VO + obs_future, AStar wybiera
-        # waypointy odlegające o dziesiątki metrów → ostre zakrzywienia.
-        # Cap działa w osi lateralnej (XY ⊥ forward) i osi Z. Forward NIE
-        # jest cap'owany — drone musi sięgnąć rejoin pointu. `<= 0` wyłącza.
+        # Hard cap na lateralną odchyłkę BBOX-u uniku od drona. Bez tego BBOX
+        # rośnie z VO + obs_future, optimizer wybiera waypointy odlegające
+        # o dziesiątki metrów → ostre zakrzywienia. Cap działa w osi lateralnej
+        # (XY ⊥ forward) i osi Z. Forward NIE jest cap'owany — drone musi
+        # sięgnąć rejoin pointu. `<= 0` wyłącza.
         self.lateral_max_offset_m = float(lateral_max_offset_m)
 
     def build(self,
@@ -163,6 +175,29 @@ class EvasionContextBuilder:
               env_bounds: tuple[np.ndarray, np.ndarray],
               preferred_axis_hint: str | None = None,
               secondary_threats: list[ThreatAlert] | None = None) -> EvasionContext:
+        """Zbuduj kontekst dla pojedynczego trigger'a uniku.
+
+        Liczy adaptacyjną przestrzeń poszukiwań (`search_space_min/max`),
+        długość łuku flyby i punkt powrotu (`rejoin_point`,
+        `rejoin_base_arc`) na podstawie aktualnej geometrii i prędkości.
+
+        Args:
+            drone_id: Indeks drona w głównym roju.
+            current_time: Bieżący czas symulacji [s].
+            drone_state: Stan kinematyczny drona.
+            threat: Najgroźniejsze zagrożenie.
+            base_spline: Bazowa trajektoria offline tego drona.
+            base_arc_progress: Bieżąca długość łuku przebyta na bazowej
+                trajektorii [m].
+            env_bounds: Para `(world_min, world_max)` `(3,)` granic świata.
+            preferred_axis_hint: Sticky-axis z poprzedniego planu, jeśli
+                unik trwa.
+            secondary_threats: Inne drony / obiekty w zasięgu (multi-threat
+                awareness); `None` ⇒ pusta lista.
+
+        Returns:
+            Kompletny `EvasionContext` gotowy do przekazania strategiom uniku.
+        """
 
         world_min, world_max = env_bounds
         floor_z = float(world_min[2]) + self.floor_margin
@@ -224,7 +259,7 @@ class EvasionContextBuilder:
             np.asarray(world_max, dtype=np.float64)
         )
 
-        # Hard cap na lateralną odchyłkę BBOX-u (Bug #2 Krok 3c). Cap'ujemy:
+        # Hard cap na lateralną odchyłkę BBOX-u. Cap'ujemy:
         #  - oś Z (zawsze prostopadła do forward),
         #  - dominującą oś XY lateralnej (X jeśli |lateral_xy.x| > |lateral_xy.y|,
         #    inaczej Y) — przybliżenie axis-aligned bbox-u do pełnej rotacji.
@@ -242,8 +277,8 @@ class EvasionContextBuilder:
             lat_axis = 0 if abs(lateral_xy[0]) > abs(lateral_xy[1]) else 1
             search_min[lat_axis] = max(search_min[lat_axis], cur[lat_axis] - cap)
             search_max[lat_axis] = min(search_max[lat_axis], cur[lat_axis] + cap)
-            # Re-inkluzja kluczowych punktów (rejoin/threat) z marginesem 1m,
-            # żeby AStar miał gdzie zakończyć ścieżkę.
+            # Re-inkluzja kluczowych punktów (drone/rejoin) z marginesem 1m,
+            # żeby optimizer miał gdzie zakończyć ścieżkę.
             for keep_pt in (cur, rejoin_point):
                 search_min = np.minimum(search_min, keep_pt - 1.0)
                 search_max = np.maximum(search_max, keep_pt + 1.0)

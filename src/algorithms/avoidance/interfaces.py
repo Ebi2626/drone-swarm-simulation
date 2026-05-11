@@ -1,3 +1,17 @@
+"""Cztery interfejsy abstrakcyjne (Strategy Pattern) dla planera uniku online.
+
+Hierarchia ról:
+- `IObstaclePredictor` — model przyszłej pozycji przeszkody.
+- `IPathRepresentation` — konwersja waypointów / genów na `BSplineTrajectory`.
+- `IFitnessEvaluator` — koszt / ocena trajektorii uniku (`axis_score` lub
+  pełne `evaluate`).
+- `IPathOptimizer` — silnik wybierający waypointy w zadanym budżecie czasu.
+
+Wszystkie implementacje są wstrzykiwane przez Hydra (`_target_` w yaml-u
+strategii uniku) — wymiana komponentu nie wymaga zmian w kodzie.
+`PathProblem` i `OptimizationResult` to dataklasy hermetyzujące I/O
+optymalizatora.
+"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -18,17 +32,11 @@ if TYPE_CHECKING:
     from src.trajectory.BSplineTrajectory import BSplineTrajectory
 
 
-# --------------------------------------------------------------------------- #
-# 4 abstrakcyjne interfejsy z planu (Strategy Pattern, Hydra-instancjowalne)  #
-# --------------------------------------------------------------------------- #
-
-
 class IObstaclePredictor(ABC):
     """Estymator stanu kinematycznego przeszkody w przyszłości.
 
-    Faza 1 (`ConstantVelocityPredictor`): liniowa ekstrapolacja `pos += vel * t`.
-    Faza 2+: warianty z modelami wyższego rzędu (Kalman, IMM) — wymienialne
-    w yaml bez zmian w optimizerze.
+    Implementacja produkcyjna: `ConstantVelocityPredictor` (liniowa
+    ekstrapolacja `pos += vel · t`).
     """
 
     @abstractmethod
@@ -54,13 +62,13 @@ class IObstaclePredictor(ABC):
 class IPathRepresentation(ABC):
     """Reprezentacja trajektorii ucieczkowej.
 
-    Faza 1 (`BSplineSmoother`): wejście = surowe waypointy 3D z optimizera
-    (typowo z A*); wyjście = wygładzony BSpline 3D, gotowy dla `EvasionPlan`.
-
-    Faza 2 (`BSplineYZGenes`): dekoder genów (`decode_genes`) — wektor decyzji
-    (Δy, Δz) osi YZ → BSpline, X liniowo interpolowane od start do rejoin.
-    Kontrakt rozszerzony o `gene_dim(ctx)` i `gene_bounds(ctx)` — używane przez
-    optymalizatory ewolucyjne przy budowie problemu (mealpy/pymoo bounds).
+    Dwa tryby:
+    - `waypoints_to_spline(...)` — wejście = surowe waypointy 3D, wyjście =
+      wygładzony BSpline 3D (impl. `BSplineSmoother`).
+    - `decode_genes(...)` — wejście = wektor decyzji optymalizatora
+      ewolucyjnego, wyjście = BSpline (impl. `SingleArcDeflection`).
+      Kontrakt rozszerzony o `gene_dim(ctx)` i `gene_bounds(ctx)` — używane
+      przez mealpy/pymoo do budowy problemu.
     """
 
     @abstractmethod
@@ -71,17 +79,14 @@ class IPathRepresentation(ABC):
         *,
         axis_name: str | None = None,
     ) -> "BSplineTrajectory | None":
-        """Zbuduj wykonalny BSpline z surowych waypointów (ścieżka A*).
+        """Zbuduj wykonalny BSpline z surowych waypointów.
 
         :param axis_name: opcjonalny hint o wybranej osi uniku ("up"/"down"/
-            "right"/"left") — np. `BSplineSmoother` używa go do Z-linearyzacji
-            przy axis lateralnych (regresja Fazy 8.1). `BSplineYZGenes` ignoruje.
+            "right"/"left") — `BSplineSmoother` używa go do Z-linearyzacji
+            przy osi lateralnych (zapobiega Z-oscylacjom).
         :return: BSpline lub `None` jeśli budowa się nie powiodła
-                 (np. zdegenerowana sekwencja punktów, naruszenie warunków
-                 brzegowych przy rejoin-point).
+                 (zdegenerowana sekwencja, naruszenie warunków brzegowych).
         """
-
-    # --------- Kontrakt evolutionary (Faza 2) — domyślnie NotImplementedError --------- #
 
     def decode_genes(
         self,
@@ -90,19 +95,17 @@ class IPathRepresentation(ABC):
     ) -> "BSplineTrajectory | None":
         """Zdekoduj wektor genów (decyzje optymalizatora ewolucyjnego) na BSpline.
 
-        Domyślnie nie zaimplementowane — `BSplineSmoother` (używany przez
-        `AStarOptimizer`) nie ma sensu dla genów. `BSplineYZGenes` w Fazie 2
-        nadpisuje tę metodę.
+        Domyślnie `NotImplementedError` — implementacje legacy oparte tylko
+        na `waypoints_to_spline` nie potrzebują dekodera genów.
 
         :param genes: wektor decyzji o długości `gene_dim(context)`. Geometria
-                      kodowania (np. (Δy_1, …, Δy_K, Δz_1, …, Δz_K) lub interleaved)
-                      jest sprawą konkretnej implementacji.
-        :return: BSpline lub `None` przy niepowodzeniu (np. degeneracja, naruszenie
+                      kodowania jest sprawą konkretnej implementacji.
+        :return: BSpline lub `None` przy niepowodzeniu (degeneracja, naruszenie
                  granic). Optimizer powinien w fitness penalizować takie wyniki.
         """
         raise NotImplementedError(
             f"{type(self).__name__}.decode_genes() — używane wyłącznie przez "
-            f"optymalizatory ewolucyjne (Faza 2). AStar nie używa."
+            f"reprezentacje wspierające evolutionary search."
         )
 
     def gene_dim(self, context: EvasionContext) -> int:
@@ -113,7 +116,7 @@ class IPathRepresentation(ABC):
         """
         raise NotImplementedError(
             f"{type(self).__name__}.gene_dim() — używane wyłącznie przez "
-            f"optymalizatory ewolucyjne (Faza 2). AStar nie używa."
+            f"reprezentacje evolutionary."
         )
 
     def gene_bounds(
@@ -127,29 +130,24 @@ class IPathRepresentation(ABC):
         """
         raise NotImplementedError(
             f"{type(self).__name__}.gene_bounds() — używane wyłącznie przez "
-            f"optymalizatory ewolucyjne (Faza 2). AStar nie używa."
+            f"reprezentacje evolutionary."
         )
 
 
 class IFitnessEvaluator(ABC):
     """Funkcja kosztu / oceny wariantu trajektorii uniku.
 
-    Faza 1 (`AxisBiasFitness`): wykorzystywany jest tylko `axis_score` —
-    heurystyka wyboru półpłaszczyzny uniku (right/left/up/down) zgodna
-    z `AStarOptimizer` (preferowana oś + bias anty-prędkościowy).
+    Implementacje:
+    - `AxisBiasFitness` — używa tylko `axis_score` (heurystyka wyboru osi
+      uniku right/left/up/down).
+    - `WeightedSumFitness` — pełne `evaluate(spline, ctx, predictor)` dla SOO
+      (SSA, OOA, MSFOA Online) oraz `evaluate_components` zwracające 4-wektor
+      `[c_safety, c_energy, c_jerk, c_symmetry]` dla NSGA-III multi-obj.
 
-    Faza 2 (`WeightedSumFitness`) dodaje `evaluate(spline, ctx, predictor)` —
-    skalarna funkcja kosztu dla optymalizatorów ewolucyjnych (SSA, OOA, MSFOA),
-    oraz `evaluate_components` zwracające 4-wektor `[c_safety, c_energy, c_jerk,
-    c_symmetry]` dla NSGA-III multi-obj.
-
-    Atrybuty bias (`bias_preferred`, `bias_perpendicular`, `bias_oppose`) są
-    częścią kontraktu — używane przez `AStarOptimizer` do parametryzacji
-    `_BudgetAwareGridSearch`. Domyślne wartości neutralne (1.0).
+    Atrybuty bias (`bias_preferred`, `bias_perpendicular`, `bias_oppose`)
+    parametryzują heurystyczne wagi osi.
     """
 
-    # Domyślne biasy osiowe — używane przez `AStarOptimizer._BudgetAwareGridSearch`.
-    # Konkretne implementacje (`AxisBiasFitness`) przesłaniają tymi z yaml.
     bias_preferred: float = 1.0
     bias_perpendicular: float = 1.0
     bias_oppose: float = 1.0
@@ -186,14 +184,13 @@ class IFitnessEvaluator(ABC):
         z `IPathRepresentation.decode_genes` powinny dostać ekstremalny koszt
         (np. 1e9), by populacja optymalizatora wybrakowała takie osobniki.
 
-        Domyślnie nie zaimplementowane — używane wyłącznie przez optymalizatory
-        ewolucyjne (Faza 2). AStar wybiera punkty kontrolne na podstawie
-        biasów osi (`axis_score`) i w pętli expansion nie potrzebuje fitness
-        całej trajektorii.
+        Domyślnie `NotImplementedError` — implementacja w `WeightedSumFitness`.
+        Heurystyki czysto axis-based (`AxisBiasFitness`) nie potrzebują
+        skalarnego fitness pełnej trajektorii.
         """
         raise NotImplementedError(
-            f"{type(self).__name__}.evaluate() — fitness skalar dla BSplinu "
-            f"jest częścią Fazy 2 (NSGA-III/MSFFOA/SSA/OOA). AStar nie używa."
+            f"{type(self).__name__}.evaluate() — skalarne fitness BSplinu "
+            f"implementuje `WeightedSumFitness`."
         )
 
     def evaluate_components(
@@ -206,13 +203,13 @@ class IFitnessEvaluator(ABC):
         `[c_safety, c_energy, c_jerk, c_symmetry]`. Używane przez
         `NSGA3OnlineOptimizer` do multi-objective optymalizacji.
 
-        Domyślnie nie zaimplementowane — `WeightedSumFitness` (Faza 2) nadpisuje.
+        Domyślnie `NotImplementedError` — `WeightedSumFitness` nadpisuje.
         Dla niezdekodowalnych kandydatów MUSI zwrócić wektor sentinelowy
         (np. `[1e9]*4`), tak by optymalizator wybrakował osobnika.
         """
         raise NotImplementedError(
             f"{type(self).__name__}.evaluate_components() — multi-obj fitness "
-            f"jest częścią Fazy 2 (NSGA-III). SSA/OOA/MSFOA używają `evaluate()`."
+            f"implementuje `WeightedSumFitness`. SOO używają `evaluate()`."
         )
 
 
@@ -269,8 +266,8 @@ class IPathOptimizer(ABC):
       - Optimizer NIE odpowiada za zewnętrzny SIGALRM hard-kill — to zapewnia
         wrapper `GenericOptimizingAvoidance.compute_evasion_plan`.
 
-    Faza 1: tylko `AStarOptimizer`. Faza 2: NSGA3/MSFFOA/SSA/OOA Online — z
-    populacjami 10–30, max 5–15 generacji, by zmieścić się w 1 s.
+    Implementacje produkcyjne: NSGA3/MSFFOA/SSA/OOA Online — z populacjami
+    10–30, max 5–15 generacji, by zmieścić się w ~1 s budżetu.
     """
 
     @property
@@ -292,4 +289,16 @@ class IPathOptimizer(ABC):
         problem: PathProblem,
         budget: TimeBudget,
     ) -> OptimizationResult:
+        """Wybierz najlepsze waypointy uniku w ramach `budget`.
+
+        Args:
+            problem: Pakiet danych (kontekst, predyktor, fitness, reprezentacja
+                ścieżki, opcjonalna pre-wygenerowana populacja).
+            budget: Kooperacyjny limit czasu — sprawdzaj
+                `budget.check_or_raise()` w hot-loopie.
+
+        Returns:
+            `OptimizationResult` z `waypoints` (`None` przy `timed_out`/`failed`),
+            `elapsed_s`, `status` i diagnostyką w `extra`.
+        """
         ...

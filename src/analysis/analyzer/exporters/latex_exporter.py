@@ -18,15 +18,15 @@ def export_latex(
     float_format: str = "%.4f",
     index: bool = False,
 ) -> None:
-    """Eksport DataFrame do .tex (booktabs).
+    """Zapisz `df` jako tabelę LaTeX (`booktabs`) w `out_path`.
 
     Args:
-        df: DataFrame to export.
-        out_path: docelowa ścieżka .tex.
-        caption: opis tabeli (\\caption).
-        label: identyfikator tabeli (\\label).
-        float_format: format liczb zmiennoprzecinkowych.
-        index: czy włączyć index.
+        df: DataFrame do eksportu.
+        out_path: Docelowa ścieżka `.tex` (katalogi nadrzędne tworzone automatycznie).
+        caption: Treść `\\caption` lub `None`, gdy podpis ma być pominięty.
+        label: Identyfikator `\\label` lub `None`.
+        float_format: Format liczb zmiennoprzecinkowych.
+        index: Czy włączyć indeks DataFrame jako kolumnę.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     body = df.to_latex(

@@ -1,4 +1,4 @@
-# src/analysis/db/populate_online_metrics.py
+"""Loader logów online avoidance — `online_optimization.csv` + `convergence_traces.csv`."""
 import csv
 import sqlite3
 from pathlib import Path
@@ -7,9 +7,17 @@ from src.analysis.db.utils import _to_float_nullable, _to_int_nullable, _to_str_
 
 
 def populate_online_metrics(conn: sqlite3.Connection, run_id: str, run_dir: Path) -> None:
-    """
-    Główna funkcja ładująca logi z planowania trajektorii online (unikanie przeszkód).
-    Odpowiada za zasilenie tabel: online_optimization_tasks oraz online_convergence_traces.
+    """Załaduj logi online avoidance dla `run_id` do `analysis.db`.
+
+    Args:
+        conn: Aktywne połączenie do bazy.
+        run_id: Identyfikator runa.
+        run_dir: Katalog runa zawierający `online_optimization.csv`
+            i `convergence_traces.csv` (oba opcjonalne).
+
+    Efekty uboczne:
+        Wstawia dane do `online_optimization_tasks` i
+        `online_convergence_traces`. Brak plików ⇒ no-op.
     """
     online_opt_csv = run_dir / "online_optimization.csv"
     convergence_csv = run_dir / "convergence_traces.csv"
@@ -52,7 +60,6 @@ def _load_online_optimization_tasks(conn: sqlite3.Connection, run_id: str, csv_p
             wallclock_s = _to_float_nullable(row.get("wallclock_s"))
             time_budget_s = _to_float_nullable(row.get("time_budget_s"))
 
-            # Podstawowa walidacja kluczowych pól
             if drone_id is None:
                 raise ValueError(f"{csv_path}:{line_no}: niepoprawne drone_id={row.get('drone_id')!r}")
             if trigger_time is None:

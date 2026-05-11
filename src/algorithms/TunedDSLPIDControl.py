@@ -1,7 +1,7 @@
-"""Tuned DSL PID control + anti-tilt safety dla CF2X drone (Kamień 2026-05-07).
+"""Tuned DSL PID control + anti-tilt safety dla CF2X drone.
 
-Diagnoza realnego runa (forest+ssa, 2026-05-07): default `DSLPIDControl`
-podczas sharp lateral maneuver wpada w **death-spiral**:
+Default `DSLPIDControl` podczas sharp lateral maneuver może wpaść w
+**death-spiral**:
 1. Trajectory wymaga lateral acc → drone tilts (kąt θ od pionu)
 2. Vertical thrust component = `T·cos(θ)` spada
 3. Gdy `T·cos(θ) < m·g`, drone traci altitude
@@ -152,10 +152,10 @@ class TunedDSLPIDControl(DSLPIDControl):
     DEFAULT_INTEGRAL_CLAMP_XY = 0.5
     DEFAULT_INTEGRAL_CLAMP_Z = 0.05
 
-    # Torque gains — yaw damping match do roll/pitch (Kamień follow-up
-    # 2026-05-07): drone 2 panic miał yaw spin (0→75° w 1s) tuż przed fall.
-    # Default DSLPIDControl D_COEFF_TOR=[20000, 20000, 12000] — yaw 40%
-    # niższy niż RP. Tuned: match RP (12000→20000) → stable yaw control.
+    # Yaw damping match do roll/pitch: default DSLPIDControl
+    # `D_COEFF_TOR=[20000, 20000, 12000]` (yaw 40% niższy niż RP) pozwala
+    # drone'owi wpaść w yaw spin (0→75° w 1s) podczas extreme lateral
+    # maneuver tuż przed fall. Tuned matchuje yaw do RP → stable yaw control.
     # P/I_COEFF_TOR defaults zostawiamy (działają dobrze dla roll/pitch).
     DEFAULT_D_COEFF_TOR = np.array([20000.0, 20000.0, 20000.0])
 
@@ -171,6 +171,20 @@ class TunedDSLPIDControl(DSLPIDControl):
         integral_clamp_z: float | None = None,
         max_tilt_rad: float | None = None,
     ):
+        """Skonfiguruj nadpisane gainy PID i parametry anti-tilt.
+
+        Args:
+            drone_model: Model drona (`DroneModel.CF2X` itd.).
+            g: Przyspieszenie ziemskie [m/s²].
+            p_coeff_for, i_coeff_for, d_coeff_for: `(3,)` gainy P/I/D dla
+                `[x, y, z]`. `None` ⇒ wartości `DEFAULT_*`.
+            d_coeff_tor: `(3,)` gainy D dla momentu obrotowego (RPY); `None`
+                ⇒ `DEFAULT_D_COEFF_TOR` z dopasowanym yawem.
+            integral_clamp_xy, integral_clamp_z: Symetryczne progi
+                clampingu integratora w XY i Z; `None` ⇒ wartości domyślne.
+            max_tilt_rad: Twardy limit kąta tilt; `None` ⇒ obliczone
+                z parametrów URDF przez `compute_max_tilt_rad_from_urdf`.
+        """
         super().__init__(drone_model=drone_model, g=g)
         self.P_COEFF_FOR = np.array(
             p_coeff_for if p_coeff_for is not None else self.DEFAULT_P_COEFF_FOR,
@@ -184,8 +198,6 @@ class TunedDSLPIDControl(DSLPIDControl):
             d_coeff_for if d_coeff_for is not None else self.DEFAULT_D_COEFF_FOR,
             dtype=np.float64,
         )
-        # Yaw damping match: D_COEFF_TOR[2] z 12000→20000 default
-        # (eliminuje yaw spin podczas extreme maneuvers).
         self.D_COEFF_TOR = np.array(
             d_coeff_tor if d_coeff_tor is not None else self.DEFAULT_D_COEFF_TOR,
             dtype=np.float64,
@@ -222,11 +234,27 @@ class TunedDSLPIDControl(DSLPIDControl):
         target_rpy,
         target_vel,
     ):
-        """Override: tighter integral clamp + anti-tilt saturation.
+        """Nadpisany PID pozycji z węższym integralnym clamp i saturacją tilt.
 
-        Identyczna logika jak DSLPIDControl._dslPIDPositionControl, EXCEPT:
-        1. Integral clamp z `self.integral_clamp_xy` / `_z` (zamiast hardcoded ±2 / ±0.15)
-        2. Anti-tilt clip na target_thrust przed obliczeniem target_z_ax
+        Identyczna logika jak `DSLPIDControl._dslPIDPositionControl`, z dwoma
+        zmianami:
+        1. Integral clamp pochodzi z `self.integral_clamp_xy/_z`
+           (zamiast hardcoded `±2 / ±0.15`).
+        2. `apply_anti_tilt_clip` ogranicza `target_thrust` przed obliczeniem
+           `target_z_ax`.
+
+        Args:
+            control_timestep: Krok czasowy regulatora [s].
+            cur_pos, cur_vel: `(3,)` aktualna pozycja/prędkość drona [m, m/s].
+            cur_quat: `(4,)` quaternion `(x, y, z, w)` aktualnej orientacji.
+            target_pos, target_vel: `(3,)` zadana pozycja/prędkość.
+            target_rpy: `(3,)` zadane kąty Euler (RPY); używany jest jedynie yaw.
+
+        Returns:
+            Krotkę `(thrust, target_euler, pos_e)`:
+              - `thrust` (`float`) — komendowane PWM.
+              - `target_euler` `(3,)` — komendowane RPY w `XYZ` [rad].
+              - `pos_e` `(3,)` — uchyb pozycji `target_pos − cur_pos` [m].
         """
         cur_rotation = np.array(p.getMatrixFromQuaternion(cur_quat)).reshape(3, 3)
         pos_e = target_pos - cur_pos

@@ -90,7 +90,7 @@ def plot_failure_rate_bars(
     failure_col: str = "is_offline_failure",
     file_suffix: str = "offline",
 ) -> list[Path]:
-    """Per environment: failure rate per optimizer (Kamień 2 — 2026-05-07).
+    """Per environment: failure rate per optimizer.
 
     Failure rate = liczba runów z `failure_col=1` / liczba runów. Wywołujący
     decyduje czy plotuje offline failure (`is_offline_failure`: HV=0 lub

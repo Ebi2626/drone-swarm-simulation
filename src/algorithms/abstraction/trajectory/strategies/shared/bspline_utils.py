@@ -1,9 +1,30 @@
+"""Numba-skompilowane jądra dla B-spline'ów i profilu trapezoidalnego prędkości.
+
+Funkcje publiczne dzielą się na cztery grupy:
+- Bazowe pomocnicze: `bspline_basis_cubic`, `point_to_segment_dist_sq`,
+  `check_aabb_cylinder_collision`.
+- Manipulacja punktami kontrolnymi: `build_clamped_control_points`,
+  `clamp_control_points_batch`.
+- Próbkowanie i ewaluacja krzywych: `evaluate_bspline_trajectory`,
+  `evaluate_bspline_trajectory_sync`, `generate_bspline_batch`.
+- Profil trapezoidalny: `calculate_trapezoidal_profile`,
+  `get_state_at_time_numba`, `compute_max_observed_acceleration`,
+  `calculate_dynamic_max_node_distance`.
+
+Wszystkie kernele kompilowane z `@njit(cache=True)`.
+"""
 import numpy as np
 from numba import njit
 
 
 @njit(cache=True)
 def bspline_basis_cubic(t: float):
+    """Wartości czterech bazowych funkcji kubicznego B-spline'a w punkcie `t ∈ [0, 1]`.
+
+    Returns:
+        Krotka `(b0, b1, b2, b3)` współczynników do liniowej kombinacji
+        4 sąsiednich punktów kontrolnych segmentu.
+    """
     it = 1.0 - t
     b0 = (it ** 3) / 6.0
     b1 = (3.0 * (t ** 3) - 6.0 * (t ** 2) + 4.0) / 6.0
@@ -13,9 +34,21 @@ def bspline_basis_cubic(t: float):
 
 @njit(cache=True)
 def build_clamped_control_points(free_cp, start_pos, goal_pos):
-    # free_cp: (PopSize, NDrones, N_free, 3)
+    """Doklej `start_pos` / `goal_pos` jako 4× powtórzone końce wieloboku kontrolnego.
+
+    `rep = 4` dla kubicznego B-spline'a daje końcom krotność 3, więc krzywa
+    interpoluje endpointy.
+
+    Args:
+        free_cp: `(PopSize, NDrones, N_free, 3)` wewnętrzne punkty kontrolne.
+        start_pos: `(NDrones, 3)` pozycje startowe per dron.
+        goal_pos: `(NDrones, 3)` pozycje docelowe per dron.
+
+    Returns:
+        `(PopSize, NDrones, N_free + 8, 3)` pełny wielobok kontrolny.
+    """
     pop_size, n_drones, n_free, _ = free_cp.shape
-    rep = 4  # cubic B-spline, gdy start/cel nie są w free_cp
+    rep = 4
 
     cp = np.empty((pop_size, n_drones, n_free + 2 * rep, 3), dtype=np.float64)
 
@@ -31,33 +64,30 @@ def build_clamped_control_points(free_cp, start_pos, goal_pos):
 
 @njit(cache=True)
 def clamp_control_points_batch(control_points):
-    """
-    Klamruje wektory węzłów przez trzykrotne powtórzenie pierwszego
-    i ostatniego punktu kontrolnego dla każdego drona w populacji.
+    """Powiel pierwszy i ostatni punkt kontrolny każdego drona do krotności 3.
 
-    Dla B-Spline stopnia 3 (cubic) wymagana krotność końcowych węzłów = 3,
-    co wymusza interpolację krzywej przez P[0] i P[-1].
+    Wymóg dla kubicznego B-spline'a, by krzywa interpolowała `P[0]` i `P[-1]`.
 
-    Wejście:  (PopSize, NDrones, N_ctrl, 3)
-    Wyjście:  (PopSize, NDrones, N_ctrl + 4, 3)
-              [P0, P0, P0, P1, ..., Pn-1, Pn, Pn, Pn]
+    Args:
+        control_points: `(PopSize, NDrones, N_ctrl, 3)` wielobok kontrolny.
+
+    Returns:
+        `(PopSize, NDrones, N_ctrl + 4, 3)` z układem
+        `[P0, P0, P0, P1, …, Pn-1, Pn, Pn, Pn]`.
     """
     pop_size, n_drones, n_ctrl, dims = control_points.shape
-    # Każdy koniec powtarzamy 2x extra (raz już istnieje), łącznie krotność = 3
+    # Krotność końców = 3 → P[0] i P[-1] dwukrotnie ekstra (raz już istnieją).
     n_clamped = n_ctrl + 4
     out = np.zeros((pop_size, n_drones, n_clamped, dims), dtype=np.float64)
 
     for p in range(pop_size):
         for d in range(n_drones):
-            # Pierwsze 3 pozycje = P[0] (krotność 3)
             for rep in range(3):
                 for dim in range(dims):
                     out[p, d, rep, dim] = control_points[p, d, 0, dim]
-            # Środkowe punkty bez zmian
             for i in range(1, n_ctrl - 1):
                 for dim in range(dims):
                     out[p, d, 2 + i, dim] = control_points[p, d, i, dim]
-            # Ostatnie 3 pozycje = P[-1] (krotność 3)
             for rep in range(3):
                 for dim in range(dims):
                     out[p, d, n_clamped - 1 - rep, dim] = control_points[p, d, n_ctrl - 1, dim]
@@ -67,13 +97,26 @@ def clamp_control_points_batch(control_points):
 
 @njit(cache=True)
 def check_aabb_cylinder_collision(min_x, min_y, max_x, max_y, cyl_x, cyl_y, cyl_radius):
+    """Sprawdź, czy okrąg `(cyl_x, cyl_y, cyl_radius)` przecina prostokąt AABB w XY.
+
+    Returns:
+        `True`, gdy najbliższy punkt prostokąta leży nie dalej niż
+        `cyl_radius` od środka okręgu.
+    """
     closest_x = max(min_x, min(cyl_x, max_x))
     closest_y = max(min_y, min(cyl_y, max_y))
     dist_sq = (closest_x - cyl_x)**2 + (closest_y - cyl_y)**2
     return dist_sq <= (cyl_radius ** 2)
 
+
 @njit(cache=True)
 def point_to_segment_dist_sq(px, py, ax, ay, bx, by):
+    """Kwadrat odległości euklidesowej w XY od punktu `(px, py)` do odcinka `AB`.
+
+    Returns:
+        Kwadrat dystansu — bez `sqrt` dla wydajności (porównania `<` można
+        robić na kwadratach).
+    """
     abx = bx - ax
     aby = by - ay
     den = abx * abx + aby * aby
@@ -108,11 +151,29 @@ def evaluate_bspline_trajectory(
     min_z=-1.0e30,
     max_z=1.0e30,
 ):
-    # Klamrowanie 3x (tożsame z rekonstrukcją w generate_bspline_batch).
-    # control_points to pełny wielobok [Start, Inner_1..n, Target] — start_pos/goal_pos
-    # pozostają w sygnaturze dla zgodności z wcześniejszym API, ale nie są tu już
-    # wykorzystywane (interpolacja przez pierwszy/ostatni punkt jest zapewniona
-    # przez krotność 3 w clamp_control_points_batch).
+    """Próbkuj B-spline'y i policz kolizje, długości oraz naruszenia Z dla całej populacji.
+
+    Args:
+        control_points: `(PopSize, NDrones, N_ctrl, 3)` pełny wielobok
+            kontrolny `[Start, Inner_1…n, Target]`.
+        start_pos: Zachowane dla zgodności starszego API — nie używane,
+            bo klamrowanie zapewnia interpolację przez `P[0]`.
+        goal_pos: Zachowane dla zgodności — patrz wyżej.
+        obstacles_xy: `(N_obs, 2)` pozycje cylindrycznych przeszkód.
+        obstacle_radii: `(N_obs,)` promienie przeszkód [m].
+        drone_radius: Promień drona [m] dodawany do bufora kolizji.
+        safety_margin: Dodatkowy margines bezpieczeństwa [m].
+        min_samples_per_seg: Minimalna gęstość próbkowania jednego segmentu.
+        min_z, max_z: Granice korytarza w osi Z; przekroczenia akumulowane
+            w `z_violations`.
+
+    Returns:
+        Krotka `(collisions, lengths, z_violations)` — wszystkie
+        `(PopSize, NDrones)`:
+        - `collisions` — sumaryczna głębokość penetracji buforów przeszkód.
+        - `lengths` — długości łuku 3D w metrach.
+        - `z_violations` — sumaryczne wyjścia poza `[min_z, max_z]`.
+    """
     cp = clamp_control_points_batch(control_points)
 
     pop_size, n_drones, n_ctrl, _ = cp.shape
@@ -189,13 +250,19 @@ def evaluate_bspline_trajectory(
 
 @njit(cache=True)
 def generate_bspline_batch(control_points, num_samples):
-    """
-    Generuje gładkie trajektorie B-Spline z węzłów kontrolnych.
-    Automatycznie klamruje końce — krzywa interpoluje P[0] i P[-1].
+    """Wygeneruj gładkie trajektorie B-spline z węzłów kontrolnych dla całej populacji.
 
-    Wejście:  (PopSize, NDrones, N_ctrl, 3)
-    Wyjście:  (PopSize, NDrones, num_samples, 3)
-              Pierwszy i ostatni punkt == odpowiednio P[0] i P[-1].
+    Końce wieloboku są klamrowane automatycznie, więc krzywa interpoluje
+    `P[0]` i `P[-1]`.
+
+    Args:
+        control_points: `(PopSize, NDrones, N_ctrl, 3)` wielobok kontrolny.
+        num_samples: Docelowa liczba punktów wyjściowych (zostanie
+            zaokrąglona w dół do wielokrotności liczby segmentów).
+
+    Returns:
+        `(PopSize, NDrones, total_samples, 3)` próbki krzywych —
+        pierwszy i ostatni punkt to `P[0]` i `P[-1]`.
     """
     # Centralne klamrowanie
     cp = clamp_control_points_batch(control_points)
@@ -235,12 +302,23 @@ def generate_bspline_batch(control_points, num_samples):
     return out_points
 
 
-# ---------------------------------------------------------------------------
-# Funkcje dynamiki lotu — bez zmian
-# ---------------------------------------------------------------------------
-
 @njit(cache=True)
 def calculate_trapezoidal_profile(total_distance, cruise_speed, max_accel):
+    """Wylicz fazy profilu trapezoidalnego dla danego dystansu.
+
+    Args:
+        total_distance: Całkowita długość trasy [m].
+        cruise_speed: Docelowa prędkość przelotowa [m/s].
+        max_accel: Maksymalne przyspieszenie/hamowanie [m/s²].
+
+    Returns:
+        Krotka `(ta, tc, td, sa, sc, v_peak, total_duration)`:
+        - `ta, tc, td` — czasy faz przyspieszania, cruise i hamowania [s].
+        - `sa, sc` — dystanse przebyte w fazach przyspieszania i cruise [m].
+        - `v_peak` — faktycznie osiągnięta prędkość szczytowa [m/s]
+          (mniejsza niż `cruise_speed` dla bardzo krótkich tras).
+        - `total_duration = ta + tc + td` [s].
+    """
     ta = cruise_speed / max_accel
     sa = 0.5 * max_accel * ta**2
 
@@ -262,6 +340,22 @@ def calculate_trapezoidal_profile(total_distance, cruise_speed, max_accel):
 @njit(cache=True)
 def get_state_at_time_numba(waypoints, distances, cumulative_distances,
                             t, ta, tc, td, sa, sc, v_peak, max_accel):
+    """Pomocnik fallbackowy: stan trasy w chwili `t` z interpolacją liniową.
+
+    Używane gdy `NumbaTrajectoryProfile` nie mógł zafitować B-spline'a
+    (degeneracja: < 4 waypointów albo zerowa długość trasy).
+
+    Args:
+        waypoints: `(W, 3)` punkty trasy.
+        distances: `(W-1,)` długości segmentów.
+        cumulative_distances: `(W,)` skumulowane długości od startu.
+        t: Czas od startu trasy [s].
+        ta, tc, td, sa, sc, v_peak, max_accel: Parametry profilu z
+            `calculate_trapezoidal_profile`.
+
+    Returns:
+        Para `(pos, velocity)` — `(3,)` w metrach i `(3,)` w m/s.
+    """
     total_time = ta + tc + td
     if t <= 0.0:
         return waypoints[0], np.zeros(3, dtype=np.float64)
@@ -313,41 +407,41 @@ def calculate_dynamic_max_node_distance(
     k_factor: float = 2.0,
     absolute_min: float = 5.0
 ) -> float:
-    """
-    Oblicza dynamiczny, maksymalny dozwolony dystans między węzłami kontrolnymi (Numba).
-    Działa ekstremalnie szybko unikając wywołań osiowych numpy.
-    
-    start_pos, target_pos: tablice (NDrones, 3)
-    n_inner_points: liczba węzłów pomiędzy hover_start a hover_target
+    """Wylicz dynamiczny limit odległości sąsiednich węzłów kontrolnych.
+
+    Wartość = `max(absolute_min, k_factor × avg_segment_length)`, gdzie
+    `avg_segment_length = max_route_length / (n_inner_points + 3)`. Liczba
+    segmentów odpowiada konwencji doklejania
+    `[starts, starts_hover, inner…, targets_hover, targets]`.
+
+    Args:
+        start_pos: `(NDrones, 3)` pozycje startowe [m].
+        target_pos: `(NDrones, 3)` pozycje docelowe [m].
+        n_inner_points: Liczba wewnętrznych węzłów kontrolnych.
+        k_factor: Mnożnik średniej długości segmentu.
+        absolute_min: Twardy dolny limit [m].
+
+    Returns:
+        Maksymalny dozwolony dystans między sąsiednimi węzłami [m].
     """
     n_drones = start_pos.shape[0]
-    
-    # Szukamy najdłuższej trasy euklidesowej
+
     max_route_length = 0.0
-    
     for d in range(n_drones):
         dx = target_pos[d, 0] - start_pos[d, 0]
         dy = target_pos[d, 1] - start_pos[d, 1]
         dz = target_pos[d, 2] - start_pos[d, 2]
-        
         dist = np.sqrt(dx*dx + dy*dy + dz*dz)
         if dist > max_route_length:
             max_route_length = dist
 
-    # Liczba segmentów = (węzły wewnętrzne) + (hover_start) + (hover_target) + (cel) - 1
-    # Ponieważ po start idzie hover, a przed cel hover, łącznie węzłów zależy od 
-    # implementacji doklejania. W Rozwiązaniu A mieliśmy:
-    # starts, starts_hover, inner, targets_hover, targets 
-    # czyli n_inner_points + 4 punkty -> n_inner_points + 3 segmenty
     n_segments = n_inner_points + 3
-    
-    # Aby uniknąć dzielenia przez zero przy dziwnych parametrach:
     if n_segments < 1:
         n_segments = 1
-        
+
     avg_segment_length = max_route_length / n_segments
     dynamic_limit = avg_segment_length * k_factor
-    
+
     return max(absolute_min, dynamic_limit)
 
 
@@ -361,6 +455,28 @@ def evaluate_bspline_trajectory_sync(
     safety_margin=0.10,
     min_samples_per_seg=30,
 ):
+    """Wariant zsynchronizowany — wszystkie drony porównywane w tym samym kroku czasowym.
+
+    Dodatkowo do `evaluate_bspline_trajectory` liczy `swarm_collisions`:
+    sumę naruszeń dystansu pomiędzy parami dronów w tym samym indeksie
+    próbki (synchroniczna ocena bezpieczeństwa wewnątrz roju).
+
+    Args:
+        control_points: `(PopSize, NDrones, N_ctrl, 3)` wielobok kontrolny.
+        obstacles_xy: `(N_obs, 2)` pozycje przeszkód.
+        obstacle_radii: `(N_obs,)` promienie przeszkód [m].
+        min_drone_dist: Minimalny dozwolony dystans pary dronów [m].
+        drone_radius: Promień drona [m].
+        safety_margin: Margines bezpieczeństwa wokół przeszkód [m].
+        min_samples_per_seg: Minimalna gęstość próbkowania segmentu.
+
+    Returns:
+        Krotka `(obstacle_collisions, lengths, swarm_collisions)`:
+        - `obstacle_collisions` `(PopSize, NDrones)` — naruszenia buforów
+          przeszkód statycznych.
+        - `lengths` `(PopSize, NDrones)` — długości łuku 3D [m].
+        - `swarm_collisions` `(PopSize,)` — naruszenia dystansu w roju.
+    """
     cp = clamp_control_points_batch(control_points)
 
     pop_size, n_drones, n_ctrl, _ = cp.shape
@@ -424,7 +540,6 @@ def evaluate_bspline_trajectory_sync(
 
                     lengths[p, d] += np.sqrt((cx - px)**2 + (cy - py)**2 + (cz - pz)**2)
 
-                    # Kolizje z przeszkodami liczymy tylko, gdy przeszkody istnieją
                     if use_obstacles:
                         for obs_idx in range(n_obstacles):
                             ox = obstacles_xy[obs_idx, 0]
@@ -461,7 +576,7 @@ def compute_max_observed_acceleration(
     boundary_segments_skip: int = 0,
 ):
     """Twardy fizyczny constraint na **LATERAL** acceleration drona podążającego
-    za B-spline'em (Kamień 2026-05-07, refactor v2).
+    za B-spline'em.
 
     Mierzy wyłącznie składową lateralną (perpendicular do kierunku ruchu) bo:
     - **Tangencjalna** acceleration (along velocity) jest bounded przez

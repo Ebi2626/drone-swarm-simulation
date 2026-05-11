@@ -10,8 +10,8 @@ except ImportError:
     _HAS_H5PY = False
 
 _LIDAR_SENTINEL = None
-_LIDAR_FLUSH_SIZE = 100000  # Większy bufor niż dla historii optymalizacji,
-                          # bo rekordy są dużo mniejsze (7 liczb vs macierze)
+_LIDAR_FLUSH_SIZE = 100000  # Większy bufor niż dla optimization history —
+                          # rekordy LiDAR to 7 floatów, nie macierze.
 
 
 class LidarHDF5Writer:
@@ -27,6 +27,11 @@ class LidarHDF5Writer:
     COLUMNS = ["time", "drone_id", "object_id", "distance", "hit_x", "hit_y", "hit_z"]
 
     def __init__(self, output_dir: str):
+        """Skonfiguruj writer i odpal wątek konsumenta z queue (`maxsize=2000`).
+
+        Args:
+            output_dir: Katalog docelowy `lidar_hits.h5` (tworzony, gdy brak).
+        """
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -40,28 +45,24 @@ class LidarHDF5Writer:
         )
         self._thread.start()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def put(self, record: tuple) -> None:
-        """Wrzuca pojedynczy rekord do kolejki bez blokowania na długo."""
+        """Dodaj `record` do kolejki (`block=True, timeout=2.0`); drop przy `Full`.
+
+        Args:
+            record: Krotka `(time, drone_id, object_id, distance, hit_x, hit_y, hit_z)`.
+        """
         try:
             self._queue.put(record, block=True, timeout=2.0)
         except queue.Full:
-            # Upuszczamy dane zamiast blokować wątek symulacji
             pass
 
     def close(self) -> None:
-        """Wysyła token kończący, czeka na drain kolejki i flush reszty."""
+        """Wyślij sentinel kończący, poczekaj na drain kolejki i flush bufora."""
         self._queue.put(_LIDAR_SENTINEL)
         self._thread.join()
 
-    # ------------------------------------------------------------------
-    # Consumer internals
-    # ------------------------------------------------------------------
-
     def _consumer_loop(self) -> None:
+        """Pętla konsumenta — buforuje rekordy do `_LIDAR_FLUSH_SIZE` i flushuje."""
         buffer: list = []
 
         while True:
@@ -82,6 +83,7 @@ class LidarHDF5Writer:
                 buffer.clear()
 
     def _flush(self, buffer: list) -> None:
+        """Zapisz `buffer` do HDF5 (gdy `h5py` dostępne) lub fallback na NPZ."""
         self._flush_counter += 1
         path = os.path.join(self.output_dir, "lidar_hits.h5")
 
@@ -91,8 +93,8 @@ class LidarHDF5Writer:
             self._flush_npz(buffer)
 
     def _flush_hdf5(self, buffer: list, path: str) -> None:
-        # Konwersja listy krotek → macierz float32 (7 kolumn)
-        # dtype float32 zamiast float64: ~2x mniej miejsca na dysku
+        """Dopisz `buffer` do extendowalnego datasetu `hits` w pliku HDF5 `path`."""
+        # float32 zamiast float64 → ~2× mniej miejsca, wystarczająca precyzja.
         chunk = np.array(buffer, dtype=np.float32)  # shape: (N, 7)
 
         with h5py.File(path, "a") as f:
@@ -106,18 +108,17 @@ class LidarHDF5Writer:
                 ds = f.create_dataset(
                     "hits",
                     data=chunk,
-                    maxshape=(None, 7),    # rozszerzalny wzdłuż osi wierszy
-                    chunks=(4096, 7),      # chunk na ~28 KB przy float32
+                    maxshape=(None, 7),
+                    chunks=(4096, 7),  # ~28 KB per chunk @ float32
                     compression="gzip",
                     compression_opts=4,
                 )
-                # Dokumentacja kolumn jako atrybut HDF5
                 ds.attrs["columns"] = self.COLUMNS
 
         print(f"[LIDAR] Flushed {len(buffer)} hits to HDF5 (chunk #{self._flush_counter}).")
 
     def _flush_npz(self, buffer: list) -> None:
-        """Fallback gdy h5py niedostępne."""
+        """Fallback NPZ — zapisuje chunk do `lidar_hits_npz/chunk_XXXX.npz` gdy brak `h5py`."""
         npz_dir = os.path.join(self.output_dir, "lidar_hits_npz")
         os.makedirs(npz_dir, exist_ok=True)
         chunk = np.array(buffer, dtype=np.float32)

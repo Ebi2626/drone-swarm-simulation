@@ -29,21 +29,23 @@ from src.analysis.analyzer.plots._common import apply_style
 logger = logging.getLogger(__name__)
 
 
-# ======================================================================
-# Data container
-# ======================================================================
-
 @dataclass
 class _PlotRef:
-    """Reference to a plot file for report embedding."""
+    """Referencja do pliku PNG osadzanego w raporcie.
+
+    Args:
+        title: Czytelny tytuł pod wykresem.
+        absolute_path: Pełna ścieżka do PNG (na potrzeby `PdfPages.savefig`).
+        relative_path: Ścieżka względem katalogu raportu (markdown links).
+    """
     title: str
     absolute_path: Path
-    relative_path: str  # relative to report dir, for markdown
+    relative_path: str
 
 
 @dataclass
 class ReportData:
-    """All data needed to render both report formats."""
+    """Komplet danych potrzebnych do wygenerowania raportu PDF i Markdown."""
     experiment_name: str
     generation_date: str
     n_runs: int
@@ -77,10 +79,6 @@ class ReportData:
     offline_plots: list[_PlotRef] = field(default_factory=list)
     online_plots: list[_PlotRef] = field(default_factory=list)
 
-
-# ======================================================================
-# ReportGenerator
-# ======================================================================
 
 class ReportGenerator:
     """Generates experiment summary reports in PDF and Markdown."""
@@ -123,16 +121,27 @@ class ReportGenerator:
     ]
 
     def __init__(self, experiment_dir: str | Path) -> None:
+        """Powiąż generator z katalogiem eksperymentu i jego artefaktami.
+
+        Args:
+            experiment_dir: Katalog eksperymentu zawierający `analysis_output/`
+                z wcześniej wygenerowanymi tabelami i wykresami.
+        """
         self.experiment_dir = Path(experiment_dir).resolve()
         self.tables_dir = self.experiment_dir / "analysis_output" / "tables"
         self.plots_dir = self.experiment_dir / "analysis_output" / "plots"
         self.out_dir = self.experiment_dir / "analysis_output" / "report"
 
     def generate(self) -> tuple[Path, Path]:
-        """Generate both Markdown and PDF reports.
+        """Wygeneruj raport w dwóch formatach (Markdown + PDF).
 
         Returns:
-            (md_path, pdf_path) tuple of generated file paths.
+            Krotka `(md_path, pdf_path)` z bezwzględnymi ścieżkami zapisanych
+            plików.
+
+        Efekty uboczne:
+            Tworzy `analysis_output/report/experiment_report.{md,pdf}` (oraz
+            katalog raportu, jeśli nie istnieje).
         """
         self.out_dir.mkdir(parents=True, exist_ok=True)
         data = self._collect_data()
@@ -141,12 +150,8 @@ class ReportGenerator:
         logger.info("Report generated: %s, %s", md_path, pdf_path)
         return md_path, pdf_path
 
-    # ------------------------------------------------------------------
-    # Data collection
-    # ------------------------------------------------------------------
-
     def _collect_data(self) -> ReportData:
-        """Read existing CSV tables and plot PNGs into ReportData."""
+        """Wczytaj tabele CSV i pliki PNG z `analysis_output/` do `ReportData`."""
         # Experiment metadata from directory name
         exp_name = self.experiment_dir.name
         envs = self._detect_values("environment")
@@ -248,7 +253,7 @@ class ReportGenerator:
         )
 
     def _detect_values(self, col: str) -> list[str]:
-        """Detect unique values of `col` from any available summary CSV."""
+        """Zwróć posortowane unikalne wartości kolumny `col` z dowolnego summary CSV."""
         for m in self.OFFLINE_KEY_METRICS:
             df = self._read_csv(f"summary_{m}.csv")
             if df is not None and col in df.columns:
@@ -256,7 +261,7 @@ class ReportGenerator:
         return []
 
     def _detect_avoidances(self) -> list[str]:
-        """Detect avoidance algorithms from analysis.db runs table."""
+        """Zwróć listę algorytmów avoidance z tabeli `runs` w `analysis.db`."""
         import sqlite3
 
         db_path = self.experiment_dir / "analysis.db"
@@ -273,7 +278,7 @@ class ReportGenerator:
             return []
 
     def _count_runs(self) -> int:
-        """Count total runs from analysis.db."""
+        """Zwróć liczbę wszystkich runów w `analysis.db` (`0` przy braku DB)."""
         import sqlite3
 
         db_path = self.experiment_dir / "analysis.db"
@@ -287,6 +292,7 @@ class ReportGenerator:
             return 0
 
     def _read_csv(self, filename: str) -> Optional[pd.DataFrame]:
+        """Wczytaj `tables_dir/filename` jako DataFrame; `None` przy braku/błędzie."""
         path = self.tables_dir / filename
         if path.exists():
             try:
@@ -298,7 +304,16 @@ class ReportGenerator:
     def _compute_best_per_metric(
         self, friedman: dict[str, pd.DataFrame],
     ) -> Optional[pd.DataFrame]:
-        """Extract best algorithm (rank 1) per metric from Friedman results."""
+        """Zwróć najlepszy algorytm (rank 1) per metryka z wyników Friedmana.
+
+        Args:
+            friedman: Mapa `metric → DataFrame` z kolumnami `optimizer`,
+                `avg_rank`, opcjonalnie `p_value`.
+
+        Returns:
+            DataFrame `metric, best_algorithm, avg_rank, p_value` albo `None`,
+            gdy brak danych.
+        """
         if not friedman:
             return None
         rows = []
@@ -318,7 +333,7 @@ class ReportGenerator:
     def _compute_overall_ranking(
         self, friedman: dict[str, pd.DataFrame],
     ) -> Optional[pd.DataFrame]:
-        """Average Friedman rank across all key offline metrics."""
+        """Zwróć ranking algorytmów uśredniony po wszystkich metrykach offline."""
         if not friedman:
             return None
         all_ranks = []
@@ -343,7 +358,7 @@ class ReportGenerator:
         specs: list[tuple[str, str, str]],
         environments: list[str],
     ) -> list[_PlotRef]:
-        """Collect existing plot PNGs matching the spec patterns."""
+        """Zwróć listę `_PlotRef` z istniejących PNG dopasowanych do `specs`."""
         import os
 
         refs = []
@@ -372,7 +387,7 @@ class ReportGenerator:
         failure_offline: Optional[pd.DataFrame],
         failure_online: Optional[pd.DataFrame],
     ) -> list[str]:
-        """Auto-generate key findings from data."""
+        """Wygeneruj listę zdań „key findings" na podstawie zagregowanych danych."""
         findings: list[str] = []
 
         # 1. Best overall offline algorithm
@@ -435,12 +450,8 @@ class ReportGenerator:
 
         return findings
 
-    # ------------------------------------------------------------------
-    # Markdown generation
-    # ------------------------------------------------------------------
-
     def _generate_markdown(self, data: ReportData) -> Path:
-        """Render jinja2 template to Markdown."""
+        """Wyrenderuj `report_template.md.j2` do `experiment_report.md`."""
         import jinja2
 
         template_path = Path(__file__).parent / "report_template.md.j2"
@@ -481,12 +492,8 @@ class ReportGenerator:
         logger.info("Markdown report: %s", md_path)
         return md_path
 
-    # ------------------------------------------------------------------
-    # PDF generation (matplotlib PdfPages)
-    # ------------------------------------------------------------------
-
     def _generate_pdf(self, data: ReportData) -> Path:
-        """Compile multi-page PDF report using matplotlib PdfPages."""
+        """Skompiluj wielostronicowy PDF raportu (matplotlib `PdfPages`)."""
         apply_style()
         pdf_path = self.out_dir / "experiment_report.pdf"
 
@@ -562,11 +569,8 @@ class ReportGenerator:
         logger.info("PDF report: %s", pdf_path)
         return pdf_path
 
-    # ------------------------------------------------------------------
-    # PDF page renderers
-    # ------------------------------------------------------------------
-
     def _pdf_title_page(self, data: ReportData) -> matplotlib.figure.Figure:
+        """Zbuduj stronę tytułową PDF (A4) z metadanymi eksperymentu."""
         fig = plt.figure(figsize=(8.27, 11.69))  # A4
         fig.text(
             0.5, 0.65, "Experiment Report",
@@ -617,7 +621,7 @@ class ReportGenerator:
         df: pd.DataFrame,
         title: str,
     ) -> matplotlib.figure.Figure:
-        """Render a DataFrame as a matplotlib table on an A4 page."""
+        """Zrenderuj `df` jako tabelę matplotlib na stronie A4 z tytułem."""
         # Drop internal columns
         display_df = df.drop(
             columns=[c for c in self._DROP_COLUMNS if c in df.columns],
@@ -675,7 +679,7 @@ class ReportGenerator:
     def _pdf_plot_page(
         self, png_path: Path, title: str,
     ) -> Optional[matplotlib.figure.Figure]:
-        """Embed a PNG plot image on an A4 page."""
+        """Osadź PNG `png_path` na stronie A4 z tytułem; `None` przy błędzie odczytu."""
         if not png_path.exists():
             return None
         try:
@@ -692,7 +696,7 @@ class ReportGenerator:
         return fig
 
     def _pdf_conclusions_page(self, data: ReportData) -> matplotlib.figure.Figure:
-        """Render key findings as text on the final page."""
+        """Wyrenderuj końcową stronę raportu z rankingiem i `key_findings`."""
         fig = plt.figure(figsize=(8.27, 11.69))
         fig.text(
             0.5, 0.90, "Summary and Key Findings",
@@ -733,13 +737,8 @@ class ReportGenerator:
         return fig
 
 
-# ======================================================================
-# Helpers
-# ======================================================================
-
-
 def _wrap_text(text: str, max_chars: int = 85) -> str:
-    """Simple word-wrap for matplotlib text (no textwrap to avoid indent issues)."""
+    """Zwróć `text` zawinięty po słowach do maks. `max_chars` znaków na linię."""
     words = text.split()
     lines = []
     current = ""

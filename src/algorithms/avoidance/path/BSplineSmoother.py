@@ -28,8 +28,7 @@ class BSplineSmoother(IPathRepresentation):
       3. Klamp Z do `[world_min_z, world_max_z]`.
       4. Dla osi lateralnych (right/left) liniowa interpolacja Z między skrajami
          — zapobiega dziedziczeniu Z-oscylacji z gridu A* przy `constant_speed=True`
-         (regresja Fazy 8.1 — incydent „drone 2 z=6.5→0.12 m w 1 s podczas
-         axis=right" w eksperymencie 21-24-21, test:
+         (drone 2 spadał z=6.5→0.12 m w 1 s podczas axis=right; test:
          `test_lateral_evasion_forces_horizontal_z_profile_in_smoother`).
       5. Wstawienie lead-in / lead-out (styczne do v_drone na starcie i do
          tangensu base_spline na rejoin) — gładki powrót do trasy bazowej.
@@ -50,6 +49,20 @@ class BSplineSmoother(IPathRepresentation):
         reject_tangent_angle_deg: float = 25.0,
         lead_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0),
     ) -> None:
+        """Skonfiguruj progi redukcji punktów i akceptowalnej odchyłki tangensu.
+
+        Args:
+            douglas_peucker_epsilon_m: Próg odchylenia w simplifikacji
+                Douglasa-Peuckera [m].
+            min_waypoints, max_waypoints: Limity liczby waypointów po
+                resamplingu (poniżej `min` ⇒ resample w górę; powyżej
+                `max` ⇒ resample w dół).
+            evasion_speed_multiplier: Mnożnik prędkości przelotowej w fazie uniku.
+            reject_tangent_angle_deg: Próg odchylenia tangensu na rejoin
+                [°] — powyżej tej wartości plan jest odrzucany.
+            lead_multipliers: Mnożniki długości lead-in/out testowane
+                w pętli wyboru najlepszego wariantu.
+        """
         self.dp_epsilon = float(douglas_peucker_epsilon_m)
         self.min_waypoints = int(min_waypoints)
         self.max_waypoints = int(max_waypoints)
@@ -64,6 +77,20 @@ class BSplineSmoother(IPathRepresentation):
         *,
         axis_name: str | None = None,
     ) -> BSplineTrajectory | None:
+        """Przepuść `waypoints` przez 7-etapowy pipeline i zwróć gładki spline.
+
+        Args:
+            waypoints: `(W, 3)` surowe waypointy z optymalizatora; `W ≥ 2`.
+            context: `EvasionContext` (dron, zagrożenie, base_spline, granice).
+            axis_name: Hint o wybranej osi (`'right'`/`'left'`/`'up'`/`'down'`)
+                — dla osi lateralnych włącza Z-linearyzację (zapobiega
+                Z-oscylacjom dziedziczonym z gridu A*).
+
+        Returns:
+            `BSplineTrajectory` z najlepszym dopasowaniem tangensu w punkcie
+            powrotu lub `None`, gdy budowa się nie udała albo odchyłka
+            tangensu przekroczyła `reject_tangent_angle_deg`.
+        """
         if waypoints is None or len(waypoints) < 2:
             logger.warning(
                 f"BSplineSmoother: waypoints zdegenerowane "
@@ -165,7 +192,7 @@ class BSplineSmoother(IPathRepresentation):
                 evasion_spline = spline_try
                 final_cos = cos_theta
             if cos_theta >= cos_threshold:
-                break  # wystarczająco dobry — przerywamy
+                break
 
         if evasion_spline is None:
             logger.warning(
@@ -191,6 +218,12 @@ class BSplineSmoother(IPathRepresentation):
         base_spline: BSplineTrajectory,
         base_arc_progress: float,
     ) -> NDArray[np.float64]:
+        """Wyznacz unormowany wektor „do przodu" drona z prędkości lub tangensu base spline.
+
+        Returns:
+            `(3,)` jednostkowy wektor; `[1, 0, 0]` w skrajnym przypadku
+            zerowej prędkości i zdegenerowanego splajnu.
+        """
         speed = float(np.linalg.norm(current_vel))
         if speed > 0.5:
             return current_vel / speed
@@ -206,6 +239,7 @@ class BSplineSmoother(IPathRepresentation):
 
     @staticmethod
     def _base_tangent_at_arc(spline: BSplineTrajectory, arc: float) -> NDArray[np.float64]:
+        """Unormowany tangens splajnu `spline` na łuku `arc` [m]; `[1, 0, 0]` przy degeneracji."""
         if spline.arc_length <= 1e-6:
             return np.array([1.0, 0.0, 0.0])
         u = float(np.clip(arc / spline.arc_length, 0.0, 1.0))

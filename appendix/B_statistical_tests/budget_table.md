@@ -1,6 +1,6 @@
 # Tabela 1 — Budżet obliczeniowy optymalizacji offline
 
-Tabela odpowiadająca **Tabeli 1** w pracy (linia 859 [praca/src/Praca magisterska-final.md](../../praca/src/Praca magisterska-final.md)). Liczby ekstraktowane z faktycznych plików Hydra konfiguracyjnych eksperymentu `exp_20260508_f3f718f8_bio_inspired_benchmark` (commit `cdca9524`).
+Tabela odpowiadająca **Tabeli 1** w pracy. Liczby ekstraktowane z faktycznych plików Hydra konfiguracyjnych eksperymentu `exp_20260508_f3f718f8_bio_inspired_benchmark` (commit `cdca9524`).
 
 ## Wzór budżetu (cytat z pracy, s. 73)
 

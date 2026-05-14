@@ -6,17 +6,17 @@ Uproszczony diagram pokazujący **11 tabel cytowanych w pracy** (z 21 obecnych w
 
 ```mermaid
 erDiagram
-    runs ||--o| run_metrics : "1:1"
-    runs ||--o{ iteration_metrics : "1:N (gen)"
-    runs ||--o{ uav_online_metrics : "1:N (uav_id)"
-    runs ||--o{ collisions : "1:N"
-    runs ||--o{ evasion_events : "1:N"
-    runs ||--o{ online_optimization_tasks : "1:N"
-    runs ||--o{ online_convergence_traces : "1:N (per trigger)"
-    runs ||--o{ trajectory_samples : "1:N (timesteps)"
+    runs ||--o| run_metrics : has
+    runs ||--o{ iteration_metrics : has
+    runs ||--o{ uav_online_metrics : has
+    runs ||--o{ collisions : has
+    runs ||--o{ evasion_events : has
+    runs ||--o{ online_optimization_tasks : has
+    runs ||--o{ online_convergence_traces : has
+    runs ||--o{ trajectory_samples : has
 
-    reference_pareto_sets ||--|| reference_points : "(env, n_obj)"
-    offline_objective_normalization }o--|| runs : "via environment"
+    reference_pareto_sets ||--|| reference_points : pairs_with
+    offline_objective_normalization }o--|| runs : applies_to
 
     runs {
         TEXT run_id PK
@@ -28,24 +28,24 @@ erDiagram
     }
 
     run_metrics {
-        TEXT run_id PK_FK
-        REAL final_objective "M9 weighted sum (Hwang Yoon 1981)"
-        REAL final_objective_f1_trajectory "M2 F[0]"
-        REAL total_threat_cost "F[2] z M1"
-        REAL total_turn_penalty "F[3] z M3"
-        REAL total_coordination_cost "F[4] z M1"
+        TEXT run_id PK
+        REAL final_objective "M9 weighted normalized sum"
+        REAL final_objective_f1_trajectory "M2"
+        REAL total_threat_cost "M1 part F2"
+        REAL total_turn_penalty "M3 part F3"
+        REAL total_coordination_cost "M1 part F4"
         REAL mean_evasion_arc_length_m "M6"
         REAL rejoin_quality "M7 TOPSIS"
         REAL mean_online_best_fitness "M11"
-        REAL online_sp1 "M13 (Auger Hansen 2005)"
+        REAL online_sp1 "M13"
         INT tracking_phase_collisions "baza dla M5"
         INT evasion_phase_collisions "baza dla M8"
-        REAL min_inter_uav_distance_m "M4 component"
-        REAL max_inter_uav_distance_m "M4 component"
+        REAL min_inter_uav_distance_m "M4 part"
+        REAL max_inter_uav_distance_m "M4 part"
     }
 
     iteration_metrics {
-        TEXT run_id FK
+        TEXT run_id PK
         INT iteration PK
         REAL best_so_far "M10 krzywa offline"
         REAL hypervolume
@@ -53,7 +53,7 @@ erDiagram
     }
 
     uav_online_metrics {
-        TEXT run_id FK
+        TEXT run_id PK
         INT uav_id PK
         REAL min_inter_uav_distance_m
         REAL max_inter_uav_distance_m
@@ -73,33 +73,33 @@ erDiagram
         TEXT run_id FK
         REAL time
         INT drone_id
-        TEXT event_type "trigger | rejoin"
+        TEXT event_type "trigger lub rejoin"
         REAL ttc
         REAL dist_to_threat
     }
 
     online_optimization_tasks {
-        TEXT run_id FK
+        TEXT run_id PK
         INT drone_id PK
         REAL trigger_time PK
-        REAL best_fitness "→ M11"
-        REAL plan_arc_length_m "→ M6"
-        REAL pos_err_at_rejoin_m "→ M7"
-        REAL vel_err_at_rejoin_mps "→ M7"
-        REAL time_to_rejoin_s "→ M7"
-        TEXT status "ok | budget_violation"
+        REAL best_fitness "zasila M11"
+        REAL plan_arc_length_m "zasila M6"
+        REAL pos_err_at_rejoin_m "zasila M7"
+        REAL vel_err_at_rejoin_mps "zasila M7"
+        REAL time_to_rejoin_s "zasila M7"
+        TEXT status "ok lub budget_violation"
     }
 
     online_convergence_traces {
-        TEXT run_id FK
+        TEXT run_id PK
         INT drone_id PK
         REAL trigger_time PK
         INT generation PK
-        REAL best_fitness "→ M12 krzywa online"
+        REAL best_fitness "zasila M12 krzywa online"
     }
 
     trajectory_samples {
-        TEXT run_id FK
+        TEXT run_id PK
         INT sample_index PK
         REAL sim_time
         INT drone_id
@@ -120,14 +120,14 @@ erDiagram
         TEXT environment PK
         INT n_obj PK
         INT objective_j PK
-        REAL value "r*"
-        REAL ideal_value "z*"
+        REAL value "punkt r star"
+        REAL ideal_value "punkt z star"
     }
 
     offline_objective_normalization {
         TEXT environment PK
         INT f_idx PK
-        REAL f_ref_median "→ M9 normalizacja"
+        REAL f_ref_median "zasila M9 normalizacja"
         INT n_runs
     }
 ```

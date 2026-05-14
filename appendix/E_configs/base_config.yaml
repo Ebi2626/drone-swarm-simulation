@@ -1,0 +1,42 @@
+defaults:
+  - _self_
+  - environment: forest # city, forest
+  - optimizer: msffoa # nsga-3, ooa, ssa, msffoa
+  - avoidance: msffoa # nsga-3, ooa, ssa, msffoa
+
+simulation:
+  duration_sec: 180 # twardy limit czasu symulacji
+  gui: True # renderowanie wizualizacji symulacji
+  pyb_freq: 240 # częstotliwość fizyki symulacji
+  ctrl_freq: 48 # częstotliwość kontrolera symulacji
+  drone_model: "CF2X" # model drona z pybullet-gym-drones
+  physics: "PYB" # silnik fizyki z pybullet-gym-drones
+  sim_speed_multiplier: 5.0 # poziom przyspieszenia renderowanej symulacji
+  dynamic_obstacles: True # dynamiczne przeszkody - wrogie drony
+  collision_radius: 2.0
+  dense_samples: 200 # cześtotliwość próbkowania trajektorii B-Spline
+  log_lidar_hits: False # logowanie surowych odczytów lidaru do pliku .h5
+
+seed: 43 # master-seed - 43 do naprawienia w fazie offline!
+experiment_name: "test_run"
+debug: true
+logging:
+  enabled: true
+  log_freq: 1.0
+
+visualization:
+  camera_follow: true
+  tracked_drone_id: 0
+  camera_distance: 1.0
+  camera_yaw: -15.0
+  camera_pitch: -30.0
+  show_lidar_rays: false
+  lidar_draw_interval: 5
+
+hydra:
+  run:
+    dir: results/${now:%Y-%m-%d}/${now:%H-%M-%S}_${environment.name}_${hydra:runtime.choices.optimizer}
+  job_logging:
+    version: 1
+    root:
+      level: INFO

@@ -1,0 +1,47 @@
+_target_: src.environments.UrbanWorld.UrbanWorld
+
+name: "urban"
+
+params:
+  # Drone parameters
+  drone_model: "CF2X"
+  num_drones: 5
+
+  # Grid parameters (min(x, y) are 0)
+  ground_position: 0.1    # Z-axis (min)
+  track_length: 1000.0    # Y-axis
+  track_width: 300.0      # X-axis
+  track_height: 20.0     # Z-axis (max)
+
+  # Obstacles parameters
+  shape_type: 'BOX'
+  placement_strategy: 'strategy_grid_jitter'
+  obstacles_number: 27
+  obstacle_width: 15.0
+  obstacle_length: 15.0
+  obstacle_height: 15.0
+  safe_radius: 30.0
+
+# Starting positions
+initial_xyzs:
+  - [145.0, 5.0, 5.0]
+  - [150.0, 5.0, 5.0]
+  - [155.0, 5.0, 5.0]
+  - [160.0, 5.0, 5.0]
+  - [165.0, 5.0, 5.0]
+
+# Target positions
+end_xyzs:
+  - [145.0, 995.0, 5.0]
+  - [150.0, 995.0, 5.0]
+  - [155.0, 995.0, 5.0]
+  - [160.0, 995.0, 5.0]
+  - [165.0, 995.0, 5.0]
+
+# Drone RPYS (Roll/Pith/Yaw)
+initial_rpys:
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]
+  - [0.0, 0.0, 0.0]

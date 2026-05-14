@@ -1,0 +1,9 @@
+environment,optimizer,n_runs,n_failures,failure_rate,wilson_ci95_low,wilson_ci95_high
+forest,msffoa,30,1,0.033333,0.005909,0.166704
+forest,nsga-3,30,0,0.000000,0.000000,0.113513
+forest,ooa,30,10,0.333333,0.192305,0.512199
+forest,ssa,30,7,0.233333,0.117924,0.409283
+urban,msffoa,30,0,0.000000,0.000000,0.113513
+urban,nsga-3,30,0,0.000000,0.000000,0.113513
+urban,ooa,30,3,0.100000,0.034600,0.256211
+urban,ssa,30,3,0.100000,0.034600,0.256211

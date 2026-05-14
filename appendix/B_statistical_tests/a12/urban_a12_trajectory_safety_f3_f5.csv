@@ -1,0 +1,7 @@
+alg_a,alg_b,a12,magnitude
+msffoa,nsga-3,0.500000,negligible
+msffoa,ooa,0.550000,negligible
+msffoa,ssa,0.550000,negligible
+nsga-3,ooa,0.550000,negligible
+nsga-3,ssa,0.550000,negligible
+ooa,ssa,0.498333,negligible

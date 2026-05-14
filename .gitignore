@@ -243,3 +243,19 @@ optimization_history/
 
 experiment_restrictions.md
 code-review.md
+
+# === Załącznik cyfrowy (appendix/) ===
+# Domyślnie trackujemy zawartość appendix/ — dokumentacja, schema, configs, wykresy są commitowane.
+# Krok 1: odwróć globalne reguły *.png / *.jpg / optimization_history/ dla appendix/
+!appendix/**/*.png
+!appendix/**/*.jpg
+!appendix/**/*.pdf
+!appendix/**/*.csv
+!appendix/**/*.tex
+!appendix/**/*.yaml
+!appendix/**/*.sql
+!appendix/**/*.md
+
+# Krok 2: a TERAZ wyklucz duże dane (kolejność w gitignore: ostatnia reguła wygrywa)
+appendix/A_metrics/*.csv
+appendix/G_per_run_seeds/

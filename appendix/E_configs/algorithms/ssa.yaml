@@ -1,0 +1,55 @@
+_target_: src.algorithms.abstraction.trajectory.strategies.ssa_strategy.ssa_swarm_strategy
+_partial_: true
+_convert_: "all"
+
+# Parametry specyficzne dla Sparrow Search Algorithm (SSA, Xue & Shen 2020).
+# Schemat pól zgodny z konfiguracją OOA i MSFFOA — pozwala na porównanie ceteris paribus.
+algorithm_params:
+  cruise_speed: 6.0
+  # epochs skalibrowane empirycznie (exp_20260506_377919c3_per_env_test,
+  # 8 seedów × 2 env): Q75 osiągnięcia 95% best_so_far przy iteracji ~61
+  # (~177k NFE). epochs=100 daje ~290k NFE = 1.6× margines powyżej Q75.
+  # Ujednolicone z MSFFOA/OOA/NSGA-III dla ceteris paribus.
+  pop_size: 1001
+  epochs: 200
+  n_inner_waypoints: 11
+
+  # --- Parametry biologiczne SSA (paper Xue & Shen 2020) ---
+  # ST  ∈ [0.5, 1.0]  — safety threshold; R2 < ST ⇒ producer wide-search,
+  #                     R2 ≥ ST ⇒ rapid escape do bezpieczniejszej pozycji.
+  # PD  ∈ (0, 1)      — udział producentów (paper'owe ref.: 0.2 = 20%).
+  # SD  ∈ (0, 1)      — udział "świadomych zagrożenia" (paper'owe ref.: 0.1 = 10%).
+  ST: 0.6
+  PD: 0.4
+  SD: 0.1
+
+  # --- Wagi celów (skalaryzacja MOO → SOO dla 5 funkcji kosztu) ---
+  # Wektor F pochodzi z VectorizedEvaluator.evaluate i posiada 5 składowych:
+  #   weights[0] → F[0] = f_1 (trajectory) : długość + kształt. 
+  #   weights[1] → F[1] = f_2 (height) : odchylenia wys. + ostre wznoszenia.
+  #   weights[2] → F[2] = f_3 (threat) : penetracja zagrożeń.
+  #   weights[3] → F[3] = f_4 (turn_cost) : gładkość trasy w XY (ostre zakręty).
+  #   weights[4] → F[4] = f_5 (coordination) : bliskość dronów (miękka kara za ścisk).
+  objective_weights: [0.05, 0.5, 0.8, 1.0, 0.25]
+
+  # --- Kara za naruszenia ograniczeń ---
+  # Weakest-link: największe pojedyncze naruszenie G[j] (np.max, nie np.sum)
+  # mnożone przez ten współczynnik. Wartość ujednolicona z OOA dla porównania
+  # ceteris paribus.
+  penalty_weight: 2.0
+
+  # --- VectorizedEvaluator (ograniczenia kinematyczne / separacja / kolizje / nowe kary) ---
+  # Nazwy zgodne z odczytami w objective_constrains.VectorizedEvaluator.
+  obstacle_safety_margin: 1.0     # bufor wokół przeszkód [m]
+  min_drone_distance: 2.0         # min. odległość inter-drone na węzłach kontrolnych [m]
+  k_factor: 2.0                   # mnożnik dynamicznego limitu dystansu między węzłami
+  absolute_min_node_dist: 2.0     # dolny próg dystansu między węzłami [m]
+  max_accel_limit: 2.0            # limit „drugiej różnicy” wielokąta kontrolnego
+
+  # Parametry dla nowych funkcji kosztu (f_2 i f_5)
+  preferred_height: 5.0                # f_2: preferowana stała wysokość lotu [m]
+  coordination_penalty_factor: 1.2     # f_5: mnożnik wykładniczej kary za koordynację
+
+  # --- Szum inicjalizacji populacji (anizotropowy) ---
+  noise_std_xy: 7.0
+  noise_std_z: 1.5

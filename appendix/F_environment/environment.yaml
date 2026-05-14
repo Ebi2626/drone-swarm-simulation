@@ -1,0 +1,30 @@
+name: drone-swarm-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10                # Stabilna wersja dla pybullet
+  - numpy=1.26                 # Wersja <2.0 (krytyczne dla kompatybilności!)
+  - cupy                       # Do obliczeń na GPU
+  - matplotlib                 # Do wykresów
+  - pandas                     # Do analizy danych
+  - scipy                      # Do obliczeń naukowych
+  - hydra-core                 # Do zarządzania konfiguracją
+  - jupyter                    # Do notatników
+  - pytest                     # Do testów
+  - pip                        # Menedżer pakietów Pythona
+  - h5py                       # Do zapisu wsadowego danych optymalizacyjnych 
+  - pymoo>=0.6.0               # Do NSGA-III
+  - conda-forge::libstdcxx-ng
+  - typing_extensions          # Do typu NotRequired
+  - pip:
+      - git+https://github.com/utiasDSL/gym-pybullet-drones.git # Silnik symulacji
+      - mealpy>=3.0.0
+      - pytest # Testy
+      - pytest-mock # Testy
+      - astar # Dla unikania kolizji
+      - hydra-joblib-launcher # Do uruchamiania eksperymentów
+      - numba # Jit dla obliczeń czasu rzeczywistego
+      - sqlite # Dla monitorowania postępów w długotrwałym eksperymencie
+      - seaborn # Do analizy danych po eksperymencie
+

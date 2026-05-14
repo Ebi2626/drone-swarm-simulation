@@ -1,0 +1,7 @@
+alg_a,alg_b,a12,magnitude
+msffoa,nsga-3,0.274444,large
+msffoa,ooa,0.351724,medium
+msffoa,ssa,0.430000,small
+nsga-3,ooa,0.543678,negligible
+nsga-3,ssa,0.647778,medium
+ooa,ssa,0.602299,small

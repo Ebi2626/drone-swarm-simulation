@@ -81,6 +81,7 @@ def populate_online_safety_metrics(
 
         inter = inter_uav_per_drone.get(drone_id, {
             "min_distance_m": None,
+            "max_distance_m": None,
             "mean_distance_m": None,
             "violation_count": None,
         })
@@ -96,6 +97,7 @@ def populate_online_safety_metrics(
             run_id,
             int(drone_id),
             inter["min_distance_m"],
+            inter["max_distance_m"],
             inter["mean_distance_m"],
             inter["violation_count"],
             float(safety_threshold_m),
@@ -119,13 +121,13 @@ def populate_online_safety_metrics(
         """
         INSERT INTO uav_online_metrics (
             run_id, uav_id,
-            min_inter_uav_distance_m, mean_inter_uav_distance_m,
+            min_inter_uav_distance_m, max_inter_uav_distance_m, mean_inter_uav_distance_m,
             inter_uav_safety_violation_count, inter_uav_safety_threshold_m,
             energy_indicator, speed_squared_integral, mean_speed_mps, max_speed_mps,
             smoothness_indicator, accel_squared_integral, mean_accel_mps2, max_accel_mps2,
             sample_count, duration_s, extra_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -222,6 +224,7 @@ def _compute_inter_uav_distance_per_drone(
     if len(drone_ids) < 2:
         return {d: {
             "min_distance_m": None,
+            "max_distance_m": None,
             "mean_distance_m": None,
             "violation_count": None,
         } for d in drone_ids}
@@ -249,6 +252,7 @@ def _compute_inter_uav_distance_per_drone(
         if not np.any(valid):
             out[d] = {
                 "min_distance_m": None,
+                "max_distance_m": None,
                 "mean_distance_m": None,
                 "violation_count": None,
             }
@@ -256,6 +260,7 @@ def _compute_inter_uav_distance_per_drone(
         valid_dists = per_t_min[valid]
         out[d] = {
             "min_distance_m": float(np.min(valid_dists)),
+            "max_distance_m": float(np.max(valid_dists)),
             "mean_distance_m": float(np.mean(valid_dists)),
             "violation_count": int(np.sum(valid_dists < safety_threshold_m)),
         }

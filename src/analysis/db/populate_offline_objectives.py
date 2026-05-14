@@ -1,4 +1,4 @@
-"""Ekstrakcja best-feasible solution z `optimization_history.h5`.
+"""Ekstrakcja best-feasible solution z `optimization_history.h5` + załaduj wagi celów.
 
 `VectorizedEvaluator` (`src/algorithms/abstraction/trajectory/objective_constrains.py`)
 ma 5 funkcji celu i 3 ograniczenia. F-vector last-gen best feasible solution
@@ -11,11 +11,19 @@ Mapowanie F → kolumny `run_metrics`:
   F[3] = f4 turn_cost                        → total_turn_penalty
   F[4] = f5 coordination_cost                → total_coordination_cost
 
+Dodatkowo (2026-05-13): wczytuje `objective_weights` z per-run
+`.hydra/config.yaml` (`optimizer.algorithm_params.objective_weights`) i
+zapisuje do `run_metrics.final_objective_weights_json`. NSGA-III nie
+ma tych wag w configu → canonical fallback `[0.05, 0.5, 0.8, 1.0, 0.25]`
+(identyczne z SOO peers, by `final_objective` cross-algorithm comparison
+był fair). Wagi zużywa post-pass `populate_final_objective_aggregated`
+do obliczenia weighted-normalized-sum `final_objective`.
+
 Constraint vector G nie jest zapisywany do h5 przez żadną z 4 strategii
 (NSGA3/MSFFOA/SSA/OOA) — pomijamy go.
 
 Reference: Deb 2014 NSGA-III; Goldberg 1989 selecting feasible solutions
-in constrained EAs.
+in constrained EAs; Hwang & Yoon 1981 §4.2 weighted-sum MCDM scalarization.
 """
 from __future__ import annotations
 
@@ -29,6 +37,14 @@ import numpy as np
 
 
 logger = logging.getLogger(__name__)
+
+
+# Canonical objective weights stosowane gdy run nie ma swojego
+# `objective_weights` w `.hydra/config.yaml` (typowo NSGA-III, który
+# optymalizuje multi-objective bez skalaryzacji). Identyczne z SOO peers
+# (`configs/optimizer/{msffoa,ooa,ssa}.yaml`), by `final_objective`
+# weighted-normalized-sum był comparable cross-algorithm.
+_CANONICAL_OBJECTIVE_WEIGHTS: tuple[float, ...] = (0.05, 0.5, 0.8, 1.0, 0.25)
 
 
 # Mapowanie indeksu w F → nazwa kolumny `run_metrics`. Definitive source.
@@ -54,30 +70,49 @@ def populate_offline_objectives(
     conn: sqlite3.Connection,
     run_id: str,
     h5_path: Path,
+    run_dir: Optional[Path] = None,
 ) -> None:
-    """UPDATE'uj `run_metrics` per-objective wartościami z best feasible F-vector w `h5_path`.
+    """UPDATE'uj `run_metrics` per-objective wartościami z best feasible F-vector + wagami.
 
     Idempotentne — re-run nadpisuje wartości. Brak `h5_path`,
-    `objectives_matrix` lub pusta last-gen ⇒ silent no-op.
+    `objectives_matrix` lub pusta last-gen ⇒ silent no-op (kolumny per-obj
+    pozostają NULL, ale wagi mogą być zapisane gdy `run_dir` zawiera
+    hydra config).
 
     Args:
         conn: Aktywne połączenie do bazy.
         run_id: Identyfikator runa.
         h5_path: Ścieżka do `optimization_history.h5`.
+        run_dir: Katalog runu (zawiera `.hydra/config.yaml`). Gdy `None`,
+            inferowany jako `h5_path.parent.parent` (kompatybilność wsteczna
+            dla wywołań pre-2026-05-13).
 
     Efekty uboczne:
-        UPDATE w `run_metrics` (`final_objective`, `final_objectives_json`
-        i kolumny per-obj zgodnie z mapowaniem `_F_TO_COLUMN_*`).
+        UPDATE w `run_metrics` (`final_objectives_json`, per-obj kolumny
+        zgodne z `_F_TO_COLUMN_*`, `final_objective_weights_json`).
+        `final_objective` jest USTAWIANY w post-pass
+        `populate_final_objective_aggregated`, nie tutaj.
     """
+    # Infer run_dir dla backward-compat ze starymi wywołaniami.
+    if run_dir is None:
+        # h5_path: <run_dir>/optimization_history/optimization_history.h5
+        run_dir = h5_path.parent.parent
+
+    weights = _load_objective_weights(run_dir, run_id)
+
     if not h5_path.exists():
+        # Brak h5 — zapisujemy same wagi, by post-pass mógł je zużyć
+        # (choć w praktyce brak h5 = brak F → final_objective pozostanie NULL).
+        _update_weights_only(conn, run_id, weights)
         return
 
     selected_F = _extract_best_feasible_F(h5_path)
     if selected_F is None:
         logger.warning(
             f"populate_offline_objectives: {h5_path} brak `objectives_matrix` "
-            f"lub pusty — pomijamy run_id={run_id!r}."
+            f"lub pusty — pomijamy F dla run_id={run_id!r}."
         )
+        _update_weights_only(conn, run_id, weights)
         return
 
     n_obj = int(selected_F.shape[0])
@@ -98,12 +133,14 @@ def populate_offline_objectives(
         )
         column_map = ()
 
-    # final_objective = F[0] (trajectory cost) — zachowuje semantykę
-    # `best_so_far_obj0` używaną w istniejących widokach analitycznych.
-    final_objective_main = float(selected_F[0])
-
-    set_clauses = ["final_objective = ?", "final_objectives_json = ?"]
-    params: list = [final_objective_main, json.dumps(selected_F.tolist())]
+    set_clauses = [
+        "final_objectives_json = ?",
+        "final_objective_weights_json = ?",
+    ]
+    params: list = [
+        json.dumps(selected_F.tolist()),
+        json.dumps(list(weights)),
+    ]
     for i, column in enumerate(column_map):
         set_clauses.append(f"{column} = ?")
         params.append(float(selected_F[i]))
@@ -114,15 +151,105 @@ def populate_offline_objectives(
     if cur.rowcount == 0:
         # WARNING (nie INFO) — wymagana kolejność w `populate_database.py` to
         # `populate_run_metrics` ⟶ `populate_offline_objectives`. Brak wiersza
-        # tutaj oznacza naruszony invariant pipeline'u (np. populate_run_metrics
-        # poległ albo kolejność została zaburzona). Final_objective dla tego
-        # run_id pozostanie NULL.
+        # tutaj oznacza naruszony invariant pipeline'u.
         logger.warning(
             "populate_offline_objectives: brak wpisu w `run_metrics` dla "
-            "run_id=%r — UPDATE pominięty (final_objective pozostanie NULL). "
-            "Sprawdź czy `populate_run_metrics` wykonał się przed tym krokiem.",
+            "run_id=%r — UPDATE pominięty. Sprawdź czy `populate_run_metrics` "
+            "wykonał się przed tym krokiem.",
             run_id,
         )
+
+
+def _update_weights_only(
+    conn: sqlite3.Connection,
+    run_id: str,
+    weights: tuple[float, ...],
+) -> None:
+    """UPDATE samych `final_objective_weights_json` — gdy F-vector niedostępny."""
+    cur = conn.execute(
+        "UPDATE run_metrics SET final_objective_weights_json = ? WHERE run_id = ?",
+        (json.dumps(list(weights)), run_id),
+    )
+    if cur.rowcount == 0:
+        logger.warning(
+            "populate_offline_objectives: brak wpisu w `run_metrics` dla "
+            "run_id=%r — weights_json nie zapisane.",
+            run_id,
+        )
+
+
+def _load_objective_weights(
+    run_dir: Path,
+    run_id: str,
+) -> tuple[float, ...]:
+    """Wczytaj `optimizer.algorithm_params.objective_weights` z `.hydra/config.yaml`.
+
+    Fallback: `_CANONICAL_OBJECTIVE_WEIGHTS` z WARNING (typowo NSGA-III,
+    który nie ma wag — używa multi-objective natywnie). Fallback z INFO
+    gdy plik konfigu nie istnieje (np. testy unit bez run_dir).
+
+    Args:
+        run_dir: Katalog runu zawierający `.hydra/config.yaml`.
+        run_id: Do komunikatów diagnostycznych.
+
+    Returns:
+        `(5,)` krotka wag — z configu albo canonical fallback.
+    """
+    config_path = run_dir / ".hydra" / "config.yaml"
+    if not config_path.exists():
+        logger.info(
+            "populate_offline_objectives: brak %s dla run_id=%r — używam "
+            "canonical weights %s.",
+            config_path, run_id, _CANONICAL_OBJECTIVE_WEIGHTS,
+        )
+        return _CANONICAL_OBJECTIVE_WEIGHTS
+
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover
+        logger.error(
+            "populate_offline_objectives: brakuje pakietu PyYAML — fallback "
+            "na canonical weights dla run_id=%r.", run_id,
+        )
+        return _CANONICAL_OBJECTIVE_WEIGHTS
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+    except Exception as e:
+        logger.error(
+            "populate_offline_objectives: błąd parsowania %s (%s) — "
+            "fallback na canonical weights dla run_id=%r.",
+            config_path, e, run_id,
+        )
+        return _CANONICAL_OBJECTIVE_WEIGHTS
+
+    weights = (
+        cfg.get("optimizer", {})
+        .get("algorithm_params", {})
+        .get("objective_weights")
+    )
+    if weights is None:
+        # NSGA-III: brak wag w configu (multi-objective natywnie). To NIE
+        # jest błąd — log INFO, fallback canonical.
+        logger.info(
+            "populate_offline_objectives: brak optimizer.algorithm_params."
+            "objective_weights w %s dla run_id=%r (typowo NSGA-III) — "
+            "canonical fallback %s.",
+            config_path, run_id, _CANONICAL_OBJECTIVE_WEIGHTS,
+        )
+        return _CANONICAL_OBJECTIVE_WEIGHTS
+
+    if not isinstance(weights, (list, tuple)) or len(weights) != 5:
+        logger.warning(
+            "populate_offline_objectives: nieprawidłowy kształt "
+            "objective_weights=%r dla run_id=%r — oczekiwano 5 wartości. "
+            "Canonical fallback.",
+            weights, run_id,
+        )
+        return _CANONICAL_OBJECTIVE_WEIGHTS
+
+    return tuple(float(w) for w in weights)
 
 
 def _extract_best_feasible_F(h5_path: Path) -> Optional[np.ndarray]:

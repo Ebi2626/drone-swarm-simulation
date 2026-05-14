@@ -57,16 +57,34 @@ class ReportData:
     # Offline
     offline_summary: dict[str, pd.DataFrame] = field(default_factory=dict)
     friedman_ranks: dict[str, pd.DataFrame] = field(default_factory=dict)
-    significant_pairs: dict[str, pd.DataFrame] = field(default_factory=dict)
     a12_effects: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # Hypervolume — informational, NSGA-III only (Pareto-front quality
+    # indicator nie ma sensu dla algorytmów jednokryterialnych; zob. praca
+    # magisterska §3.1.3.2).
+    hypervolume_nsga_only: Optional[pd.DataFrame] = None
+
+    # Convergence — best-so-far per algorytm: stats z `iteration_metrics`
+    # ostatniej generacji (per env, optimizer).
+    convergence_summary: Optional[pd.DataFrame] = None
+
+    # Timing per stage — z optimization_timings table. Pozwala porównać
+    # czasochłonność `initialization`, `optimization`, `decision_and_reconstruction`
+    # między algorytmami (sprawiedliwa analiza, nie tylko sumarycznie).
+    timing_by_stage: Optional[pd.DataFrame] = None
 
     # Online
     online_summary: dict[str, pd.DataFrame] = field(default_factory=dict)
     has_online_data: bool = False
+    # Friedman + A12 dla online metrics (§3.1.3.2 docs/Praca magisterska.md
+    # *online phase* — analogicznie do offline, zob. `friedman_ranks` /
+    # `a12_effects` powyżej).
+    online_friedman_ranks: dict[str, pd.DataFrame] = field(default_factory=dict)
+    online_a12_effects: dict[str, pd.DataFrame] = field(default_factory=dict)
+    online_best_per_metric: Optional[pd.DataFrame] = None
 
-    # Failure
+    # Failure rate offline (§3.1 — physical tracking collisions). Online
+    # safety raportowane wyłącznie w §2.1-2.3 jako `online_success_rate`.
     failure_offline: Optional[pd.DataFrame] = None
-    failure_online: Optional[pd.DataFrame] = None
 
     # Rankings
     best_per_metric: Optional[pd.DataFrame] = None
@@ -83,41 +101,177 @@ class ReportData:
 class ReportGenerator:
     """Generates experiment summary reports in PDF and Markdown."""
 
+    # Metryki dobrane zgodnie z `docs/Praca magisterska.md` §3.1.3.
+    #
+    # §3.1.3.1 — metryki oceny trajektorii fazy offline:
+    #   - bezpieczeństwo (f3+f5), długość (f1), gładkość (f2+f4), spójność roju
+    # §3.1.3.2 — metryki oceny algorytmów fazy offline:
+    #   - wartość optymalizacji, prędkość (per-stage), krzywa optymalizacji
+    #
+    # `hypervolume` jest informacyjny *tylko dla NSGA-III* (jedyny algorytm
+    # wielokryterialny) — raportowany w osobnej sekcji (`hypervolume_nsga_only`),
+    # nie w głównej tabeli porównawczej.
+    #
+    # MOO indicators (IGD+, GD, spread, spacing, R2, front_size, HV_norm) są
+    # nadal emitowane do CSV-ek przez `ExperimentAnalyzer`, ale w głównym
+    # raporcie nie są pokazywane — per pracę: "pozostanie jedynie metryką
+    # informacyjną" (stosuje się tylko do NSGA-III, brak sensu porównawczego
+    # dla algorytmów jednokryterialnych).
     OFFLINE_KEY_METRICS = [
-        "hypervolume",
-        "igd_plus",
-        "gd_final",
-        "convergence_speed_gen",
-        "front_size_last_gen",
+        # §3.1.3.1 — Trajectory quality
+        "trajectory_safety_f3_f5",
+        "trajectory_length_f1",
+        "trajectory_smoothness_f2_f4",
+        "swarm_cohesion_deviation",   # MAE od 5 m NN-spacing
+        # §3.1.3.2 — Algorithm performance
+        "final_objective",
     ]
 
+    # Metryki używane do obliczenia overall offline ranking. Wykluczamy
+    # hypervolume (NSGA-III only — pooled ranking byłby mylący) i wallclock
+    # (już mamy szczegółową sekcję timing per stage).
+    OVERALL_RANKING_METRICS = [
+        "trajectory_safety_f3_f5",
+        "trajectory_length_f1",
+        "trajectory_smoothness_f2_f4",
+        "swarm_cohesion_deviation",
+        "final_objective",
+    ]
+
+    # Ocena fazy online — trzy klasy zgodnie z §3.1.3.3 + §3.1.3.4
+    # docs/Praca magisterska.md:
+    # (A) §3.1.3.3 TRAJEKTORIA fazy online: długość/czas manewru +
+    #     skuteczność powrotu na nominalną trasę (plan-level metrics
+    #     z `online_optimization_tasks`).
+    # (B) Jakość lotu fizycznego (PyBullet, mission-wide): smoothness,
+    #     energy, separacja dronów. Komplementarne — z `uav_online_metrics`.
+    # (C) §3.1.3.4 ALGORYTM fazy online: performance online optimizer'a
+    #     w budżecie czasowym (best_fitness, gens/evals_completed, wallclock).
     ONLINE_KEY_METRICS = [
-        "collision_count",
-        "evasion_event_count",
-        "min_inter_uav_distance_m",
-        "mean_inter_uav_distance_m",
-        "mean_energy_indicator",
+        # Bezpieczeństwo fazy online — PRIMARY safety metric. Binarne per-run
+        # (1 = run bez kolizji w fazie evasion, 0 = ≥1 kolizja). Identyczna
+        # semantyka co §3.2 Wilson CI; tutaj raportowane jako Mean/Std/Median
+        # w §2.1 oraz w §2.2 (Friedman) i §2.3 (A12) dla pełnego workupu
+        # statystycznego. Mean = empiryczny success rate, std = sqrt(p*(1-p)).
+        # Kolumna df_run nadpisywana w `_compute_failure_flag` z
+        # `1 - is_online_failure`.
+        "online_success_rate",
+        # (A) §3.1.3.3 Trajektoria fazy online.
+        # rejoin_completion_rate = PRIMARY (epizodowy mianownik, pending
+        # excluded); rejoin_success_rate = surowy (pending counted).
+        # rejoin_quality = TOPSIS composite (Hwang & Yoon 1981) trzech
+        # wymiarów Skuteczności powrotu: pos_err, vel_err, time_to_rejoin
+        # → pojedynczy skalar odległości euklidesowej od ideału (0,0,0)
+        # w przestrzeni znormalizowanej medianami per środowisko.
+        # Uwaga: `mean_evasion_plan_duration_s` + oryginalne 3 metryki
+        # rejoin pozostają w DB dla audytu, ale nie w key metrics.
+        "mean_evasion_arc_length_m",
+        "rejoin_quality",
+        "rejoin_completion_rate",
+        "rejoin_success_rate",
+        # (B) Jakość lotu fizycznego (mission-wide, komplementarne)
         "mean_smoothness_indicator",
+        "mean_energy_indicator",
+        "min_inter_uav_distance_m",
+        # (C) §3.1.3.4 Algorytm fazy online
+        # NFE jako prędkość (BBOB 2009 convention), gens informacyjnie,
+        # budget_violation_rate jako niezawodność hard real-time.
+        # online_sp1 = RT_succ / (1 - BVR), łączona miara prędkość×skuteczność
+        # (Success Performance 1, Auger & Hansen 2005). Wybór SP1 zamiast
+        # ERT (Hansen 2009 BBOB) bo failed tasks abortują z RT_unsucc=0
+        # → ERT degeneruje do RT_succ.
+        # Wallclock pominięty w key metrics — saturuje budżet, brak
+        # discriminative info (pozostaje w DB dla audytu).
+        # NOTE: real-time niezawodność (`1 - BVR`) raportujemy wyłącznie przez
+        # `budget_violation_rate` (lower=lepiej). Nazwa "online_success_rate"
+        # w §2 jest zarezerwowana dla collision-based safety (zob. PRIMARY).
+        "mean_online_best_fitness",
+        "mean_online_evaluations_completed",
+        "mean_online_generations_completed",
+        "budget_violation_rate",
+        "online_sp1",
+    ]
+
+    # Stages w optimization_timings — kolejność wyświetlania w raporcie.
+    _TIMING_STAGES: list[str] = [
+        "initialization",
+        "optimization",
+        "decision_and_reconstruction",
+        "total_optimization",
     ]
 
     # Plot subdirectory -> list of (file_pattern, human title).
     # {env} and {metric} are replaced when scanning.
     _OFFLINE_PLOT_SPECS: list[tuple[str, str, str]] = [
-        ("boxplots", "boxplot_{env}_hypervolume.png", "Boxplot: Hypervolume ({env})"),
-        ("boxplots", "boxplot_{env}_igd_plus.png", "Boxplot: IGD+ ({env})"),
-        ("boxplots", "boxplot_{env}_gd_final.png", "Boxplot: GD ({env})"),
-        ("convergence", "convergence_{env}_hypervolume.png", "Convergence: Hypervolume ({env})"),
+        # Trajectory quality boxplots (§3.1.3.1)
+        ("boxplots", "boxplot_{env}_trajectory_safety_f3_f5.png", "Boxplot: Trajectory Safety f3+f5 ({env})"),
+        ("boxplots", "boxplot_{env}_trajectory_length_f1.png", "Boxplot: Trajectory Length f1 ({env})"),
+        ("boxplots", "boxplot_{env}_trajectory_smoothness_f2_f4.png", "Boxplot: Trajectory Smoothness f2+f4 ({env})"),
+        ("boxplots", "boxplot_{env}_swarm_cohesion_deviation.png", "Boxplot: Swarm Cohesion Deviation ({env})"),
+        # Algorithm performance boxplots (§3.1.3.2)
+        ("boxplots", "boxplot_{env}_final_objective.png", "Boxplot: Final Objective ({env})"),
+        # Krzywa optymalizacji (§3.1.3.2)
         ("convergence", "convergence_{env}_best_so_far.png", "Convergence: Best-so-far ({env})"),
-        ("cd_diagrams", "cd_hypervolume.png", "CD Diagram: Hypervolume"),
-        ("cd_diagrams", "cd_igd_plus.png", "CD Diagram: IGD+"),
-        ("rankings", "ranking_hypervolume.png", "Ranking Heatmap: Hypervolume"),
-        ("rankings", "ranking_igd_plus.png", "Ranking Heatmap: IGD+"),
+        # CD diagrams dla głównych metryk porównawczych
+        ("cd_diagrams", "cd_{env}_trajectory_safety_f3_f5.png", "CD Diagram: Trajectory Safety ({env})"),
+        ("cd_diagrams", "cd_{env}_trajectory_length_f1.png", "CD Diagram: Trajectory Length ({env})"),
+        ("cd_diagrams", "cd_{env}_trajectory_smoothness_f2_f4.png", "CD Diagram: Trajectory Smoothness ({env})"),
+        ("cd_diagrams", "cd_{env}_swarm_cohesion_deviation.png", "CD Diagram: Swarm Cohesion ({env})"),
+        ("cd_diagrams", "cd_{env}_final_objective.png", "CD Diagram: Final Objective ({env})"),
+        # Ranking heatmaps
+        ("rankings", "ranking_final_objective.png", "Ranking Heatmap: Final Objective"),
+        ("rankings", "ranking_trajectory_safety_f3_f5.png", "Ranking Heatmap: Trajectory Safety"),
+        # Offline safety: rzeczywiste kolizje fizyczne podczas tracking phase
+        # (komplementarne do trajectory_safety_f3_f5 — kara planu na węzłach).
+        ("bar", "bar_{env}_failure_rate_offline.png", "Offline Failure Rate — physical tracking collisions ({env})"),
     ]
 
     _ONLINE_PLOT_SPECS: list[tuple[str, str, str]] = [
-        ("bar", "bar_{env}_success_rate.png", "Success Rate ({env})"),
-        ("bar", "bar_{env}_collisions.png", "Collision Count ({env})"),
-        ("bar", "bar_{env}_failure_rate_online.png", "Online Failure Rate ({env})"),
+        # Bezpieczeństwo fazy online — collision-based safety:
+        # boxplot per-run binary (Mean/Std view) + CD diagram (rank-based).
+        # Stara wizualizacja Wilson CI proportion pozostaje w §3.2 tabeli.
+        ("boxplots", "boxplot_{env}_online_success_rate.png",
+         "Boxplot: Online maneuver safety ({env}) — collision-free evasion runs"),
+        ("cd_diagrams", "cd_{env}_online_success_rate.png",
+         "CD Diagram: Online maneuver safety ({env}) — collision-free evasion runs"),
+        # §3.1.3.3 Trajektoria fazy online — boxploty plan-level metrics.
+        ("boxplots", "boxplot_{env}_mean_evasion_arc_length_m.png",
+         "Boxplot: Evasion arc length ({env}) — §3.1.3.3 Długość manewru"),
+        ("boxplots", "boxplot_{env}_rejoin_completion_rate.png",
+         "Boxplot: Rejoin completion rate ({env}) — §3.1.3.3 Niezawodność powrotu (epizodowa)"),
+        ("boxplots", "boxplot_{env}_rejoin_success_rate.png",
+         "Boxplot: Rejoin success rate ({env}) — §3.1.3.3 (surowa, z pending)"),
+        ("boxplots", "boxplot_{env}_rejoin_quality.png",
+         "Boxplot: Rejoin quality ({env}) — §3.1.3.3 TOPSIS composite (pos, vel, time)"),
+        ("cd_diagrams", "cd_{env}_rejoin_quality.png",
+         "CD Diagram: Rejoin quality ({env}) — §3.1.3.3"),
+        # §3.1.3.4 Algorytm fazy online — boxploty + CD.
+        # NFE (mean_online_evaluations_completed) = primary throughput;
+        # budget_violation_rate = safety hard real-time.
+        ("boxplots", "boxplot_{env}_mean_online_best_fitness.png",
+         "Boxplot: Online best_fitness ({env}) — §3.1.3.4 Wartość optymalizacji"),
+        ("boxplots", "boxplot_{env}_mean_online_evaluations_completed.png",
+         "Boxplot: Online NFE ({env}) — §3.1.3.4 Prędkość (Number of Function Evaluations)"),
+        ("boxplots", "boxplot_{env}_budget_violation_rate.png",
+         "Boxplot: Budget violation rate ({env}) — §3.1.3.4 Niezawodność real-time"),
+        ("boxplots", "boxplot_{env}_online_sp1.png",
+         "Boxplot: Online SP1 ({env}) — §3.1.3.4 Success Performance 1 (Auger & Hansen 2005)"),
+        ("cd_diagrams", "cd_{env}_mean_online_best_fitness.png",
+         "CD Diagram: Online best_fitness ({env})"),
+        ("cd_diagrams", "cd_{env}_mean_online_evaluations_completed.png",
+         "CD Diagram: Online NFE ({env}) — §3.1.3.4"),
+        ("cd_diagrams", "cd_{env}_budget_violation_rate.png",
+         "CD Diagram: Budget violation rate ({env}) — §3.1.3.4"),
+        ("cd_diagrams", "cd_{env}_online_sp1.png",
+         "CD Diagram: Online SP1 ({env}) — §3.1.3.4"),
+        ("cd_diagrams", "cd_{env}_rejoin_completion_rate.png",
+         "CD Diagram: Rejoin completion rate ({env}) — §3.1.3.3"),
+        ("cd_diagrams", "cd_{env}_rejoin_success_rate.png",
+         "CD Diagram: Rejoin success rate ({env}) — §3.1.3.3 (surowa)"),
+        # §3.1.3.4 Krzywa optymalizacji online — mean ± std best_fitness
+        # per generation per (env, algo).
+        ("convergence", "online_convergence_{env}.png",
+         "Online Convergence: best_fitness per generation ({env}) — §3.1.3.4"),
     ]
 
     def __init__(self, experiment_dir: str | Path) -> None:
@@ -168,28 +322,55 @@ class ReportGenerator:
             if df is not None:
                 offline_summary[m] = df
 
-        # Friedman ranks
+        # Friedman ranks — per-env CSV concat'owane z dodatkową kolumną
+        # `environment`. Pooling cross-env nie jest emitowany przez
+        # `ExperimentAnalyzer` (zob. _build_tables docstring), więc czytamy
+        # `{env}_friedman_<m>.csv` dla każdego env.
         friedman_ranks: dict[str, pd.DataFrame] = {}
         for m in self.OFFLINE_KEY_METRICS:
-            df = self._read_csv(f"friedman_{m}.csv")
-            if df is not None:
-                friedman_ranks[m] = df
+            parts: list[pd.DataFrame] = []
+            for env in envs:
+                df_env = self._read_csv(f"{env}_friedman_{m}.csv")
+                if df_env is not None:
+                    df_env = df_env.copy()
+                    df_env["environment"] = env
+                    parts.append(df_env)
+            if parts:
+                friedman_ranks[m] = pd.concat(parts, ignore_index=True)
 
-        # Wilcoxon pairwise (filter significant only: p_holm < 0.05)
-        significant_pairs: dict[str, pd.DataFrame] = {}
-        for m in self.OFFLINE_KEY_METRICS:
-            df = self._read_csv(f"wilcoxon_{m}.csv")
-            if df is not None and "p_value_holm" in df.columns:
-                sig = df[df["p_value_holm"] < 0.05]
-                if not sig.empty:
-                    significant_pairs[m] = sig
-
-        # A12 effect sizes
+        # A12 effect sizes — per-env
         a12_effects: dict[str, pd.DataFrame] = {}
         for m in self.OFFLINE_KEY_METRICS:
-            df = self._read_csv(f"a12_{m}.csv")
-            if df is not None:
-                a12_effects[m] = df
+            parts = []
+            for env in envs:
+                df_env = self._read_csv(f"{env}_a12_{m}.csv")
+                if df_env is not None:
+                    df_env = df_env.copy()
+                    df_env["environment"] = env
+                    parts.append(df_env)
+            if parts:
+                a12_effects[m] = pd.concat(parts, ignore_index=True)
+
+        # Hypervolume — informational, NSGA-III only (Pareto-front quality
+        # indicator nie ma sensu dla algorytmów jednokryterialnych).
+        hv_full = self._read_csv("summary_hypervolume.csv")
+        hypervolume_nsga_only: Optional[pd.DataFrame] = None
+        if hv_full is not None and "optimizer" in hv_full.columns:
+            mask = hv_full["optimizer"].astype(str).str.lower().str.startswith("nsga")
+            hv_nsga = hv_full[mask].copy()
+            if not hv_nsga.empty:
+                hypervolume_nsga_only = hv_nsga
+
+        # Convergence summary — best_so_far na ostatniej iteracji per
+        # (env, optimizer, seed) z `iteration_metrics`, agregat statystyk
+        # przez `summary_stats`. Wartość final best-so-far powinna być spójna
+        # z `final_objective` z `run_metrics`, ale dodatkowo emitujemy
+        # `convergence_speed_gen` (przybliżona prędkość konwergencji).
+        convergence_summary = self._compute_convergence_summary()
+
+        # Timing per stage — z `optimization_timings`. Pozwala na uczciwe
+        # porównanie czasochłonności per faza algorytmu.
+        timing_by_stage = self._compute_timing_by_stage()
 
         # Online summaries
         online_summary: dict[str, pd.DataFrame] = {}
@@ -200,9 +381,34 @@ class ReportGenerator:
                 online_summary[m] = df
                 has_online = True
 
-        # Failure rates
+        # Online Friedman + A12 dla metryk §3.1.3.2 (analogicznie do offline).
+        # CSV files emitowane przez ExperimentAnalyzer z prefixem
+        # `online_{env}_` (zob. ExperimentAnalyzer._emit_pairwise_tests).
+        online_friedman_ranks: dict[str, pd.DataFrame] = {}
+        online_a12_effects: dict[str, pd.DataFrame] = {}
+        for m in self.ONLINE_KEY_METRICS:
+            f_parts: list[pd.DataFrame] = []
+            a_parts: list[pd.DataFrame] = []
+            for env in envs:
+                df_f = self._read_csv(f"online_{env}_friedman_{m}.csv")
+                if df_f is not None:
+                    df_f = df_f.copy()
+                    df_f["environment"] = env
+                    f_parts.append(df_f)
+                df_a = self._read_csv(f"online_{env}_a12_{m}.csv")
+                if df_a is not None:
+                    df_a = df_a.copy()
+                    df_a["environment"] = env
+                    a_parts.append(df_a)
+            if f_parts:
+                online_friedman_ranks[m] = pd.concat(f_parts, ignore_index=True)
+            if a_parts:
+                online_a12_effects[m] = pd.concat(a_parts, ignore_index=True)
+        online_best_per_metric = self._compute_best_per_metric(online_friedman_ranks)
+
+        # Failure rate offline (§3.1 — physical tracking collisions). Online
+        # safety jest raportowane wyłącznie w §2.1-2.3 przez `online_success_rate`.
         failure_offline = self._read_csv("failure_rate_offline.csv")
-        failure_online = self._read_csv("failure_rate_online.csv")
 
         # Best per metric + overall ranking
         best_per_metric = self._compute_best_per_metric(friedman_ranks)
@@ -226,7 +432,7 @@ class ReportGenerator:
         # Key findings
         key_findings = self._generate_key_findings(
             overall_ranking, best_per_metric, friedman_ranks,
-            online_summary, failure_offline, failure_online,
+            online_summary, failure_offline,
         )
 
         return ReportData(
@@ -239,17 +445,21 @@ class ReportGenerator:
             n_datasets=n_datasets,
             offline_summary=offline_summary,
             friedman_ranks=friedman_ranks,
-            significant_pairs=significant_pairs,
             a12_effects=a12_effects,
+            hypervolume_nsga_only=hypervolume_nsga_only,
+            convergence_summary=convergence_summary,
+            timing_by_stage=timing_by_stage,
             online_summary=online_summary,
             has_online_data=has_online,
             failure_offline=failure_offline,
-            failure_online=failure_online,
             best_per_metric=best_per_metric,
             overall_ranking=overall_ranking,
             key_findings=key_findings,
             offline_plots=offline_plots,
             online_plots=online_plots,
+            online_friedman_ranks=online_friedman_ranks,
+            online_a12_effects=online_a12_effects,
+            online_best_per_metric=online_best_per_metric,
         )
 
     def _detect_values(self, col: str) -> list[str]:
@@ -304,14 +514,15 @@ class ReportGenerator:
     def _compute_best_per_metric(
         self, friedman: dict[str, pd.DataFrame],
     ) -> Optional[pd.DataFrame]:
-        """Zwróć najlepszy algorytm (rank 1) per metryka z wyników Friedmana.
+        """Zwróć najlepszy algorytm (rank 1) per (metryka, środowisko) z Friedmana.
 
         Args:
             friedman: Mapa `metric → DataFrame` z kolumnami `optimizer`,
-                `avg_rank`, opcjonalnie `p_value`.
+                `avg_rank`, `environment`, opcjonalnie `p_value`.
 
         Returns:
-            DataFrame `metric, best_algorithm, avg_rank, p_value` albo `None`,
+            DataFrame `metric, environment, best_algorithm, avg_rank, p_value`
+            (jeden wiersz per kombinacja metryka × środowisko) albo `None`,
             gdy brak danych.
         """
         if not friedman:
@@ -320,25 +531,51 @@ class ReportGenerator:
         for metric, df in friedman.items():
             if "avg_rank" not in df.columns or df.empty:
                 continue
-            best_idx = df["avg_rank"].idxmin()
-            best = df.loc[best_idx]
-            rows.append({
-                "metric": metric,
-                "best_algorithm": best["optimizer"],
-                "avg_rank": best["avg_rank"],
-                "p_value": best.get("p_value", float("nan")),
-            })
+            if "environment" in df.columns:
+                # per-env: jeden best per środowisko
+                for env, sub in df.groupby("environment"):
+                    if sub.empty:
+                        continue
+                    best_idx = sub["avg_rank"].idxmin()
+                    best = sub.loc[best_idx]
+                    rows.append({
+                        "metric": metric,
+                        "environment": env,
+                        "best_algorithm": best["optimizer"],
+                        "avg_rank": best["avg_rank"],
+                        "p_value": best.get("p_value", float("nan")),
+                    })
+            else:
+                # legacy fallback (cross-env friedman_<metric>.csv — nie powinno
+                # występować po refactorze ExperimentAnalyzer, ale zachowane
+                # dla wstecznej kompatybilności).
+                best_idx = df["avg_rank"].idxmin()
+                best = df.loc[best_idx]
+                rows.append({
+                    "metric": metric,
+                    "environment": "all",
+                    "best_algorithm": best["optimizer"],
+                    "avg_rank": best["avg_rank"],
+                    "p_value": best.get("p_value", float("nan")),
+                })
         return pd.DataFrame(rows) if rows else None
 
     def _compute_overall_ranking(
         self, friedman: dict[str, pd.DataFrame],
     ) -> Optional[pd.DataFrame]:
-        """Zwróć ranking algorytmów uśredniony po wszystkich metrykach offline."""
+        """Zwróć ranking algorytmów uśredniony po metrykach `OVERALL_RANKING_METRICS`.
+
+        Wyklucza `hypervolume` (NSGA-III only — pooled ranking byłby mylący)
+        i `total_wallclock_offline_s` (czas mierzony osobno w sekcji timing).
+        Per `docs/Praca magisterska.md` §3.1.3.1 + §3.1.3.2 — uwzględniamy
+        cztery metryki oceny trajektorii oraz wartość optymalizacji.
+        """
         if not friedman:
             return None
         all_ranks = []
-        for df in friedman.values():
-            if "avg_rank" not in df.columns or "optimizer" not in df.columns:
+        for metric in self.OVERALL_RANKING_METRICS:
+            df = friedman.get(metric)
+            if df is None or "avg_rank" not in df.columns or "optimizer" not in df.columns:
                 continue
             all_ranks.append(df[["optimizer", "avg_rank"]])
         if not all_ranks:
@@ -352,6 +589,101 @@ class ReportGenerator:
             .reset_index(drop=True)
         )
         return overall
+
+    def _compute_convergence_summary(self) -> Optional[pd.DataFrame]:
+        """Tabela statystyk `best_so_far` na ostatniej iteracji per (env, optimizer).
+
+        Czyta `iteration_metrics` z `analysis.db`, wyciąga ostatnią iterację
+        per run, agreguje przez `summary_stats` — daje n/mean/std/min/max/
+        median/q25/q75 best_so_far per algorytm. Krzywa optymalizacji
+        (§3.1.3.2 pracy) jest przedstawiona wykresami w `convergence/`;
+        tutaj suplementarna tabela liczbowa.
+
+        Returns:
+            DataFrame z kolumnami `environment, optimizer, n, mean, std,
+            min, max, median, q25, q75` albo `None` przy braku danych.
+        """
+        import sqlite3
+        db_path = self.experiment_dir / "analysis.db"
+        if not db_path.exists():
+            return None
+        query = """
+        SELECT
+            r.environment, r.optimizer_algo AS optimizer, r.seed,
+            im.best_so_far
+        FROM iteration_metrics im
+        JOIN runs r ON r.run_id = im.run_id
+        WHERE im.iteration = (
+            SELECT MAX(iteration) FROM iteration_metrics WHERE run_id = im.run_id
+        )
+          AND im.best_so_far IS NOT NULL
+        """
+        try:
+            with sqlite3.connect(db_path) as conn:
+                df = pd.read_sql_query(query, conn)
+        except Exception:
+            return None
+        if df.empty:
+            return None
+        from src.analysis.analyzer.statistical_tests import summary_stats
+        return summary_stats(df, metric="best_so_far",
+                              group_cols=("environment", "optimizer"))
+
+    def _compute_timing_by_stage(self) -> Optional[pd.DataFrame]:
+        """Agregat czasów `optimization_timings` per (env, optimizer, stage).
+
+        Dla każdej kombinacji (środowisko, algorytm, etap) wylicza
+        n/mean/std/median z `wall_time_s`. Etapy: `initialization`,
+        `optimization`, `decision_and_reconstruction`, `total_optimization`.
+        Pozwala porównać czasochłonność każdej fazy w sposób uczciwy
+        (różne algorytmy spędzają różny czas w różnych etapach).
+
+        Returns:
+            DataFrame `environment, optimizer, stage, n, mean_s, std_s,
+            median_s, min_s, max_s` albo `None` przy braku tabeli.
+        """
+        import sqlite3
+        db_path = self.experiment_dir / "analysis.db"
+        if not db_path.exists():
+            return None
+        query = """
+        SELECT
+            r.environment,
+            r.optimizer_algo AS optimizer,
+            t.stage_name AS stage,
+            t.wall_time_s
+        FROM optimization_timings t
+        JOIN runs r ON r.run_id = t.run_id
+        WHERE t.wall_time_s IS NOT NULL
+        """
+        try:
+            with sqlite3.connect(db_path) as conn:
+                df = pd.read_sql_query(query, conn)
+        except Exception:
+            return None
+        if df.empty:
+            return None
+        agg = (
+            df.groupby(["environment", "optimizer", "stage"], dropna=False)
+              ["wall_time_s"]
+              .agg(["count", "mean", "std", "median", "min", "max"])
+              .reset_index()
+              .rename(columns={
+                  "count": "n",
+                  "mean": "mean_s",
+                  "std": "std_s",
+                  "median": "median_s",
+                  "min": "min_s",
+                  "max": "max_s",
+              })
+        )
+        # Sortuj wedle ustalonej kolejności stage'ów dla czytelności.
+        stage_order = {s: i for i, s in enumerate(self._TIMING_STAGES)}
+        agg["_stage_ord"] = agg["stage"].map(stage_order).fillna(99)
+        agg = agg.sort_values(
+            ["environment", "optimizer", "_stage_ord"]
+        ).drop(columns="_stage_ord").reset_index(drop=True)
+        return agg
 
     def _collect_plots(
         self,
@@ -385,7 +717,6 @@ class ReportGenerator:
         friedman_ranks: dict[str, pd.DataFrame],
         online_summary: dict[str, pd.DataFrame],
         failure_offline: Optional[pd.DataFrame],
-        failure_online: Optional[pd.DataFrame],
     ) -> list[str]:
         """Wygeneruj listę zdań „key findings" na podstawie zagregowanych danych."""
         findings: list[str] = []
@@ -393,7 +724,7 @@ class ReportGenerator:
         # 1. Best overall offline algorithm
         if overall_ranking is not None and not overall_ranking.empty:
             best = overall_ranking.iloc[0]
-            n_metrics = len(friedman_ranks)
+            n_metrics = len(self.OVERALL_RANKING_METRICS)
             findings.append(
                 f"{best['optimizer']} achieves the best overall offline "
                 f"ranking (avg Friedman rank: {best['avg_rank']:.2f}) across "
@@ -411,39 +742,28 @@ class ReportGenerator:
                 f"(p < 0.05) in {n_sig}/{len(friedman_ranks)} offline metrics."
             )
 
-        # 3. Safest online (lowest collision count)
-        if "collision_count" in online_summary:
-            cc = online_summary["collision_count"]
-            if "mean" in cc.columns and "optimizer" in cc.columns:
-                safest_idx = cc["mean"].idxmin()
-                safest = cc.loc[safest_idx]
-                findings.append(
-                    f"Lowest mean collision count: {safest['optimizer']} "
-                    f"({safest['mean']:.2f} collisions, "
-                    f"environment: {safest.get('environment', 'all')})."
-                )
-
-        # 4. Offline failure hot-spots
+        # 3. Offline failure hot-spots (tracking-phase collisions)
         if failure_offline is not None and "failure_rate" in failure_offline.columns:
             worst_idx = failure_offline["failure_rate"].idxmax()
             worst = failure_offline.loc[worst_idx]
             if worst["failure_rate"] > 0:
                 findings.append(
-                    f"Highest offline failure rate: {worst['optimizer']} "
-                    f"in {worst['environment']} "
+                    f"Highest offline failure rate (tracking-phase collisions): "
+                    f"{worst['optimizer']} in {worst['environment']} "
                     f"({worst['failure_rate']:.0%} of runs)."
                 )
 
-        # 5. Online failure hot-spots
-        if failure_online is not None and "failure_rate" in failure_online.columns:
-            worst_idx = failure_online["failure_rate"].idxmax()
-            worst = failure_online.loc[worst_idx]
-            if worst["failure_rate"] > 0:
-                findings.append(
-                    f"Highest online failure rate: {worst['optimizer']} "
-                    f"in {worst['environment']} "
-                    f"({worst['failure_rate']:.0%} of runs)."
-                )
+        # 4. Online maneuver safety leader — z `online_success_rate` summary
+        # (per-run binary, Mean = success rate; collision-based safety).
+        osr = online_summary.get("online_success_rate")
+        if osr is not None and "mean" in osr.columns and "optimizer" in osr.columns:
+            best_idx = osr["mean"].idxmax()
+            best = osr.loc[best_idx]
+            findings.append(
+                f"Highest online maneuver safety (collision-free evasion): "
+                f"{best['optimizer']} in {best.get('environment', 'all')} "
+                f"({best['mean']:.0%} of runs)."
+            )
 
         if not findings:
             findings.append("Insufficient data for automated findings.")
@@ -474,17 +794,22 @@ class ReportGenerator:
             online_key_metrics=self.ONLINE_KEY_METRICS,
             offline_summary=data.offline_summary,
             friedman_ranks=data.friedman_ranks,
-            significant_pairs=data.significant_pairs,
             a12_effects=data.a12_effects,
+            hypervolume_nsga_only=data.hypervolume_nsga_only,
+            convergence_summary=data.convergence_summary,
+            timing_by_stage=data.timing_by_stage,
+            timing_stages=self._TIMING_STAGES,
             online_summary=data.online_summary,
             has_online_data=data.has_online_data,
             failure_offline=data.failure_offline,
-            failure_online=data.failure_online,
             best_per_metric=data.best_per_metric,
             overall_ranking=data.overall_ranking,
             key_findings=data.key_findings,
             offline_plots=data.offline_plots,
             online_plots=data.online_plots,
+            online_friedman_ranks=data.online_friedman_ranks,
+            online_a12_effects=data.online_a12_effects,
+            online_best_per_metric=data.online_best_per_metric,
         )
 
         md_path = self.out_dir / "experiment_report.md"
@@ -529,6 +854,33 @@ class ReportGenerator:
                 pdf.savefig(fig)
                 plt.close(fig)
 
+            # Pages: Hypervolume (NSGA-III only — informational)
+            if data.hypervolume_nsga_only is not None and not data.hypervolume_nsga_only.empty:
+                fig = self._pdf_table_page(
+                    data.hypervolume_nsga_only,
+                    "Hypervolume (NSGA-III only, informational)",
+                )
+                pdf.savefig(fig)
+                plt.close(fig)
+
+            # Pages: Convergence (best-so-far summary)
+            if data.convergence_summary is not None and not data.convergence_summary.empty:
+                fig = self._pdf_table_page(
+                    data.convergence_summary,
+                    "Convergence: Best-so-far at final iteration",
+                )
+                pdf.savefig(fig)
+                plt.close(fig)
+
+            # Pages: Timing per stage
+            if data.timing_by_stage is not None and not data.timing_by_stage.empty:
+                fig = self._pdf_table_page(
+                    data.timing_by_stage,
+                    "Optimization Timing per Stage (wall-clock seconds)",
+                )
+                pdf.savefig(fig)
+                plt.close(fig)
+
             # Pages: Key offline plots
             for pref in data.offline_plots:
                 fig = self._pdf_plot_page(pref.absolute_path, pref.title)
@@ -536,15 +888,11 @@ class ReportGenerator:
                     pdf.savefig(fig)
                     plt.close(fig)
 
-            # Pages: Failure rates
-            for label, df in [
-                ("Offline Failure Rate", data.failure_offline),
-                ("Online Failure Rate", data.failure_online),
-            ]:
-                if df is not None and not df.empty:
-                    fig = self._pdf_table_page(df, label)
-                    pdf.savefig(fig)
-                    plt.close(fig)
+            # Pages: Offline failure (§3.1 — tracking-phase collisions)
+            if data.failure_offline is not None and not data.failure_offline.empty:
+                fig = self._pdf_table_page(data.failure_offline, "Offline Failure Rate")
+                pdf.savefig(fig)
+                plt.close(fig)
 
             # Pages: Online summary tables
             for metric in self.ONLINE_KEY_METRICS:
@@ -605,9 +953,9 @@ class ReportGenerator:
 
         fig.text(
             0.5, 0.08,
-            "Statistical methodology: Friedman + Nemenyi (Demsar 2006), "
-            "Wilcoxon + Holm (Arcuri & Briand 2014),\n"
-            "Vargha-Delaney A12 effect size, Bootstrap CI (10k resamples).",
+            "Statistical methodology: Friedman + Nemenyi (Demsar 2006),\n"
+            "Vargha-Delaney A12 effect size (Vargha & Delaney 2000),\n"
+            "Wilson 95% CI for proportions (Wilson 1927; Newcombe 1998).",
             ha="center", va="center", fontsize=8,
             fontfamily="serif", color="gray",
         )

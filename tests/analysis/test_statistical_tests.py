@@ -1,6 +1,11 @@
-"""Unit tests dla `statistical_tests` — Friedman, Wilcoxon, A12, bootstrap.
+"""Unit tests dla `statistical_tests` — Friedman + Nemenyi, A12, Wilson 95% CI.
 
-Reference: Demšar (2006); Vargha & Delaney (2000); Arcuri & Briand (2014).
+Trzy testy statystyczne używane w eksperymencie (zob.
+`reports/statistical_tests_methodology.md`):
+
+- Friedman + Nemenyi (Demšar 2006) — global test + post-hoc parami
+- Vargha-Delaney A12 (Vargha & Delaney 2000) — miara wielkości efektu
+- Wilson 95% CI (Wilson 1927; Newcombe 1998) — przedział ufności dla proporcji
 """
 from __future__ import annotations
 
@@ -9,11 +14,10 @@ import pandas as pd
 import pytest
 
 from src.analysis.analyzer.statistical_tests import (
-    bootstrap_ci,
     friedman_with_nemenyi,
-    summary_with_ci,
+    summary_stats,
     vargha_delaney_a12,
-    wilcoxon_pairwise,
+    wilson_proportion_ci,
 )
 
 
@@ -54,24 +58,8 @@ class TestFriedman:
         assert result.average_ranks["A"] == pytest.approx(3.0, abs=1e-9)
 
 
-class TestWilcoxon:
-    def test_pairwise_with_holm_correction(self) -> None:
-        df = _toy_df(perfect_winner=True)
-        pairs = wilcoxon_pairwise(df, metric="metric")
-        assert len(pairs) == 3  # C(3,2)=3 pary
-        for p in pairs:
-            assert p.p_value <= p.p_value_holm + 1e-12
-            assert p.n == 5
-        # Wszystkie różnice istotne kierunkowo.
-        for p in pairs:
-            if p.alg_a == "A":
-                assert p.median_diff < 0  # A < B i A < C
-            if p.alg_a == "B":
-                assert p.median_diff < 0  # B < C
-
-
 class TestA12:
-    def test_perfect_winner_has_a12_zero(self) -> None:
+    def test_perfect_winner_has_a12_one(self) -> None:
         # Lower is better; A < B w 100% par ⇒ A12(A,B) = 1.0 (A "wygrywa").
         df = _toy_df(perfect_winner=True)
         results = vargha_delaney_a12(df, metric="metric", higher_is_better=False)
@@ -80,7 +68,6 @@ class TestA12:
                 assert r.a12 == pytest.approx(1.0)
                 assert r.magnitude == "large"
             if r.alg_a == "B" and r.alg_b == "A":
-                # nieistnieje — pętla generuje a < b w sortowaniu alfa
                 pytest.fail("Nie powinno być (B, A)")
 
     def test_no_difference_a12_half(self) -> None:
@@ -91,19 +78,50 @@ class TestA12:
             assert r.magnitude == "negligible"
 
 
-class TestBootstrap:
-    def test_constant_vector_zero_width(self) -> None:
-        point, lo, hi = bootstrap_ci([3.0, 3.0, 3.0], n_resamples=500, rng_seed=0)
-        assert point == 3.0 and lo == 3.0 and hi == 3.0
-
-    def test_summary_with_ci_shape(self) -> None:
+class TestSummaryStats:
+    def test_summary_stats_columns(self) -> None:
         df = _toy_df(perfect_winner=True)
-        summary = summary_with_ci(df, metric="metric", n_resamples=200)
-        assert {"n", "mean", "std", "median", "q25", "q75", "ci95_low", "ci95_high"}.issubset(
-            summary.columns
-        )
+        summary = summary_stats(df, metric="metric")
+        assert {
+            "n", "mean", "std", "min", "max", "median", "q25", "q75",
+        }.issubset(summary.columns)
+        # Bootstrap CI columns no longer emitted.
+        assert "ci95_low" not in summary.columns
+        assert "ci95_high" not in summary.columns
         assert len(summary) == 3  # 3 algorytmy × 1 env
+        # min ≤ q25 ≤ median ≤ q75 ≤ max — order statistics invariant.
+        assert (summary["min"] <= summary["q25"]).all()
+        assert (summary["q25"] <= summary["median"]).all()
+        assert (summary["median"] <= summary["q75"]).all()
+        assert (summary["q75"] <= summary["max"]).all()
 
-    def test_empty_input_returns_nan(self) -> None:
-        point, lo, hi = bootstrap_ci([], n_resamples=10)
-        assert np.isnan(point) and np.isnan(lo) and np.isnan(hi)
+
+class TestWilsonProportionCi:
+    def test_zero_proportion_lower_bound_zero(self) -> None:
+        """p̂=0 → ci_low = 0 (Wald CI dałby ujemne)."""
+        lo, hi = wilson_proportion_ci(0, 30)
+        assert lo == 0.0
+        assert hi > 0  # górna granica > 0 (Wilson nie zerowy)
+
+    def test_full_proportion_upper_bound_one(self) -> None:
+        """p̂=1 → ci_high ≈ 1 (Wald dałby >1)."""
+        lo, hi = wilson_proportion_ci(30, 30)
+        assert hi == pytest.approx(1.0, abs=1e-9)
+        assert lo < 1.0
+
+    def test_ci_brackets_point_estimate(self) -> None:
+        """CI musi zawierać p̂ wewnątrz."""
+        lo, hi = wilson_proportion_ci(7, 30)
+        p_hat = 7 / 30
+        assert lo < p_hat < hi
+
+    def test_zero_trials_returns_nan(self) -> None:
+        lo, hi = wilson_proportion_ci(0, 0)
+        assert np.isnan(lo) and np.isnan(hi)
+
+    def test_typical_safety_critical_case(self) -> None:
+        """NSGA-III: 2 failures of 30 — sanity check known good interval."""
+        lo, hi = wilson_proportion_ci(2, 30)
+        # Wilson CI dla 2/30 ≈ [0.019, 0.213]
+        assert 0.01 < lo < 0.03
+        assert 0.19 < hi < 0.23

@@ -75,8 +75,21 @@ CREATE TABLE IF NOT EXISTS run_metrics (
     drone_count                 INTEGER CHECK (drone_count IS NULL OR drone_count >= 0),
     success                     INTEGER NOT NULL DEFAULT 1 CHECK (success IN (0,1)),
 
-    -- Końcowa wybrana trajektoria / rozwiązanie
+    -- Skalarny agregat F-vectora best-feasible solution (2026-05-13).
+    -- Definicja: `final_objective = Σ_{i=1..5} w_i · F_best[i] / F_ref_env[i]`
+    -- (Hwang & Yoon 1981 §4.2, weighted-sum MCDM scalarization).
+    --   - w_i: wagi z per-run `.hydra/config.yaml` →
+    --     `optimizer.algorithm_params.objective_weights` (zachowane w
+    --     `final_objective_weights_json` dla audytu). NSGA-III nie ma
+    --     natywnie wag → canonical fallback `[0.05, 0.5, 0.8, 1.0, 0.25]`.
+    --   - F_ref_env[i]: per-(environment, f_idx) median F_best[i] across
+    --     all algos/seeds (zapisana w `offline_objective_normalization`).
+    -- UWAGA: NIE jest to surowe F[0] (= final_objective_f1_trajectory).
+    -- Wcześniejsza semantyka `= F[0]` była pomyłką (dublowała
+    -- `trajectory_length_f1`). Wartości typowo ~O(0.5–2.0), bezwymiarowe,
+    -- comparable cross-algorithm; rankings invariant within-env-seed.
     final_objective             REAL,
+    final_objective_weights_json TEXT,
     total_path_length_2d        REAL,
     total_path_length_3d        REAL,
     -- F[2] z 5-obj F-vector (zob. populate_offline_objectives)
@@ -84,6 +97,19 @@ CREATE TABLE IF NOT EXISTS run_metrics (
     -- F[3] z 5-obj F-vector
     total_turn_penalty          REAL,
     collision_count             INTEGER NOT NULL DEFAULT 0 CHECK (collision_count >= 0),
+    -- Klasyfikacja kolizji według fazy ruchu drona w chwili kolizji:
+    --   tracking_phase_collisions — kolizja podczas wykonywania zaplanowanej
+    --     trasy offline (drone nie był w trakcie uniku). Oznacza, że trasa
+    --     zaplanowana w offline phase była kolizyjna z perspektywy fizycznej
+    --     symulacji ⇒ failure fazy *offline* (planowania).
+    --   evasion_phase_collisions — kolizja podczas wykonywania manewru uniku
+    --     (drone w stanie 'trigger' bez subsekwentnego 'rejoin'). Oznacza,
+    --     że algorytm reaktywnego unikania zawiódł ⇒ failure fazy *online*.
+    -- Suma = collision_count. Klasyfikacja per kolizja w SQL przez podzapytanie
+    -- z evasion_events i selektor ostatniego event_type ∈ {trigger, rejoin}
+    -- przed sim_time kolizji.
+    tracking_phase_collisions   INTEGER NOT NULL DEFAULT 0 CHECK (tracking_phase_collisions >= 0),
+    evasion_phase_collisions    INTEGER NOT NULL DEFAULT 0 CHECK (evasion_phase_collisions >= 0),
     evasion_event_count         INTEGER NOT NULL DEFAULT 0 CHECK (evasion_event_count >= 0),
     obstacle_count              INTEGER NOT NULL DEFAULT 0 CHECK (obstacle_count >= 0),
     best_iteration              INTEGER CHECK (best_iteration IS NULL OR best_iteration >= 0),
@@ -110,7 +136,15 @@ CREATE TABLE IF NOT EXISTS run_metrics (
     -- Online safety / energy / smoothness aggregates (notatki.md, 2026-05-04)
     -- Liczone w `populate_online_safety_metrics` z `trajectory_samples` i
     -- agregowane do `run_metrics` przez `populate_run_metrics`.
+    --   min_inter_uav_distance_m — worst-case kompresji (najbliższy moment
+    --     między najbliższym sąsiadem).
+    --   max_inter_uav_distance_m — worst-case dispersji (najbardziej
+    --     odizolowany drone od swojego najbliższego sąsiada). Komplementarna
+    --     do min — razem określają zakres wychyleń formacji wokół docelowej
+    --     odległości NN = 5 m (geometria initial_xyzs/end_xyzs). Wartość
+    --     bazowa dla `swarm_cohesion_deviation` derywowanego w metric_extractor.
     min_inter_uav_distance_m            REAL,
+    max_inter_uav_distance_m            REAL,
     mean_inter_uav_distance_m           REAL,
     total_inter_uav_safety_violations   INTEGER CHECK (
         total_inter_uav_safety_violations IS NULL OR
@@ -143,6 +177,14 @@ CREATE TABLE IF NOT EXISTS run_metrics (
     --   auc_best_so_far — pole pod krzywą best_so_far(g), znormalizowane
     --     przez liczbę generacji; lower=lepiej, integruje całą historię
     --     zbieżności w skalar.
+    --   total_wallclock_offline_s — SUM(elapsed_s) z `iteration_metrics`;
+    --     fizyczny narzut obliczeniowy fazy offline. Komplementarny do
+    --     `auc_best_so_far` (jakość/generacja) — różne algorytmy mogą mieć
+    --     różne koszty per generacja (NSGA-III non-dom sort O(M·N²) vs
+    --     prostsze SOO O(N)). Bartz-Beielstein et al. (2020) §4.3.
+    --   avg/max_wallclock_online_s — AVG/MAX(wallclock_s) z
+    --     `online_optimization_tasks`. Krytyczne dla real-time constraint
+    --     fazy unikania (T_budget = 0,5 s domyślnie).
     gd_final                            REAL,
     spread_final                        REAL,
     spacing_final                       REAL,
@@ -151,6 +193,162 @@ CREATE TABLE IF NOT EXISTS run_metrics (
         convergence_speed_gen IS NULL OR convergence_speed_gen >= 0
     ),
     auc_best_so_far                     REAL,
+    total_wallclock_offline_s           REAL CHECK (
+        total_wallclock_offline_s IS NULL OR total_wallclock_offline_s >= 0
+    ),
+    avg_wallclock_online_s              REAL CHECK (
+        avg_wallclock_online_s IS NULL OR avg_wallclock_online_s >= 0
+    ),
+    max_wallclock_online_s              REAL CHECK (
+        max_wallclock_online_s IS NULL OR max_wallclock_online_s >= 0
+    ),
+
+    -- Online optimizer performance per-run (2026-05-13) — agregaty per-task
+    -- z `online_optimization_tasks`. Realizują §3.1.3.2 `docs/Praca
+    -- magisterska.md` *dla fazy online*:
+    --   - Wartość optymalizacji w budżecie: `mean/median_online_best_fitness`
+    --     (final fitness na zakończenie każdego per-trigger optimization
+    --     task'u; AVG/MEDIAN across tasks per run).
+    --   - Prędkość optymalizacji: `avg/max_wallclock_online_s` (powyżej).
+    --   - Budżet zużyty: `mean_online_generations_completed`,
+    --     `mean_online_evaluations_completed` — typowy run wykorzystuje
+    --     ułamek time_budget_s (0.5s default) lub osiąga max_iter.
+    --   - `online_optimization_task_count` — liczba uniknięć w runie
+    --     (= liczba `triggerów` evasion). Cross-run nieporównywalne między
+    --     algos (różne strategie unikania generują różne ilości triggerów).
+    mean_online_best_fitness            REAL,
+    median_online_best_fitness          REAL,
+    mean_online_generations_completed   REAL CHECK (
+        mean_online_generations_completed IS NULL OR
+        mean_online_generations_completed >= 0
+    ),
+    mean_online_evaluations_completed   REAL CHECK (
+        mean_online_evaluations_completed IS NULL OR
+        mean_online_evaluations_completed >= 0
+    ),
+    online_optimization_task_count      INTEGER CHECK (
+        online_optimization_task_count IS NULL OR
+        online_optimization_task_count >= 0
+    ),
+
+    -- §3.1.3.3 docs/Praca magisterska.md (2026-05-13) — TRAJEKTORIA fazy
+    -- online: per-run agregaty z `online_optimization_tasks`, analogiczne
+    -- do §3.1.3.1 (trajektoria offline). Każde zdarzenie unikowe (trigger)
+    -- planuje łuk B-spline; metryki opisują jakość ZAPLANOWANEGO manewru.
+    -- Klasy:
+    --   - Długość/czas manewru: `mean_evasion_arc_length_m`,
+    --     `median_evasion_arc_length_m`, `mean_evasion_plan_duration_s`.
+    --   - Skuteczność powrotu na trasę nominalną: `mean_pos_err_at_rejoin_m`,
+    --     `mean_vel_err_at_rejoin_mps`, `mean_time_to_rejoin_s`,
+    --     `rejoin_success_rate`.
+    --   - Bezpieczeństwo manewru: zob. `evasion_phase_collisions`
+    --     (raportowane osobno w Safety Analysis z Wilson CI).
+    mean_evasion_arc_length_m           REAL CHECK (
+        mean_evasion_arc_length_m IS NULL OR mean_evasion_arc_length_m >= 0
+    ),
+    median_evasion_arc_length_m         REAL CHECK (
+        median_evasion_arc_length_m IS NULL OR median_evasion_arc_length_m >= 0
+    ),
+    mean_evasion_plan_duration_s        REAL CHECK (
+        mean_evasion_plan_duration_s IS NULL OR mean_evasion_plan_duration_s >= 0
+    ),
+    mean_pos_err_at_rejoin_m            REAL CHECK (
+        mean_pos_err_at_rejoin_m IS NULL OR mean_pos_err_at_rejoin_m >= 0
+    ),
+    mean_vel_err_at_rejoin_mps          REAL CHECK (
+        mean_vel_err_at_rejoin_mps IS NULL OR mean_vel_err_at_rejoin_mps >= 0
+    ),
+    mean_time_to_rejoin_s               REAL CHECK (
+        mean_time_to_rejoin_s IS NULL OR mean_time_to_rejoin_s >= 0
+    ),
+    rejoin_success_rate                 REAL CHECK (
+        rejoin_success_rate IS NULL OR
+        (rejoin_success_rate >= 0.0 AND rejoin_success_rate <= 1.0)
+    ),
+    -- §3.1.3.3 metryka GŁÓWNA niezawodności powrotu (2026-05-13).
+    --
+    -- rejoin_completion_rate = |T_ok| / (|T_ok| + |T_fail|)
+    --   gdzie T_fail = {never_rejoined, collided_drone, collided_ground,
+    --                   collided_obstacle}  — jawne porażki
+    --   pending z mianownika EXCLUDED — pending to etap pośredni w
+    --     łańcuchu replanów (SwarmFlightController._pending_evasion_trigger_times
+    --     nadpisuje aktywny plan przy replanie, stary rekord zostaje
+    --     osierocony w pending). NIE jest to porażka algorytmu.
+    --
+    -- Komplementarnie `rejoin_success_rate` (powyżej) ma pending w mianowniku
+    -- jako konserwatywne dolne ograniczenie i wskaźnik intensywności
+    -- replanowania.
+    rejoin_completion_rate              REAL CHECK (
+        rejoin_completion_rate IS NULL OR
+        (rejoin_completion_rate >= 0.0 AND rejoin_completion_rate <= 1.0)
+    ),
+    -- §3.1.3.3 — TOPSIS composite "Skuteczność powrotu" (2026-05-14).
+    -- Trzy wymiary jakości powrotu (pos_err, vel_err, time_to_rejoin)
+    -- agregowane w pojedynczy skalar przez odległość euklidesową od
+    -- idealnego punktu (0,0,0) w przestrzeni znormalizowanej medianami
+    -- per środowisko (Hwang & Yoon 1981 — TOPSIS MCDM):
+    --
+    --   rejoin_quality_i = sqrt(
+    --       (pos_err_i / median_pos)²
+    --     + (vel_err_i / median_vel)²
+    --     + (time_to_rejoin_i / median_time)²
+    --   )
+    --
+    --   rejoin_quality_r (kolumna) = mean(rejoin_quality_i)
+    --                                  for i in T_r^ok
+    --
+    -- LOWER=BETTER. ~1.0 dla typowego runa (mediany w każdym wymiarze).
+    -- Liczona w post-pass `populate_rejoin_quality` po pełnym przejściu
+    -- wszystkich runów (medians wymagają cross-run agregacji per env).
+    -- NULL gdy brak udanych rejoin'ów w runie (|T_r^ok| = 0).
+    rejoin_quality                      REAL CHECK (
+        rejoin_quality IS NULL OR rejoin_quality >= 0.0
+    ),
+
+    -- §3.1.3.4 — niezawodność hard real-time constraint fazy avoidance
+    -- (2026-05-13). budget_violation_rate to proporcja triggerów,
+    -- w których algorytm nie dostarczył feasible planu w budżecie
+    -- (status != 'ok' — obejmuje 'failed' = brak feasible candidate
+    -- w populacji + 'timed_out' = budget exceeded bez best-so-far).
+    -- Safety metric hard real-time (lower=better). Komplementarne do
+    -- NFE jako throughput w budżecie.
+    -- UWAGA semantyczna: NIE używamy literal `wallclock_s >= time_budget_s`
+    -- bo wszystkie algorytmy saturują budżet z OS-jitter overshoot ~10-50ms
+    -- (false 100% violation rate). Semantyka `status != 'ok'` mierzy
+    -- functional deadline miss (algorytm zwrócił plan w budżecie? T/N).
+    budget_violation_rate               REAL CHECK (
+        budget_violation_rate IS NULL OR
+        (budget_violation_rate >= 0.0 AND budget_violation_rate <= 1.0)
+    ),
+    -- §3.1.3.4 — *online_success_rate* i *online_sp1* (2026-05-13).
+    -- Komplement BVR (jawnie raportowany dla czytelności analizy) i
+    -- Success Performance 1 łącząca prędkość (NFE) ze skutecznością.
+    --
+    --   online_success_rate = 1 - budget_violation_rate
+    --                       = proporcja triggerów z status='ok' (feasible
+    --                         plan dostarczony w budżecie). HIGHER=BETTER.
+    --
+    --   online_sp1 = RT_succ / p_s
+    --             = AVG(evaluations_completed WHERE status='ok')
+    --               / online_success_rate
+    --             = oczekiwana liczba NFE na jeden dostarczony plan przy
+    --               niezależnych próbach z prawdopodobieństwem sukcesu p_s.
+    --               LOWER=BETTER. Auger & Hansen (2005).
+    --               NULL gdy success_rate = 0 (algorytm bezużyteczny).
+    --
+    -- Uwaga: NIE używamy ERT (Hansen 2009 BBOB) dla tej metryki, ponieważ
+    -- failed online tasks abortują z RT_unsucc=0 (sentinel cost przy
+    -- inicjalizacji) → klasyczne ERT degeneruje się do samego RT_succ
+    -- i traci semantykę łączenia szybkości ze skutecznością. SP1 jest
+    -- formalnym uogólnieniem ERT dla scenariuszy bez restartów z
+    -- natychmiastowym abortem.
+    online_success_rate                 REAL CHECK (
+        online_success_rate IS NULL OR
+        (online_success_rate >= 0.0 AND online_success_rate <= 1.0)
+    ),
+    online_sp1                          REAL CHECK (
+        online_sp1 IS NULL OR online_sp1 >= 0.0
+    ),
 
     objective_components_json   TEXT,
     summary_json                TEXT,
@@ -191,10 +389,13 @@ CREATE TABLE IF NOT EXISTS uav_online_metrics (
     uav_id                            INTEGER NOT NULL CHECK (uav_id >= 0),
 
     -- Inter-UAV safety (notatki.md #1)
-    -- Min/mean odległości tego UAVa od najbliższego sąsiada w roju w czasie.
+    -- Min/max/mean odległości tego UAVa od najbliższego sąsiada w roju w czasie.
     -- `inter_uav_safety_violation_count` = liczba próbek gdzie min-pairwise
     -- distance dla tego UAVa < `inter_uav_safety_threshold_m`.
+    -- max_inter_uav_distance_m komplementarne do min — razem charakteryzują
+    -- zakres odległości od najbliższego sąsiada (cohesion vs dispersion).
     min_inter_uav_distance_m          REAL,
+    max_inter_uav_distance_m          REAL,
     mean_inter_uav_distance_m         REAL,
     inter_uav_safety_violation_count  INTEGER CHECK (
         inter_uav_safety_violation_count IS NULL OR
@@ -540,6 +741,27 @@ CREATE TABLE IF NOT EXISTS trajectory_metrics (
 );
 
 -- =========================================================
+-- 15a. Normalizacja F_ref dla `run_metrics.final_objective` (2026-05-13).
+-- Per (environment, f_idx) median F_best[i] across all runs — używana
+-- jako mianownik w weighted normalized sum: `final_objective = Σ w_i ·
+-- F_best[i] / f_ref_median`. Populator: `populate_final_objective_aggregated`.
+-- Wybór median (a nie straight-line F_ref) wynika z trade-offa: faithful
+-- straight-line F_ref wymagałby rekonstrukcji `VectorizedEvaluator` w ETL
+-- (heavy zależność od `generated_obstacles.csv` + `trajectories.csv`).
+-- Median preserves rankings within-env-seed (wszystkie algorytmy dzielone
+-- przez tę samą stałą per env) → Friedman/Nemenyi p-values identyczne
+-- jak przy faithful F_ref.
+-- =========================================================
+CREATE TABLE IF NOT EXISTS offline_objective_normalization (
+    environment       TEXT NOT NULL,
+    f_idx             INTEGER NOT NULL CHECK (f_idx >= 0 AND f_idx <= 4),
+    f_ref_median      REAL NOT NULL,
+    n_runs            INTEGER NOT NULL CHECK (n_runs > 0),
+    computed_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (environment, f_idx)
+);
+
+-- =========================================================
 -- 16. (USUNIĘTE 2026-05-07) tabela `pareto_run_metrics`
 -- 7 z 10 kolumn duplikowało `run_metrics` (decision_mode,
 -- selected_solution_index, nondominated_count, feasible_nondominated_count,
@@ -586,6 +808,7 @@ SELECT
     m.best_iteration,
     -- Online metryki agregowane (notatki.md, 2026-05-04)
     m.min_inter_uav_distance_m,
+    m.max_inter_uav_distance_m,
     m.mean_inter_uav_distance_m,
     m.total_inter_uav_safety_violations,
     m.mean_energy_indicator,
@@ -593,7 +816,26 @@ SELECT
     -- Offline F-vector best feasible (2026-05-05)
     m.final_objective_f1_trajectory,
     m.final_objective_f2_height_angle,
-    m.total_coordination_cost
+    m.total_coordination_cost,
+    -- Online optimizer performance (2026-05-13, §3.1.3.4 online algorithm)
+    m.mean_online_best_fitness,
+    m.median_online_best_fitness,
+    m.mean_online_generations_completed,
+    m.mean_online_evaluations_completed,
+    m.online_optimization_task_count,
+    -- §3.1.3.3 trajektoria fazy online (2026-05-13)
+    m.mean_evasion_arc_length_m,
+    m.median_evasion_arc_length_m,
+    m.mean_evasion_plan_duration_s,
+    m.mean_pos_err_at_rejoin_m,
+    m.mean_vel_err_at_rejoin_mps,
+    m.mean_time_to_rejoin_s,
+    m.rejoin_success_rate,
+    m.rejoin_completion_rate,
+    m.rejoin_quality,
+    m.budget_violation_rate,
+    m.online_success_rate,
+    m.online_sp1
 FROM runs r
 LEFT JOIN run_metrics m
     ON m.run_id = r.run_id;
@@ -782,6 +1024,7 @@ SELECT
     -- z tych metryk jest per-run (nie zależy od `algorithm`), ale dorzucone
     -- do tej widoku, by mieć "wszystko o online performance" w 1 query.
     rm.min_inter_uav_distance_m,
+    rm.max_inter_uav_distance_m,
     rm.mean_inter_uav_distance_m,
     rm.total_inter_uav_safety_violations,
     rm.mean_energy_indicator,

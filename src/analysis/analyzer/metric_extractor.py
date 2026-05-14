@@ -18,6 +18,15 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# Docelowa odległość między najbliższymi sąsiadami w roju [m], wyprowadzona
+# z geometrii misji: drony rozmieszczone na osi X co 5 m w pozycjach
+# startowych (`initial_xyzs`) i docelowych (`end_xyzs`) — zob.
+# `configs/environment/{forest,urban}.yaml`. W idealnej formacji NN-distance
+# pozostaje 5 m przez cały czas misji. `swarm_cohesion_deviation` mierzy
+# sumę odchyleń worst-case kompresji i dispersji od tej wartości.
+SWARM_COHESION_TARGET_NN_M = 5.0
+
+
 class MetricExtractor:
     """Czyta metryki z `analysis.db` i zwraca DataFrames."""
 
@@ -56,6 +65,8 @@ class MetricExtractor:
             m.drone_count,
             m.success,
             m.collision_count,
+            m.tracking_phase_collisions,
+            m.evasion_phase_collisions,
             m.evasion_event_count,
             m.obstacle_count,
             m.final_objective,
@@ -75,19 +86,76 @@ class MetricExtractor:
             m.r2_final,
             m.convergence_speed_gen,
             m.auc_best_so_far,
+            m.total_wallclock_offline_s,
             m.front_size_last_gen,
             m.nondominated_count,
             m.min_inter_uav_distance_m,
+            m.max_inter_uav_distance_m,
             m.mean_inter_uav_distance_m,
             m.total_inter_uav_safety_violations,
             m.mean_energy_indicator,
-            m.mean_smoothness_indicator
+            m.mean_smoothness_indicator,
+            m.avg_wallclock_online_s,
+            m.max_wallclock_online_s,
+            m.mean_online_best_fitness,
+            m.median_online_best_fitness,
+            m.mean_online_generations_completed,
+            m.mean_online_evaluations_completed,
+            m.online_optimization_task_count,
+            -- §3.1.3.3 docs/Praca magisterska.md — trajektoria fazy online
+            m.mean_evasion_arc_length_m,
+            m.median_evasion_arc_length_m,
+            m.mean_evasion_plan_duration_s,
+            m.mean_pos_err_at_rejoin_m,
+            m.mean_vel_err_at_rejoin_mps,
+            m.mean_time_to_rejoin_s,
+            m.rejoin_success_rate,
+            m.rejoin_completion_rate,
+            m.rejoin_quality,
+            m.budget_violation_rate,
+            m.online_success_rate,
+            m.online_sp1
         FROM runs r
         LEFT JOIN run_metrics m ON m.run_id = r.run_id
         ORDER BY r.environment, r.optimizer_algo, r.seed
         """
         with sqlite3.connect(self.db_path) as conn:
-            return pd.read_sql_query(query, conn)
+            df = pd.read_sql_query(query, conn)
+        # Derywowane metryki jakości trajektorii (offline, best feasible
+        # solution last generation — F-vector z populate_offline_objectives).
+        # Mapowanie: F[0]=f1 (długość+kształt), F[1]=f2 (wysokość+kąt),
+        # F[2]=f3 (zagrożenie), F[3]=f4 (zakręty), F[4]=f5 (koordynacja).
+        if "final_objective_f1_trajectory" in df.columns:
+            # Długość trajektorii (kara długości polilinii + odchylenia bocznego).
+            df["trajectory_length_f1"] = df["final_objective_f1_trajectory"]
+        if {"final_objective_f2_height_angle", "total_turn_penalty"}.issubset(df.columns):
+            # Gładkość trajektorii — kara wysokości/kąta (f2) + zakręty (f4).
+            # Suma surowych wartości; obie składowe operują na podobnej skali
+            # (kąty radianowe + odchylenia metryczne).
+            df["trajectory_smoothness_f2_f4"] = (
+                df["final_objective_f2_height_angle"] + df["total_turn_penalty"]
+            )
+        if {"total_threat_cost", "total_coordination_cost"}.issubset(df.columns):
+            # Bezpieczeństwo trajektorii — kara zagrożenia (f3) + koordynacji (f5).
+            # f3: hinge penalty za penetrację stref przeszkód.
+            # f5: exponential penalty za zbliżanie się dronów < d_min.
+            # Skale są różne — interpretować z ostrożnością cross-scenariusz.
+            df["trajectory_safety_f3_f5"] = (
+                df["total_threat_cost"] + df["total_coordination_cost"]
+            )
+        # swarm_cohesion_deviation = suma odchyleń worst-case kompresji
+        # i dispersji od docelowego NN-spacing (5 m). Per
+        # `docs/Praca magisterska.md` §3.1.3.1 — metryka oceny *offline*
+        # zaplanowanej trajektorii (mierzona w fizycznej symulacji, ale
+        # ocenia jakość planowania). Niska wartość ⇒ rój utrzymuje
+        # formację zbliżoną do startowej; wysoka ⇒ "lot poszarpany"
+        # z dużymi wahaniami separacji.
+        if "min_inter_uav_distance_m" in df.columns and "max_inter_uav_distance_m" in df.columns:
+            df["swarm_cohesion_deviation"] = (
+                (df["min_inter_uav_distance_m"] - SWARM_COHESION_TARGET_NN_M).abs()
+                + (df["max_inter_uav_distance_m"] - SWARM_COHESION_TARGET_NN_M).abs()
+            )
+        return df
 
     def iteration_history(
         self,

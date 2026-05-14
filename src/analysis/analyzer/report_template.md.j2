@@ -4,69 +4,95 @@
 **Runs:** {{ n_runs }} | **Algorithms:** {{ algorithms | join(', ') }} | **Environments:** {{ environments | join(', ') }}
 {% if avoidances %}**Avoidances:** {{ avoidances | join(', ') }}{% endif %}
 
+> Patrz `reports/report_interpretation_guide.md` — instrukcja interpretacji
+> tej tabeli i wszystkich sekcji raportu.
+
 ---
 
 ## 1. Offline Optimization Results
 
+Metryki dobrane zgodnie z `docs/Praca magisterska.md`:
+
+- **§3.1.3.1 — Trajectory quality:** `trajectory_safety_f3_f5` (f3+f5,
+  bezpieczeństwo trajektorii), `trajectory_length_f1` (f1, długość),
+  `trajectory_smoothness_f2_f4` (f2+f4, gładkość), `swarm_cohesion_deviation`
+  (spójność roju — MAE od 5 m NN-spacing).
+- **§3.1.3.2 — Algorithm performance:** `final_objective` — skalarny
+  agregat F-vectora best-feasible solution: `Σ w_i · F_best[i] /
+  F_ref_env[i]` (Hwang & Yoon 1981 §4.2 weighted-sum MCDM). Wagi `w_i`
+  z per-run hydra configu (NSGA-III: canonical fallback
+  `[0.05, 0.5, 0.8, 1.0, 0.25]` — identyczne z SOO peers).
+  `F_ref_env[i]` = per-environment median F_best[i]. Wartość bezwymiarowa
+  ~O(1) (1.0 = typowy run); preserves rankings within-env-seed względem
+  straight-line F_ref. Convergence (sekcja 1.5), Timing per stage
+  (sekcja 1.6), Hypervolume (sekcja 1.7 — *informacyjnie*, NSGA-III only).
+
 ### 1.1 Summary Statistics
+
+Raportujemy `mediana [Q1, Q3]` — standardowa forma raportowania rozkładów
+w literaturze metaheurystyk (Bartz-Beielstein i in. 2020 §4.2), odporna na
+ogony niegausowskie typowe dla benchmarków swarm intelligence. `mean` i
+`std` raportujemy *uzupełniająco* — różnica mean vs. median sygnalizuje
+skośność (skewness) rozkładu. `std` mierzy rozrzut wokół średniej, NIE
+porównuj go z medianą.
+
 {% for metric in offline_key_metrics %}
 {% if metric in offline_summary %}
 
 #### {{ metric | replace('_', ' ') | title }}
 
-| Environment | Optimizer | n | Mean | Std | Median | CI95 Low | CI95 High |
+| Environment | Optimizer | n | Mean | Std | Median | Q1 | Q3 |
 |:---|:---|---:|---:|---:|---:|---:|---:|
 {% for row in offline_summary[metric].itertuples() -%}
-| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.ci95_low) }} | {{ "%.4f" | format(row.ci95_high) }} |
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.q25) }} | {{ "%.4f" | format(row.q75) }} |
 {% endfor %}
 {% endif %}
 {% endfor %}
 
-### 1.2 Friedman Rankings
+### 1.2 Friedman + Nemenyi Rankings (per-environment)
+
+Algorytmy mają różne konfiguracje hyperparametrów per środowisko
+(`pop_size`, `n_gen`, wagi skalaryzacji — zob. `docs/ceteris_paribus.md` §1),
+więc testy statystyczne emitowane są osobno per środowisko. Pary istotnie
+różne identyfikowane przez Critical Difference Nemenyi (Demšar 2006).
+
+> **Uwaga:** dwa algorytmy o identycznym rozkładzie wartości metryki
+> (np. wszystkie zera dla *Trajectory Safety* — MSFFOA i NSGA-III) dostaną
+> **identyczną średnią rangę** — Friedman nie potrafi ich rozróżnić.
+> To poprawny wynik testu, a nie błąd raportu.
 
 {% if best_per_metric is not none and best_per_metric | length > 0 %}
-| Metric | Best Algorithm | Avg Rank | p-value | Significant (p<0.05) |
-|:---|:---|---:|---:|:---:|
+| Metric | Environment | Best Algorithm | Avg Rank | p-value | Significant (p<0.05) |
+|:---|:---|:---|---:|---:|:---:|
 {% for row in best_per_metric.itertuples() -%}
-| {{ row.metric | replace('_', ' ') | title }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "%.4f" | format(row.p_value) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
+| {{ row.metric | replace('_', ' ') | title }} | {{ row.environment }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "%.4f" | format(row.p_value) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
 {% endfor %}
 
 {% if n_datasets is defined %}
-*N = {{ n_datasets }} datasets (environment x seed combinations).*
+*N = {{ n_datasets }} datasets per env (seeds within environment).*
 {% endif %}
 {% else %}
 *Friedman test not available (insufficient data).*
 {% endif %}
 
-### 1.3 Pairwise Comparisons (Wilcoxon Signed-Rank + Holm-Bonferroni)
+### 1.3 Effect Sizes — Vargha-Delaney A12 (per-environment)
 
-{% for metric in offline_key_metrics %}
-{% if metric in significant_pairs and significant_pairs[metric] | length > 0 %}
-#### {{ metric | replace('_', ' ') | title }}
-
-| Algorithm A | Algorithm B | p-value (raw) | p-value (Holm) | Median Diff |
-|:---|:---|---:|---:|---:|
-{% for row in significant_pairs[metric].itertuples() -%}
-| {{ row.alg_a }} | {{ row.alg_b }} | {{ "%.4f" | format(row.p_value) }} | {{ "%.4f" | format(row.p_value_holm) }} | {{ "%.4f" | format(row.median_diff) }} |
-{% endfor %}
-{% endif %}
-{% endfor %}
-
-### 1.4 Effect Sizes (Vargha-Delaney A12)
+Miara wielkości efektu probabilistycznego: `A12 = P(losowy run A lepszy niż
+losowy run B)`. Klasyfikacja magnitude wg Vargha & Delaney (2000).
 
 {% for metric in offline_key_metrics %}
 {% if metric in a12_effects and a12_effects[metric] | length > 0 %}
 #### {{ metric | replace('_', ' ') | title }}
 
-| Algorithm A | Algorithm B | A12 | Magnitude |
-|:---|:---|---:|:---|
+| Environment | Algorithm A | Algorithm B | A12 | Magnitude |
+|:---|:---|:---|---:|:---|
 {% for row in a12_effects[metric].itertuples() -%}
-| {{ row.alg_a }} | {{ row.alg_b }} | {{ "%.3f" | format(row.a12) }} | {{ row.magnitude }} |
+| {{ row.environment }} | {{ row.alg_a }} | {{ row.alg_b }} | {{ "%.3f" | format(row.a12) }} | {{ row.magnitude }} |
 {% endfor %}
 {% endif %}
 {% endfor %}
 
-### 1.5 Key Plots (Offline)
+### 1.4 Key Plots (Offline)
 
 {% for plot in offline_plots %}
 #### {{ plot.title }}
@@ -75,9 +101,169 @@
 
 {% endfor %}
 
+### 1.5 Convergence — best-so-far at final iteration
+
+Statystyki ostatniej iteracji optymalizacji — wartość `best_so_far`
+(najlepszy znaleziony osobnik w budżecie pokoleń) per (env, optimizer).
+Krzywą optymalizacji widzimy na wykresach `convergence/*` w sekcji 1.4;
+tutaj suplementarna tabela liczbowa (§3.1.3.2 — krzywa optymalizacji).
+
+{% if convergence_summary is not none and convergence_summary | length > 0 %}
+| Environment | Optimizer | n | Mean | Std | Median | Q1 | Q3 | Min | Max |
+|:---|:---|---:|---:|---:|---:|---:|---:|---:|---:|
+{% for row in convergence_summary.itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.q25) }} | {{ "%.4f" | format(row.q75) }} | {{ "%.4f" | format(row['min']) }} | {{ "%.4f" | format(row['max']) }} |
+{% endfor %}
+{% else %}
+*Brak danych iteracyjnych w `iteration_metrics`.*
+{% endif %}
+
+### 1.6 Optimization Timing per Stage
+
+Czasochłonność per etap algorytmu (§3.1.3.2 — prędkość optymalizacji).
+Etapy: `initialization` (przygotowanie populacji), `optimization`
+(pętla generacji), `decision_and_reconstruction` (wybór rozwiązania
+z frontu — istotne dla NSGA-III), `total_optimization` (suma końcowa).
+Pomaga rozpoznać *gdzie* algorytm spędza czas, a nie tylko *ile* łącznie.
+
+{% if timing_by_stage is not none and timing_by_stage | length > 0 %}
+| Environment | Optimizer | Stage | n | Mean [s] | Std [s] | Median [s] | Min [s] | Max [s] |
+|:---|:---|:---|---:|---:|---:|---:|---:|---:|
+{% for row in timing_by_stage.itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.stage }} | {{ row.n }} | {{ "%.3f" | format(row.mean_s) }} | {{ "%.3f" | format(row.std_s) if row.std_s is not none else "—" }} | {{ "%.3f" | format(row.median_s) }} | {{ "%.3f" | format(row.min_s) }} | {{ "%.3f" | format(row.max_s) }} |
+{% endfor %}
+{% else %}
+*Brak `optimization_timings` w bazie analysis.db.*
+{% endif %}
+
+### 1.7 Hypervolume (informational, NSGA-III only)
+
+Hypervolume to wskaźnik jakości frontu Pareto — *nie ma sensu* dla
+algorytmów jednokryterialnych (MSFFOA, OOA, SSA), bo generują one
+zdegenerowany 1-punktowy front. Tabela ograniczona do NSGA-III dla
+diagnostyki MOO (§3.1.3.2 — metryka informacyjna).
+
+{% if hypervolume_nsga_only is not none and hypervolume_nsga_only | length > 0 %}
+| Environment | Optimizer | n | Mean | Std | Median | Q1 | Q3 |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+{% for row in hypervolume_nsga_only.itertuples() -%}
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.q25) }} | {{ "%.4f" | format(row.q75) }} |
+{% endfor %}
+{% else %}
+*Brak danych Hypervolume dla NSGA-III.*
+{% endif %}
+
 ---
 
 ## 2. Online Avoidance Results
+
+Metryki fazy online dzielą się na trzy klasy zgodnie z §3.1.3.3 + §3.1.3.4
+`docs/Praca magisterska.md`. Każde zdarzenie unikowe (trigger) wywołuje
+uruchomienie online optimizer'a, który planuje pojedynczy łuk B-spline
+ominięcia przeszkody z budżetem czasowym (`time_budget_s = 0.5s`).
+Agregaty per-run wzięte AVG/MEDIAN po wszystkich triggerach w runie.
+
+**(A) §3.1.3.3 — TRAJEKTORIA fazy online** — metryki *dedykowane* fazie
+online (NIE pełen analog §3.1.3.1; faza online ma inną charakterystykę:
+per-drone, lokalny manewr, krytyczny powrót na trasę nominalną):
+
+- **Geometria manewru unikowego:**
+  `mean_evasion_arc_length_m` (długość łuku B-spline) — fizyczny rozmiar
+  manewru. Krótszy łuk = mniejsze odchylenie od optymalnej trasy offline.
+  Planowany czas (`plan_total_duration_s`) jest silnie skorelowany z
+  długością łuku (Pearson 0.44–0.73 per algo) i powiela informację
+  geometryczną — pozostaje w bazie dla audytu, ale nie w głównych metrykach.
+- **Skuteczność powrotu na nominalną trajektorię** (klasa
+  *online-specific*, brak analogu w §3.1.3.1):
+  **`rejoin_quality`** (PRIMARY) — TOPSIS composite (Hwang & Yoon 1981)
+  trzech wymiarów: błąd pozycyjny, błąd prędkościowy, czas powrotu.
+  Skalar = odległość euklidesowa od idealnego punktu (0,0,0) w 3D
+  znormalizowanej przestrzeni (skale referencyjne = mediany per
+  środowisko). Lower=lepiej. ~1.0 dla typowego runa.
+  Oryginalne 3 wymiary składowe pozostają w DB dla audytu.
+  **`rejoin_completion_rate`** (epizodowa, mianownik = sukcesy + jawne
+  porażki; higher=lepiej) i `rejoin_success_rate` (surowy: pending
+  z replanu w mianowniku; wskaźnik intensywności replanowania).
+
+> **Wyjaśnienie `pending` outcome.** Online optimizer może być wywołany
+> ponownie zanim poprzedni manewr zakończy się rejoin'em (replan w trakcie
+> aktywnego uniku, typowo z driftu zagrożenia lub sticky-axis). Stary
+> rekord jest osierocony w `outcome=pending` — to NIE porażka algorytmu,
+> tylko etap pośredni w łańcuchu replanów dla jednego zdarzenia
+> zagrożenia. W eksperymencie ≈18% triggerów ma `pending` (drony z
+> `pending` mają średnio 3.24 triggerów per epizod vs 1.07 dla
+> pojedynczych ucieczek). `rejoin_completion_rate` wyklucza `pending`
+> z mianownika → poprawna semantyka per-epizodowa.
+- **Bezpieczeństwo manewru — JEDYNA metryka safety fazy online:**
+  `online_success_rate` (per-run binarne, 1 = run bez kolizji w fazie
+  evasion, 0 = ≥1 kolizja; pomiar *real-world* w PyBullet z
+  `evasion_phase_collisions == 0`). Raportowana w §2.1 (Mean = empiryczny
+  success rate, Std = sqrt(p·(1-p))), §2.2 (Friedman) i §2.3 (A12) —
+  analogicznie do pozostałych metryk fazy online. Wszystkie inne metryki
+  §2 dotyczą trajektorii, jakości lotu lub algorytmu — **nie** są
+  metrykami bezpieczeństwa.
+
+> **Limitations.** Komponenty 4-obj F-wektora online optimizer'a
+> (`c_safety, c_energy, c_jerk, c_symmetry` — analogi *f3, f2, f4*
+> + symmetry) są liczone w runtime ale skalaryzowane do `best_fitness`
+> przed zapisem. Capture per-task F-wektora oraz/lub plasterkowanie
+> `trajectory_samples` między trigger→rejoin umożliwiłoby pełen analog
+> §3.1.3.1 (bezpieczeństwo zaplanowane, gładkość zaplanowana,
+> bezpieczeństwo fizyczne, gładkość fizyczna). Planowane jako
+> rozszerzenie.
+
+**(B) Jakość lotu fizycznego** (mission-wide, PyBullet — komplementarne):
+
+- `mean_smoothness_indicator` — gładkość lotu fizycznego.
+- `mean_energy_indicator` — energochłonność.
+- `min_inter_uav_distance_m` — worst-case separacja inter-UAV.
+
+**(C) §3.1.3.4 — ALGORYTM fazy online** (per-task performance):
+
+- **Wartość optymalizacji w budżecie czasowym:**
+  `mean_online_best_fitness` (lower=lepiej). Końcowy fitness skalarny —
+  dla SOO bezpośrednio z 4-obj funkcji skalaryzującej (`f1_safety,
+  f2_energy, f3_jerk, f4_symmetry`), dla NSGA-III z rozwiązania
+  wybranego z 4D Pareto frontu przez `SafetyPriorityDecision`
+  (ceteris paribus). UWAGA: funkcja celu online jest **inna** niż
+  offline (4 obj vs 5 obj F-vector).
+- **Krzywa optymalizacji** (sekcja 2.4): mean ± std best_fitness per
+  generacja per (środowisko, algorytm).
+- **Prędkość optymalizacji (NFE):**
+  `mean_online_evaluations_completed` — liczba ewaluacji funkcji celu
+  w budżecie czasowym (BBOB 2009 convention, Hansen et al.; lower=mniej
+  obliczeń = "wolniejszy" algorytm w sensie throughput per-iteration).
+  Komplementarnie `mean_online_generations_completed` (informacyjnie —
+  generacja to jednostka algorytmo-specyficzna, NFE jest porównywalne
+  cross-algorithm). Wallclock pomijamy w analizie głównej — wszystkie
+  algorytmy saturują budżet `time_budget_s = 0.5s` (wariancja w 3.
+  cyfrze dziesiętnej), więc nie różnicują algorytmów.
+- **Niezawodność hard real-time:** `budget_violation_rate` (lower=lepiej)
+  — proporcja triggerów, w których algorytm nie zwrócił feasible planu
+  w budżecie (`status != 'ok'`: `failed` = brak feasible candidate
+  w populacji, `timed_out` = budget exceeded bez best-so-far).
+  *Functional deadline miss* — niezależnie od milisekundowych odchyłek
+  wallclock (te saturują budżet z OS-jitter ~10-50ms, więc literal
+  `wallclock ≥ budget` byłby fałszywym 100% alarmem).
+  > **Uwaga nazewnicza.** `budget_violation_rate` to **niezawodność
+  > algorytmu real-time** (czy zwrócił feasible plan w czasie), NIE
+  > bezpieczeństwo manewru. Bezpieczeństwo (kolizje fizyczne) raportuje
+  > wyłącznie sekcja 3.2.
+- **Efektywność łączona (SP1):** `online_sp1 = RT_succ / (1 - budget_violation_rate)`
+  (lower=lepiej) — Success Performance 1 (Auger & Hansen 2005): oczekiwana
+  liczba NFE na jeden *dostarczony* feasible plan przy niezależnych próbach.
+  Łączy prędkość (RT_succ w liczniku — średnia NFE w udanych próbach)
+  z niezawodnością real-time w mianowniku: algorytm szybki ale zawodny
+  dostaje wysoką karę (rośnie 1/(1-BVR)); algorytm niezawodny ale wolny
+  też (rośnie RT_succ). NULL gdy BVR=1 (algorytm nigdy nie zdąża).
+  UWAGA metodologiczna: świadomie używamy SP1 zamiast klasycznego ERT
+  (Hansen 2009 BBOB), bo failed online tasks abortują z RT_unsucc=0
+  (sentinel cost przy inicjalizacji) → klasyczne ERT degeneruje się
+  do RT_succ i traci semantykę łączenia speed×success. SP1 jest
+  uogólnieniem ERT dla early-abort.
+- **Hypervolume per online task:** zgodnie z §3.1.3.4 — *future work*.
+  Per-task front Pareto nie jest aktualnie zapisywany; wymaga capture
+  w callbacku optymalizatora online.
 
 {% if has_online_data %}
 
@@ -87,15 +273,45 @@
 
 #### {{ metric | replace('_', ' ') | title }}
 
-| Environment | Optimizer | n | Mean | Std | Median | CI95 Low | CI95 High |
+| Environment | Optimizer | n | Mean | Std | Median | Q1 | Q3 |
 |:---|:---|---:|---:|---:|---:|---:|---:|
 {% for row in online_summary[metric].itertuples() -%}
-| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.ci95_low) }} | {{ "%.4f" | format(row.ci95_high) }} |
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n }} | {{ "%.4f" | format(row.mean) }} | {{ "%.4f" | format(row.std) }} | {{ "%.4f" | format(row.median) }} | {{ "%.4f" | format(row.q25) }} | {{ "%.4f" | format(row.q75) }} |
 {% endfor %}
 {% endif %}
 {% endfor %}
 
-### 2.2 Key Plots (Online)
+### 2.2 Friedman + Nemenyi Rankings (per-environment, online)
+
+Analogicznie do §1.2 — testy stosowane per-środowisko (parametry algorytmów
+różnią się między forest/urban). Per-task agregaty (mean across triggerów
+unikania w runie) traktowane jako pojedyncza obserwacja per (env, opt, seed).
+
+{% if online_best_per_metric is not none and online_best_per_metric | length > 0 %}
+| Metric | Environment | Best Algorithm | Avg Rank | p-value | Significant (p<0.05) |
+|:---|:---|:---|---:|---:|:---:|
+{% for row in online_best_per_metric.itertuples() -%}
+| {{ row.metric | replace('_', ' ') | title }} | {{ row.environment }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "%.4f" | format(row.p_value) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
+{% endfor %}
+{% else %}
+*Friedman test on online metrics not available (insufficient data).*
+{% endif %}
+
+### 2.3 Effect Sizes — Vargha-Delaney A12 (per-environment, online)
+
+{% for metric in online_key_metrics %}
+{% if metric in online_a12_effects and online_a12_effects[metric] | length > 0 %}
+#### {{ metric | replace('_', ' ') | title }}
+
+| Environment | Algorithm A | Algorithm B | A12 | Magnitude |
+|:---|:---|:---|---:|:---|
+{% for row in online_a12_effects[metric].itertuples() -%}
+| {{ row.environment }} | {{ row.alg_a }} | {{ row.alg_b }} | {{ "%.3f" | format(row.a12) }} | {{ row.magnitude }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+### 2.4 Key Plots (Online)
 
 {% for plot in online_plots %}
 #### {{ plot.title }}
@@ -109,25 +325,52 @@
 
 ---
 
-## 3. Failure Analysis
+## 3. Safety Analysis
+
+Proporcje raportowane z 95% przedziałem ufności Wilsona (Wilson 1927;
+Newcombe 1998) — poprawny dla `p̂` blisko 0 lub 1, typowych w
+safety-critical. Nieprzecinające się przedziały oznaczają istotną różnicę
+między algorytmami na poziomie α ≈ 0,05.
 
 {% if failure_offline is not none %}
-### 3.1 Offline Failure Rate (HV=0 or empty Pareto front)
+### 3.1 Offline Failure Rate (tracking-phase collisions > 0)
 
-| Environment | Optimizer | Runs | Failures | Failure Rate |
-|:---|:---|---:|---:|---:|
+Sygnalizuje, że *zaplanowana* trajektoria była kolizyjna z perspektywy
+fizycznej symulacji (drone uderzył w przeszkodę poza okresem aktywnego
+uniku — czyli plan offline był nieadekwatny).
+
+> **Uwaga (dlaczego to nie jest sprzeczne z sekcją 1.1 `trajectory_safety_f3_f5`):**
+> Te dwie metryki mierzą *różne rzeczy* i mogą się dramatycznie różnić:
+>
+> - **`trajectory_safety_f3_f5`** (sekcja 1.1) — kara optymalizacyjna `f3 + f5`
+>   obliczana **na węzłach kontrolnych B-spline** (kilka punktów na trasę,
+>   tylko XY, kara hinge `max(0, radius − dist)`). Wartość `0` oznacza, że
+>   *żaden węzeł* nie leży wewnątrz okręgu zagrożenia żadnej przeszkody.
+> - **`tracking_phase_collisions`** (ta sekcja) — *rzeczywiste fizyczne
+>   kolizje* w PyBullet podczas wykonywania trajektorii. Liczy zdarzenia
+>   *poza* okresem aktywnego uniku (LiDAR-trigger → rejoin).
+>
+> Rozbieżność (np. `trajectory_safety = 0` ale `failure_rate = 67%`) wynika
+> z trzech źródeł:
+>
+> 1. **Interpolacja B-spline** zakrzywia trasę *między* węzłami — pętla
+>    może wejść w przeszkodę, mimo że punkty kontrolne są od niej z dala.
+> 2. **Dynamika kontrolera** (overshoot, błąd PID) odchyla rzeczywistą
+>    pozycję drona od planowanej krzywej.
+> 3. **Tylko XY w f3** — pionowe profile nie są karane; w środowisku
+>    *urban* dron może uderzyć w budynek na innej wysokości.
+>
+> Interpretacja praktyczna: **wysoki `trajectory_safety = 0` przy wysokim
+> `failure_rate_offline`** oznacza, że algorytm spełnia *literę* funkcji
+> celu (zerowa kara na węzłach), ale generuje *praktycznie niebezpieczne*
+> trajektorie. To diagnoza jakości formuły kary, a nie błąd raportu —
+> sygnalizuje, że potrzebny jest LiDAR-based reactive avoidance (sekcja 3.2),
+> bo sam plan offline nie wystarcza.
+
+| Environment | Optimizer | Runs | Failures | Failure Rate | Wilson CI95 Low | Wilson CI95 High |
+|:---|:---|---:|---:|---:|---:|---:|
 {% for row in failure_offline.itertuples() -%}
-| {{ row.environment }} | {{ row.optimizer }} | {{ row.n_runs }} | {{ row.n_failures | int }} | {{ "%.1f%%" | format(row.failure_rate * 100) }} |
-{% endfor %}
-{% endif %}
-
-{% if failure_online is not none %}
-### 3.2 Online Failure Rate (collision_count > 0)
-
-| Environment | Optimizer | Runs | Failures | Failure Rate |
-|:---|:---|---:|---:|---:|
-{% for row in failure_online.itertuples() -%}
-| {{ row.environment }} | {{ row.optimizer }} | {{ row.n_runs }} | {{ row.n_failures | int }} | {{ "%.1f%%" | format(row.failure_rate * 100) }} |
+| {{ row.environment }} | {{ row.optimizer }} | {{ row.n_runs }} | {{ row.n_failures | int }} | {{ "%.1f%%" | format(row.failure_rate * 100) }} | {{ "%.1f%%" | format(row.wilson_ci95_low * 100) }} | {{ "%.1f%%" | format(row.wilson_ci95_high * 100) }} |
 {% endfor %}
 {% endif %}
 
@@ -137,7 +380,10 @@
 
 ### 4.1 Overall Offline Ranking
 
-Averaged Friedman rank across key offline metrics: {{ offline_key_metrics | join(', ') }}.
+Averaged Friedman rank across **trajectory quality + final_objective**
+metrics (z wyłączeniem hypervolume i wallclock — sekcja 1.6/1.7 osobno):
+`trajectory_safety_f3_f5, trajectory_length_f1, trajectory_smoothness_f2_f4,
+swarm_cohesion_deviation, final_objective`.
 
 {% if overall_ranking is not none and overall_ranking | length > 0 %}
 | Rank | Algorithm | Avg Friedman Rank |
@@ -149,13 +395,13 @@ Averaged Friedman rank across key offline metrics: {{ offline_key_metrics | join
 *Insufficient data for overall ranking.*
 {% endif %}
 
-### 4.2 Best Algorithm per Metric
+### 4.2 Best Algorithm per Metric × Environment
 
 {% if best_per_metric is not none and best_per_metric | length > 0 %}
-| Metric | Best Algorithm | Avg Rank | Statistically Significant |
-|:---|:---|---:|:---:|
+| Metric | Environment | Best Algorithm | Avg Rank | Statistically Significant |
+|:---|:---|:---|---:|:---:|
 {% for row in best_per_metric.itertuples() -%}
-| {{ row.metric }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
+| {{ row.metric }} | {{ row.environment }} | **{{ row.best_algorithm }}** | {{ "%.2f" | format(row.avg_rank) }} | {{ "Yes" if row.p_value < 0.05 else "No" }} |
 {% endfor %}
 {% endif %}
 
@@ -168,4 +414,4 @@ Averaged Friedman rank across key offline metrics: {{ offline_key_metrics | join
 ---
 
 *Report generated automatically by `ReportGenerator` from `src/analysis/analyzer/report_generator.py`.*
-*Statistical methodology follows Demsар (2006, JMLR) and Arcuri & Briand (2014, STVR).*
+*Statistical methodology: Friedman + Nemenyi (Demšar 2006, JMLR), Vargha-Delaney A12 (Vargha & Delaney 2000), Wilson 95% CI (Wilson 1927; Newcombe 1998). Pełna metodologia: `reports/statistical_tests_methodology.md`. Interpretacja: `reports/report_interpretation_guide.md`.*

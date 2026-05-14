@@ -17,6 +17,10 @@ from src.analysis.db.populate_iteration_metrics import populate_iteration_metric
 from src.analysis.db.populate_online_metrics import populate_online_metrics
 from src.analysis.db.populate_online_safety_metrics import populate_online_safety_metrics
 from src.analysis.db.populate_offline_objectives import populate_offline_objectives
+from src.analysis.db.populate_final_objective_aggregated import (
+    populate_final_objective_aggregated,
+)
+from src.analysis.db.populate_rejoin_quality import populate_rejoin_quality
 from src.analysis.db.populate_moo_quality import populate_moo_quality
 
 from src.analysis.db.utils import _to_float, _to_float_nullable, _to_int, _to_int_bool, _to_int_bool_nullable, _to_int_nullable, _to_str_nullable, list_run_directories, parse_run_dir_name
@@ -111,11 +115,14 @@ def populate_database(experiment_dir: str | Path) -> Path:
                 # 3. Agregat końcowy
                 populate_run_metrics(conn, run_id)
 
-                # 4. F-vector z h5 — UPDATE final_objective + total_threat_cost
-                # + total_turn_penalty + total_coordination_cost + final_*.
+                # 4. F-vector z h5 — UPDATE per-obj kolumn F[0..4] +
+                # final_objective_weights_json. `final_objective` SAMOSTOI
+                # zostaje NULL aż do post-pass `populate_final_objective_aggregated`
+                # (potrzebuje per-env median F_ref).
                 populate_offline_objectives(
                     conn, run_id,
                     run_dir / "optimization_history" / "optimization_history.h5",
+                    run_dir=run_dir,
                 )
 
                 # Sukces — oznacz jako 'aggregated' z aggregated_at.
@@ -143,6 +150,34 @@ def populate_database(experiment_dir: str | Path) -> Path:
                 # Kontynuujemy z kolejnymi runami — pojedynczy fail nie blokuje
                 # całej agregacji (status w runs pozwala później zidentyfikować
                 # i ewentualnie ponownie uruchomić).
+
+        # 5. Post-pass agregacji cross-run: per-environment median F_ref +
+        # weighted normalized sum → `run_metrics.final_objective` (2026-05-13).
+        # Musi być POZA pętlą per-run, bo potrzebuje wszystkich F_best
+        # do policzenia median per-env.
+        try:
+            populate_final_objective_aggregated(conn)
+        except Exception as e:
+            # Nie blokujemy całego pipeline'u jeśli post-pass padnie —
+            # per-obj kolumny i weights_json są już zapisane, brakuje
+            # tylko skalarnego agregatu.
+            logger.error(
+                "populate_database: błąd post-pass final_objective_aggregated: "
+                "%s: %s — `final_objective` może być NULL.",
+                type(e).__name__, e, exc_info=True,
+            )
+
+        # 6. Post-pass agregacji cross-run dla §3.1.3.3 — TOPSIS composite
+        # `rejoin_quality` (Skuteczność powrotu, Hwang & Yoon 1981).
+        # Wymaga per-env median pos_err/vel_err/time_to_rejoin → cross-run.
+        try:
+            populate_rejoin_quality(conn)
+        except Exception as e:
+            logger.error(
+                "populate_database: błąd post-pass rejoin_quality: "
+                "%s: %s — `rejoin_quality` może być NULL.",
+                type(e).__name__, e, exc_info=True,
+            )
 
         conn.commit()
 

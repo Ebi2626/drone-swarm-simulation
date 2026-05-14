@@ -1,16 +1,20 @@
 """Testy statystyczne dla porównania meta-heurystyk.
 
-Reference (gold standard):
-- **Demšar (2006)** "Statistical Comparisons of Classifiers over Multiple
-  Data Sets", JMLR 7:1-30. Zaleca:
-  * Friedman test (≥3 algorytmów) + Nemenyi post-hoc.
-  * Wilcoxon signed-rank dla par algorytmów.
-  * Korekcja Holma na wielokrotne porównania.
-- **Arcuri & Briand (2014)** "A Hitchhiker's guide to statistical tests for
-  assessing randomized algorithms in software engineering", STVR 24(3).
-  Zaleca:
-  * Effect size — Vargha-Delaney A12 (non-parametric).
-  * Bootstrap CI dla median/quantyli.
+Zgodnie z `reports/statistical_tests_methodology.md` używamy *tylko* trzech
+narzędzi statystycznych, dobranych tak by każde odpowiadało na odrębne
+pytanie naukowe bez nakładania się funkcji:
+
+- **Friedman + Nemenyi** (Demšar 2006) — globalny test różnic + post-hoc
+  parami dla metryk ciągłych. Operuje na rangach, więc odporny na
+  niegausowskie ogony (kara Big-M, bimodalność).
+- **Vargha-Delaney A12** (Vargha & Delaney 2000; Arcuri & Briand 2014) —
+  miara wielkości efektu probabilistycznego dla par algorytmów.
+- **Wilson 95% CI** (Wilson 1927; Newcombe 1998) — przedział ufności dla
+  proporcji niepowodzeń (`failure_rate`).
+
+Pozostałe metody (Wilcoxon+Holm, Bootstrap CI, Cochran's Q, McNemar+RD/OR,
+ANOVA, Bonferroni) zostały świadomie odrzucone — pełne uzasadnienia
+w `reports/statistical_tests_methodology.md` §5.
 
 Konwencje:
 - "lower is better" zakłada się dla większości metryk (final_objective, GD,
@@ -47,27 +51,6 @@ class FriedmanResult:
     n_algorithms: int
     average_ranks: dict[str, float]
     cd_nemenyi: Optional[float]
-
-
-@dataclass
-class WilcoxonPair:
-    """Wynik testu Wilcoxon signed-rank dla pary algorytmów.
-
-    Args:
-        alg_a, alg_b: Nazwy porównywanych algorytmów.
-        statistic: Statystyka Wilcoxon `W`.
-        p_value: Surowe p-value (two-sided).
-        p_value_holm: p-value po korekcji Holm-Bonferroni (monotoniczne).
-        n: Liczba sparowanych obserwacji.
-        median_diff: Mediana z różnic `x − y`.
-    """
-    alg_a: str
-    alg_b: str
-    statistic: float
-    p_value: float
-    p_value_holm: float
-    n: int
-    median_diff: float
 
 
 @dataclass
@@ -178,77 +161,6 @@ def _nemenyi_q_alpha(k: int, alpha: float) -> Optional[float]:
 
 
 # ----------------------------------------------------------------------
-# Wilcoxon pairwise + Holm correction
-# ----------------------------------------------------------------------
-
-
-def wilcoxon_pairwise(
-    df: pd.DataFrame,
-    metric: str,
-    group_col: str = "optimizer",
-    block_cols: Iterable[str] = ("environment", "seed"),
-) -> list[WilcoxonPair]:
-    """Wykonaj Wilcoxon signed-rank dla każdej pary algorytmów z korekcją Holma.
-
-    Args:
-        df: Long-form DataFrame z kolumnami `group_col`, `block_cols`, `metric`.
-        metric: Kolumna metryki.
-        group_col: Kolumna identyfikująca algorytm.
-        block_cols: Kolumny definiujące „datasets" (parowanie obserwacji).
-
-    Returns:
-        Lista `WilcoxonPair` posortowana po surowym p-value rosnąco; `p_value_holm`
-        jest monotoniczne w tej kolejności.
-    """
-    block_cols = list(block_cols)
-    pivot = df.pivot_table(
-        index=block_cols, columns=group_col, values=metric, aggfunc="mean"
-    ).dropna()
-
-    algs = sorted(pivot.columns.tolist())
-    raw_results: list[tuple[str, str, float, float, int, float]] = []
-    for a, b in combinations(algs, 2):
-        x = pivot[a].values
-        y = pivot[b].values
-        n = len(x)
-        if n < 1:
-            continue
-        if np.allclose(x, y):
-            stat, p = float("nan"), 1.0
-        else:
-            try:
-                stat, p = stats.wilcoxon(x, y, zero_method="wilcox", alternative="two-sided")
-            except ValueError:
-                stat, p = float("nan"), 1.0
-        median_diff = float(np.median(x - y))
-        raw_results.append((a, b, float(stat), float(p), int(n), median_diff))
-
-    # Holm-Bonferroni: sortuj po p, mnóż przez (m - i) ze stopniowym ograniczeniem ≤1.
-    raw_results.sort(key=lambda r: r[3])
-    m = len(raw_results)
-    holm_corrected: list[float] = []
-    running_max = 0.0
-    for i, r in enumerate(raw_results):
-        adj = min(1.0, r[3] * (m - i))
-        # Holm: monotonia — adjusted p-value rośnie z rangą
-        running_max = max(running_max, adj)
-        holm_corrected.append(running_max)
-
-    return [
-        WilcoxonPair(
-            alg_a=r[0],
-            alg_b=r[1],
-            statistic=r[2],
-            p_value=r[3],
-            p_value_holm=hp,
-            n=r[4],
-            median_diff=r[5],
-        )
-        for r, hp in zip(raw_results, holm_corrected)
-    ]
-
-
-# ----------------------------------------------------------------------
 # Vargha-Delaney A12
 # ----------------------------------------------------------------------
 
@@ -310,63 +222,67 @@ def _a12_magnitude(a12: float) -> str:
 
 
 # ----------------------------------------------------------------------
-# Bootstrap CI
+# Wilson score CI dla proporcji
 # ----------------------------------------------------------------------
 
 
-def bootstrap_ci(
-    values: Iterable[float],
-    statistic: callable = np.median,
-    n_resamples: int = 10000,
+def wilson_proportion_ci(
+    n_success: int,
+    n_trials: int,
     confidence: float = 0.95,
-    rng_seed: int = 42,
-) -> tuple[float, float, float]:
-    """Wylicz bootstrap percentile CI dla statystyki `statistic` (domyślnie mediana).
+) -> tuple[float, float]:
+    """Wilson score 95% CI dla proporcji binomialnej (Wilson 1927).
+
+    Lepszy niż klasyczny Wald CI dla `p̂` blisko 0 lub 1 (typowe w
+    safety-critical). Newcombe (1998) §3 wprost zaleca Wilson jako *default*.
 
     Args:
-        values: Iterable wartości; `NaN` są filtrowane.
-        statistic: Funkcja agregująca (`np.median`, `np.mean`, …).
-        n_resamples: Liczba bootstrap re-sampli.
-        confidence: Poziom ufności w `(0, 1)`.
-        rng_seed: Ziarno generatora dla powtarzalności.
+        n_success: Liczba sukcesów (lub failure'ów — zależne od interpretacji).
+        n_trials: Łączna liczba prób.
+        confidence: Poziom ufności (default 0.95).
 
     Returns:
-        `(point_estimate, ci_low, ci_high)`; `(NaN, NaN, NaN)` przy pustym
-        wejściu, `(point, point, point)` dla 1 obserwacji.
+        `(ci_low, ci_high)` ∈ `[0, 1]`; `(NaN, NaN)` dla `n_trials = 0`.
     """
-    arr = np.asarray(list(values), dtype=float)
-    arr = arr[~np.isnan(arr)]
-    if len(arr) == 0:
-        return float("nan"), float("nan"), float("nan")
-    point = float(statistic(arr))
-    if len(arr) == 1:
-        return point, point, point
-    rng = np.random.default_rng(rng_seed)
-    resamples = rng.choice(arr, size=(n_resamples, len(arr)), replace=True)
-    boot_stats = np.apply_along_axis(statistic, 1, resamples)
-    alpha = 1.0 - confidence
-    low = float(np.percentile(boot_stats, 100 * alpha / 2))
-    high = float(np.percentile(boot_stats, 100 * (1 - alpha / 2)))
-    return point, low, high
+    if n_trials <= 0:
+        return float("nan"), float("nan")
+    z = float(stats.norm.ppf(1.0 - (1.0 - confidence) / 2.0))
+    p_hat = n_success / n_trials
+    z2 = z * z
+    denom = 1.0 + z2 / n_trials
+    center = (p_hat + z2 / (2.0 * n_trials)) / denom
+    margin = (z / denom) * np.sqrt(p_hat * (1.0 - p_hat) / n_trials
+                                   + z2 / (4.0 * n_trials ** 2))
+    return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def summary_with_ci(
+# ----------------------------------------------------------------------
+# Summary statistics dla metryk ciągłych — mediana [Q1, Q3]
+# ----------------------------------------------------------------------
+
+
+def summary_stats(
     df: pd.DataFrame,
     metric: str,
     group_cols: Iterable[str] = ("environment", "optimizer"),
-    n_resamples: int = 10000,
 ) -> pd.DataFrame:
-    """Zwróć summary table per grupa: `n`, mean, std, median + IQR i CI95(median).
+    """Zwróć tabelę statystyk opisowych per grupa: `n, mean, std, min, max,
+    median, q25, q75`.
+
+    Para `(mediana, [Q1, Q3])` jest standardową formą raportowania rozkładów
+    w literaturze metaheurystyk (Bartz-Beielstein et al. 2020 §4.2) — IQR
+    obejmuje 50% obserwacji i jest odporny na ogony niegausowskie.
+    `min/max` to ekstrema obserwacji (dla *lower-is-better* metryk: best/worst run);
+    konwencja {best, worst, mean, median, std} z Bartz-Beielstein et al. (2020) §4.2.
 
     Args:
         df: Long-form DataFrame z kolumnami `group_cols` i `metric`.
         metric: Kolumna metryki.
         group_cols: Kolumny grupujące (np. `(environment, optimizer)`).
-        n_resamples: Liczba bootstrap re-sampli dla CI95 mediany.
 
     Returns:
-        DataFrame z kolumnami `[*group_cols, n, mean, std, median, q25, q75,
-        ci95_low, ci95_high]` posortowany rosnąco po `group_cols`.
+        DataFrame z kolumnami `[*group_cols, n, mean, std, min, max, median,
+        q25, q75]` posortowany rosnąco po `group_cols`.
     """
     group_cols = list(group_cols)
     records = []
@@ -374,15 +290,14 @@ def summary_with_ci(
         values = sub[metric].dropna().values
         if len(values) == 0:
             continue
-        median, lo, hi = bootstrap_ci(values, np.median, n_resamples=n_resamples)
         rec: dict = {c: k for c, k in zip(group_cols, keys if isinstance(keys, tuple) else (keys,))}
         rec["n"] = len(values)
         rec["mean"] = float(np.mean(values))
         rec["std"] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
-        rec["median"] = median
+        rec["min"] = float(np.min(values))
+        rec["max"] = float(np.max(values))
+        rec["median"] = float(np.median(values))
         rec["q25"] = float(np.percentile(values, 25))
         rec["q75"] = float(np.percentile(values, 75))
-        rec["ci95_low"] = lo
-        rec["ci95_high"] = hi
         records.append(rec)
     return pd.DataFrame(records).sort_values(group_cols).reset_index(drop=True)

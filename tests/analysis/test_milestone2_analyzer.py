@@ -60,53 +60,90 @@ class TestDedupOffline:
 
 
 class TestComputeFailureFlag:
-    def test_collision_marks_online_failure(self) -> None:
+    """Nowa semantyka (zob. reports/failure_success_methodology.md):
+    - is_offline_failure = tracking_phase_collisions > 0 (plan offline kolizyjny)
+    - is_online_failure = evasion_phase_collisions > 0 (algorytm unikania zawiódł)
+    - is_hv_degenerate = HV=0 OR front_size=0 (osobna diagnostyka, NIE failure)
+    """
+
+    def test_evasion_phase_collision_marks_online_failure(self) -> None:
         from src.analysis.analyzer.ExperimentAnalyzer import _compute_failure_flag
 
         df = pd.DataFrame({
+            "tracking_phase_collisions": [0, 0],
+            "evasion_phase_collisions": [0, 3],
             "front_size_last_gen": [10, 10],
             "hypervolume": [5.0, 5.0],
-            "collision_count": [0, 3],
         })
         out = _compute_failure_flag(df)
         assert out["is_online_failure"].tolist() == [0, 1]
         assert out["is_offline_failure"].tolist() == [0, 0]
 
-    def test_zero_hv_marks_offline_failure(self) -> None:
+    def test_tracking_phase_collision_marks_offline_failure(self) -> None:
         from src.analysis.analyzer.ExperimentAnalyzer import _compute_failure_flag
 
         df = pd.DataFrame({
+            "tracking_phase_collisions": [0, 2],
+            "evasion_phase_collisions": [0, 0],
+            "front_size_last_gen": [10, 10],
+            "hypervolume": [5.0, 5.0],
+        })
+        out = _compute_failure_flag(df)
+        assert out["is_offline_failure"].tolist() == [0, 1]
+        assert out["is_online_failure"].tolist() == [0, 0]
+
+    def test_zero_hv_marks_hv_degenerate_not_failure(self) -> None:
+        from src.analysis.analyzer.ExperimentAnalyzer import _compute_failure_flag
+
+        df = pd.DataFrame({
+            "tracking_phase_collisions": [0, 0],
+            "evasion_phase_collisions": [0, 0],
             "front_size_last_gen": [10, 10],
             "hypervolume": [5.0, 0.0],
-            "collision_count": [0, 0],
         })
         out = _compute_failure_flag(df)
-        assert out["is_offline_failure"].tolist() == [0, 1]
+        # HV=0 to NIE jest failure — to osobna diagnostyka.
+        assert out["is_offline_failure"].tolist() == [0, 0]
         assert out["is_online_failure"].tolist() == [0, 0]
+        assert out["is_hv_degenerate"].tolist() == [0, 1]
 
-    def test_zero_front_size_marks_offline_failure(self) -> None:
+    def test_zero_front_size_marks_hv_degenerate(self) -> None:
         from src.analysis.analyzer.ExperimentAnalyzer import _compute_failure_flag
 
         df = pd.DataFrame({
+            "tracking_phase_collisions": [0, 0],
+            "evasion_phase_collisions": [0, 0],
             "front_size_last_gen": [10, 0],
             "hypervolume": [5.0, 5.0],
-            "collision_count": [0, 0],
         })
         out = _compute_failure_flag(df)
-        assert out["is_offline_failure"].tolist() == [0, 1]
-        assert out["is_online_failure"].tolist() == [0, 0]
+        assert out["is_hv_degenerate"].tolist() == [0, 1]
+        assert out["is_offline_failure"].tolist() == [0, 0]
 
-    def test_null_hv_marks_offline_failure(self) -> None:
+    def test_null_hv_marks_hv_degenerate(self) -> None:
         from src.analysis.analyzer.ExperimentAnalyzer import _compute_failure_flag
 
         df = pd.DataFrame({
+            "tracking_phase_collisions": [0, 0],
+            "evasion_phase_collisions": [0, 0],
             "front_size_last_gen": [10, 10],
             "hypervolume": [5.0, None],
-            "collision_count": [0, 0],
         })
         out = _compute_failure_flag(df)
-        assert out["is_offline_failure"].tolist() == [0, 1]
-        assert out["is_online_failure"].tolist() == [0, 0]
+        assert out["is_hv_degenerate"].tolist() == [0, 1]
+        assert out["is_offline_failure"].tolist() == [0, 0]
+
+    def test_orthogonality_offline_and_online_failures(self) -> None:
+        """Sprawdza wszystkie 4 kombinacje (offline, online) ∈ {0,1}²."""
+        from src.analysis.analyzer.ExperimentAnalyzer import _compute_failure_flag
+
+        df = pd.DataFrame({
+            "tracking_phase_collisions": [0, 0, 2, 1],
+            "evasion_phase_collisions":  [0, 1, 0, 3],
+        })
+        out = _compute_failure_flag(df)
+        assert out["is_offline_failure"].tolist() == [0, 0, 1, 1]
+        assert out["is_online_failure"].tolist()  == [0, 1, 0, 1]
 
 
 class TestFriedmanBlockCols:

@@ -1,11 +1,14 @@
 """ExperimentAnalyzer — orkestrator pełnej analizy porównawczej.
 
 Wymaga populated `analysis.db` (zob. `ExperimentAggregator`). Generuje:
-- `analysis_output/tables/` — CSV + LaTeX summary, Wilcoxon, Friedman, A12.
+- `analysis_output/tables/` — CSV + LaTeX: summary, Friedman + Nemenyi, A12,
+  failure_rate z Wilson 95% CI.
 - `analysis_output/plots/{convergence, boxplots, cd_diagrams, pareto,
   scatter, bar, rankings}/`.
 
-Reference: Demšar (2006); Arcuri & Briand (2014); Riquelme et al. (2015).
+Statystyka: trzy narzędzia (Friedman + Nemenyi, Vargha-Delaney A12,
+Wilson 95% CI) — pełne uzasadnienie metodologiczne w
+`reports/statistical_tests_methodology.md`.
 """
 from __future__ import annotations
 
@@ -26,18 +29,18 @@ from src.analysis.analyzer.plots import (
     plot_pareto_projections,
     plot_ranking_heatmap,
     plot_scatter,
-    plot_success_and_collision_bars,
 )
 from src.analysis.analyzer.statistical_tests import (
     friedman_with_nemenyi,
-    summary_with_ci,
+    summary_stats,
     vargha_delaney_a12,
-    wilcoxon_pairwise,
+    wilson_proportion_ci,
 )
 
 
-# Próg dla "low-power warning" w summary (Demšar 2006 §4: Wilcoxon
-# z N<6 ma p-value floor 1/2^N — z N=4 to 0.0625, z N=5 to 0.0312).
+# Próg dla "low-power warning" w summary. Friedman z bardzo małym N traci
+# moc statystyczną (rozkład χ² jest asymptotyczny). Przy N<6 wynik testu
+# należy interpretować z ostrożnością.
 LOW_POWER_N_THRESHOLD = 6
 
 
@@ -55,6 +58,15 @@ HIGHER_IS_BETTER = {
     "front_size_last_gen": True,
     "min_inter_uav_distance_m": True,
     "mean_inter_uav_distance_m": True,
+    # §3.1.3.3: proporcje sukcesów powrotu na nominalną trajektorię.
+    # `rejoin_completion_rate` — metryka GŁÓWNA (mianownik = epizody);
+    # `rejoin_success_rate` — surowa (mianownik = wszystkie triggery
+    # włącznie z pending z replanu).
+    "rejoin_success_rate": True,
+    "rejoin_completion_rate": True,
+    # Bezpieczeństwo fazy online (collision-based, per-run binary). Identyczna
+    # semantyka co §3.2 — różni się tylko prezentacją (Mean/Std/Median vs Wilson CI).
+    "online_success_rate": True,
 }
 
 # Default zestawy metryk per faza analizy.
@@ -68,6 +80,7 @@ HIGHER_IS_BETTER = {
 # ONLINE: zależą od (optimizer, environment, seed, avoidance) — pełny
 # product (n_avoid × n_env × n_seed) tworzy prawdziwe dataset.
 OFFLINE_METRICS = (
+    # MOO / Pareto-aware (drugorzędne — głównie diagnostyka NSGA-III)
     "hypervolume",
     "hypervolume_normalized",
     "igd_plus",
@@ -75,20 +88,85 @@ OFFLINE_METRICS = (
     "spread_final",
     "spacing_final",
     "r2_final",
+    "front_size_last_gen",
+    # Konwergencja / efektywność
     "convergence_speed_gen",
     "auc_best_so_far",
+    "total_wallclock_offline_s",
+    # Skalarna jakość rozwiązania
     "final_objective",
-    "front_size_last_gen",
+    # Jakość zaplanowanej trajektorii — agregaty F-składowych
+    "trajectory_length_f1",          # f1 (długość + odchylenie)
+    "trajectory_smoothness_f2_f4",   # f2 + f4 (wysokość/kąt + zakręty)
+    "trajectory_safety_f3_f5",       # f3 + f5 (zagrożenie + koordynacja)
+    # Spójność roju — per docs/Praca magisterska.md §3.1.3.1, ocena jakości
+    # offline-zaplanowanej trajektorii (MAE od 5 m NN-spacing). Wartość
+    # mierzona w PyBullet podczas wykonywania trajektorii — z paired design
+    # eksperymentu (opt == avoidance, 1 run per (env, opt, seed))
+    # `_dedup_offline` jest no-op, więc traktowanie jako OFFLINE poprawne.
+    "swarm_cohesion_deviation",
+    # Bezpieczeństwo zaplanowanej trasy (zmierzone w PyBullet podczas tracking)
+    "tracking_phase_collisions",     # kolizje poza okresem uniku — failure offline
 )
 
 ONLINE_METRICS = (
-    "collision_count",
+    # Bezpieczeństwo fazy online — JEDYNA metryka safety online:
+    # `online_success_rate` (per-run binary: 1 = run bez kolizji w fazie
+    # evasion, 0 = ≥1 kolizja). Renderowana w §2.1 (Mean/Std/Median/Q1/Q3),
+    # §2.2 (Friedman), §2.3 (A12) ORAZ §3.2 (Wilson CI). Wartość kolumny
+    # nadpisywana w `_compute_failure_flag` z `1 - is_online_failure`
+    # (kolumna DB `run_metrics.online_success_rate` = `1 - BVR` używana
+    # tylko wewnątrz DB do obliczenia SP1).
+    # `evasion_phase_collisions` pozostaje jako surowy licznik dla §3.2 base.
+    # `collision_count` i `evasion_event_count` jako audyt/informacyjne.
+    "online_success_rate",
+    "evasion_phase_collisions",
+    "collision_count",                # raw total (informational, legacy)
     "evasion_event_count",
     "min_inter_uav_distance_m",
+    "max_inter_uav_distance_m",
     "mean_inter_uav_distance_m",
     "total_inter_uav_safety_violations",
+    # Jakość trajektorii fizycznej
     "mean_energy_indicator",
     "mean_smoothness_indicator",
+    # Efektywność obliczeń online (audit; wallclock saturuje budżet
+    # ~0.5s dla wszystkich algorytmów → ZERO discriminative info; pozostawione
+    # w bazie dla audytowalności).
+    "avg_wallclock_online_s",
+    "max_wallclock_online_s",
+    # §3.1.3.4 (docs/Praca magisterska.md) — ocena ALGORYTMÓW fazy ONLINE:
+    #   - "Wartość optymalizacji w budżecie czasowym" → mean_online_best_fitness
+    #   - "Prędkość optymalizacji" → mean_online_evaluations_completed (NFE,
+    #      standard BBOB 2009; gens jako informacyjne)
+    #   - "Niezawodność hard real-time" → budget_violation_rate (lower=lepiej)
+    #   - "Efektywność łączona" → online_sp1 = RT_succ / (1 - BVR)
+    #     (Success Performance 1, Auger & Hansen 2005). NOTE: kolumna DB
+    #     `run_metrics.online_success_rate` (= 1 - BVR) jest używana wewnątrz
+    #     DB tylko jako składnik SP1; na poziomie DataFrame ta sama nazwa
+    #     reprezentuje collision-based safety (zob. komentarz wyżej).
+    "mean_online_best_fitness",
+    "mean_online_evaluations_completed",
+    "mean_online_generations_completed",
+    "budget_violation_rate",
+    "online_sp1",
+    # §3.1.3.3 (docs/Praca magisterska.md) — TRAJEKTORIA fazy online:
+    #   - Geometria manewru: mean_evasion_arc_length_m
+    #     (mean_evasion_plan_duration_s świadomie pominięte — silnie
+    #      skorelowane z arc, powiela informację geometryczną; pozostaje
+    #      w DB dla audytu)
+    #   - Skuteczność powrotu: rejoin_quality (TOPSIS composite —
+    #      odległość euklidesowa od ideału w 3D znormalizowanej przestrzeni
+    #      [pos_err, vel_err, time_to_rejoin]; Hwang & Yoon 1981).
+    #      Oryginalne 3 składniki (mean_pos_err_at_rejoin_m,
+    #      mean_vel_err_at_rejoin_mps, mean_time_to_rejoin_s) pozostają
+    #      w DB dla audytu, ale nie w głównej analizie.
+    #   - Niezawodność: rejoin_completion_rate (PRIMARY),
+    #     rejoin_success_rate (secondary, surowa z pending w mianowniku)
+    "mean_evasion_arc_length_m",
+    "rejoin_quality",
+    "rejoin_completion_rate",
+    "rejoin_success_rate",
 )
 
 ITER_METRICS = (
@@ -107,19 +185,17 @@ ITER_METRICS = (
 
 @dataclass
 class AnalyzerConfig:
-    """Konfiguracja `ExperimentAnalyzer` — listy metryk i parametry bootstrappingu.
+    """Konfiguracja `ExperimentAnalyzer` — listy metryk i katalog wyjściowy.
 
     Args:
         metrics_offline: Metryki offline (offline phase, MOO indicators).
         metrics_online: Metryki online (collisions, distances, energy).
         metrics_iter: Metryki iteracyjne (krzywe konwergencji per generacja).
-        bootstrap_resamples: Liczba re-sampli dla CI (`summary_with_ci`).
         output_subdir: Nazwa katalogu wyjściowego w katalogu eksperymentu.
     """
     metrics_offline: Iterable[str] = field(default_factory=lambda: OFFLINE_METRICS)
     metrics_online: Iterable[str] = field(default_factory=lambda: ONLINE_METRICS)
     metrics_iter: Iterable[str] = field(default_factory=lambda: ITER_METRICS)
-    bootstrap_resamples: int = 10000
     output_subdir: str = "analysis_output"
 
 
@@ -206,7 +282,14 @@ class ExperimentAnalyzer:
         # je jako niezależne obserwacje → false-positive risk (Demšar 2006
         # §3.1: testy zakładają niezależne datasets).
         df_offline = _dedup_offline(df_run)
-        offline_blocks = ("environment", "seed")
+
+        # Parametry algorytmów różnią się między środowiskami (pop_size,
+        # n_gen, wagi skalaryzacji, marginesy bezpieczeństwa — zob.
+        # docs/ceteris_paribus.md §1). Stąd Wilcoxon/Friedman/A12 emitujemy
+        # *per-environment* — pooling cross-env mieszałby heterogeniczne
+        # konfiguracje. Summary CSV pozostaje cross-env (env w wierszach) —
+        # każdy wiersz dotyczy jednej (env, optimizer), więc bez mieszania.
+        per_env_block_cols = ("seed",)
 
         for metric in self.cfg.metrics_offline:
             if metric not in df_offline.columns:
@@ -215,13 +298,24 @@ class ExperimentAnalyzer:
             if sub.empty:
                 continue
             higher = HIGHER_IS_BETTER.get(metric, False)
-            self._emit_metric_tables(
-                sub, metric, higher, offline_blocks, tables_dir,
-            )
+            self._emit_summary_stats(sub, metric, tables_dir)
+            for env in sorted(sub["environment"].dropna().unique()):
+                sub_env = sub[sub["environment"] == env]
+                if sub_env.empty:
+                    continue
+                self._emit_pairwise_tests(
+                    sub_env, metric, higher, per_env_block_cols,
+                    tables_dir, file_prefix=f"{env}_",
+                )
 
-        # Online: pełny product (env, opt, seed, avoidance) — `avoidance`
-        # wpływa na metryki online, więc jest legitymowanym factor-em.
-        online_blocks = ("environment", "seed", "avoidance")
+        # Online: pełny product (env, opt, seed, avoidance). W eksperymencie
+        # paired (optimizer == avoidance) factor porównawczy to `optimizer`,
+        # block per-env to `(seed,)` — w każdym (env, seed) mamy 4 obs
+        # po jednej na każdy z 4 algorytmów. Per-env split z tych samych
+        # powodów co offline + dodatkowo: metryki online (collision_count,
+        # min_inter_uav_distance) silnie zależą od geometrii środowiska,
+        # więc cross-env aggregacja sama w sobie miesza różne reżimy
+        # fizyczne (forest sparse, urban dense).
         for metric in self.cfg.metrics_online:
             if metric not in df_run.columns:
                 continue
@@ -229,31 +323,48 @@ class ExperimentAnalyzer:
             if sub.empty:
                 continue
             higher = HIGHER_IS_BETTER.get(metric, False)
-            self._emit_metric_tables(
-                sub, metric, higher, online_blocks, tables_dir,
-                file_prefix="online_",
-            )
+            self._emit_summary_stats(sub, metric, tables_dir, file_prefix="online_")
+            for env in sorted(sub["environment"].dropna().unique()):
+                sub_env = sub[sub["environment"] == env]
+                if sub_env.empty:
+                    continue
+                self._emit_pairwise_tests(
+                    sub_env, metric, higher, per_env_block_cols,
+                    tables_dir, file_prefix=f"online_{env}_",
+                )
 
         # Failure rate per (env, opt) — odporne uzupełnienie mean/median
-        # statistik (tail-risk). Split offline/online — patrz docstring
-        # `_compute_failure_flag`.
+        # statistik (tail-risk). Trzy kategorie:
+        #   - offline failure: kolizja podczas tracking (plan offline kolizyjny)
+        #   - online failure: kolizja podczas evasion (algorytm unikania zawiódł)
+        #   - hv_degenerate (diagnostyka): HV=0 lub pusty front — głównie
+        #     informatywne dla NSGA-III; dla SOO to tautologia konstrukcji.
         for flag_col, suffix, caption in (
             (
                 "is_offline_failure",
                 "offline",
-                "Offline failure rate (HV=0 OR front_size_last_gen=0).",
+                "Offline failure rate (tracking-phase collisions > 0).",
             ),
             (
                 "is_online_failure",
                 "online",
-                "Online failure rate (collision_count>0).",
+                "Online failure rate (evasion-phase collisions > 0).",
+            ),
+            (
+                "is_hv_degenerate",
+                "hv_degenerate",
+                "HV-degenerate rate (HV=0 OR empty Pareto front); diagnostic only.",
             ),
         ):
             if flag_col not in df_run.columns:
                 continue
-            # Offline metryki nie zależą od `avoidance` — dedup'ujemy zanim
-            # liczymy failure rate, inaczej n_runs = 8 zamiast 2 per (env,opt).
-            base = _dedup_offline(df_run) if flag_col == "is_offline_failure" else df_run
+            # Offline-fazowe i HV-related nie zależą od `avoidance` — dedup'ujemy.
+            # Online-fazowe (kolizje podczas evasion) zależą od avoidance.
+            base = (
+                _dedup_offline(df_run)
+                if flag_col in ("is_offline_failure", "is_hv_degenerate")
+                else df_run
+            )
             failure_summary = (
                 base.groupby(["environment", "optimizer"], dropna=False)[flag_col]
                 .agg(["count", "sum", "mean"])
@@ -264,6 +375,17 @@ class ExperimentAnalyzer:
                     "mean": "failure_rate",
                 })
             )
+            # Wilson 95% score CI dla każdej proporcji (Newcombe 1998).
+            ci_lows: list[float] = []
+            ci_highs: list[float] = []
+            for _, row in failure_summary.iterrows():
+                lo, hi = wilson_proportion_ci(
+                    int(row["n_failures"]), int(row["n_runs"]),
+                )
+                ci_lows.append(lo)
+                ci_highs.append(hi)
+            failure_summary["wilson_ci95_low"] = ci_lows
+            failure_summary["wilson_ci95_high"] = ci_highs
             export_csv(failure_summary, tables_dir / f"failure_rate_{suffix}.csv")
             export_latex(
                 failure_summary, tables_dir / f"failure_rate_{suffix}.tex",
@@ -274,7 +396,36 @@ class ExperimentAnalyzer:
         if not df_online.empty:
             export_csv(df_online, tables_dir / "online_summary.csv")
 
-    def _emit_metric_tables(
+    def _emit_summary_stats(
+        self,
+        sub: pd.DataFrame,
+        metric: str,
+        tables_dir: Path,
+        file_prefix: str = "",
+    ) -> None:
+        """Emit summary CSV/LaTeX cross-environment — env pozostaje kolumną wiersza.
+
+        Summary jest jedyną tabelą, gdzie pooling cross-env jest poprawny: każdy
+        wiersz dotyczy jednego (env, optimizer), więc nie ma mieszania
+        heterogenicznych konfiguracji.
+        """
+        summary = summary_stats(
+            sub, metric=metric,
+            group_cols=("environment", "optimizer"),
+        )
+        if summary.empty:
+            return
+        # Low-power warning: Friedman z bardzo małym N ma asymptotyczny rozkład χ²
+        # i traci moc statystyczną — flag pomaga czytelnikowi w interpretacji.
+        summary["low_power_warning"] = summary["n"] < LOW_POWER_N_THRESHOLD
+        export_csv(summary, tables_dir / f"{file_prefix}summary_{metric}.csv")
+        export_latex(
+            summary, tables_dir / f"{file_prefix}summary_{metric}.tex",
+            caption=f"Summary statistics — {metric}",
+            label=f"tab:{file_prefix}summary-{metric}",
+        )
+
+    def _emit_pairwise_tests(
         self,
         sub: pd.DataFrame,
         metric: str,
@@ -283,34 +434,15 @@ class ExperimentAnalyzer:
         tables_dir: Path,
         file_prefix: str = "",
     ) -> None:
-        """Generuje summary/wilcoxon/friedman/a12 dla pojedynczej metryki.
-        `block_cols` definiuje "datasets" w sensie Demšar (2006).
+        """Emit Friedman + Nemenyi (global) + A12 (effect size) dla *jednej*
+        podgrupy (zwykle per-env).
+
+        Caller jest odpowiedzialny za pre-filtrowanie `sub` do pojedynczego
+        środowiska i odpowiednie `file_prefix` (np. `forest_`, `online_urban_`).
+        Pooling cross-env jest niepoprawny w eksperymencie, gdzie parametry
+        algorytmu różnią się między środowiskami — zob.
+        [docs/ceteris_paribus.md](../docs/ceteris_paribus.md) §1.
         """
-        summary = summary_with_ci(
-            sub, metric=metric,
-            group_cols=("environment", "optimizer"),
-            n_resamples=self.cfg.bootstrap_resamples,
-        )
-        if not summary.empty:
-            # Low-power warning: jeśli min(n) < threshold, dorzuć kolumnę
-            # ostrzegawczą (Demšar 2006 §4: Wilcoxon p_min = 1/2^N).
-            summary["low_power_warning"] = summary["n"] < LOW_POWER_N_THRESHOLD
-            export_csv(summary, tables_dir / f"{file_prefix}summary_{metric}.csv")
-            export_latex(
-                summary, tables_dir / f"{file_prefix}summary_{metric}.tex",
-                caption=f"Summary statistics — {metric}",
-                label=f"tab:{file_prefix}summary-{metric}",
-            )
-
-        # Wilcoxon pairwise
-        try:
-            pairs = wilcoxon_pairwise(sub, metric=metric, block_cols=block_cols)
-            if pairs:
-                df_pairs = pd.DataFrame([p.__dict__ for p in pairs])
-                export_csv(df_pairs, tables_dir / f"{file_prefix}wilcoxon_{metric}.csv")
-        except (ValueError, KeyError):
-            pass
-
         # Friedman + Nemenyi
         try:
             fr = friedman_with_nemenyi(
@@ -355,6 +487,24 @@ class ExperimentAnalyzer:
                 higher_is_better={m: HIGHER_IS_BETTER.get(m, False) for m in self.cfg.metrics_iter},
             )
 
+        # §3.1.3.2 (docs/Praca magisterska.md) Krzywa optymalizacji online —
+        # best_fitness per generation w online optimization tasks (osobny od
+        # offline convergence: różne źródło danych, różna granularność —
+        # per-trigger vs per-run). plots_dir = <exp>/analysis_output/plots,
+        # więc db = <exp>/analysis.db = plots_dir.parent.parent / analysis.db.
+        try:
+            from src.analysis.analyzer.plots.convergence_plots import (
+                plot_online_convergence,
+            )
+            db_path = plots_dir.parent.parent / "analysis.db"
+            plot_online_convergence(db_path, plots_dir / "convergence")
+        except Exception:
+            logger.warning(
+                "ExperimentAnalyzer: plot_online_convergence failed — "
+                "online convergence curve unavailable.",
+                exc_info=True,
+            )
+
         # Boxploty offline na zdedupowanym DF (jedna obserwacja per
         # (env, opt, seed)); online — pełny.
         df_offline_for_box = _dedup_offline(df_run)
@@ -367,7 +517,6 @@ class ExperimentAnalyzer:
             metrics=[m for m in self.cfg.metrics_online if m in df_run.columns],
         )
 
-        plot_success_and_collision_bars(df_run, plots_dir / "bar")
         if "is_offline_failure" in df_run.columns:
             plot_failure_rate_bars(
                 _dedup_offline(df_run), plots_dir / "bar",
@@ -386,9 +535,14 @@ class ExperimentAnalyzer:
         if not df_iter.empty:
             plot_scatter(df_run, df_iter, plots_dir / "scatter")
 
-        # CD diagrams + ranking heatmap per metryka. Offline używa
-        # zdedupowanego (env, opt, seed); online — pełnego (env, seed, avoidance).
+        # CD diagrams per (env, metric). Pooling cross-env byłby mieszaniem
+        # heterogenicznych konfiguracji algorytmu — zob. `_build_tables`
+        # i docs/ceteris_paribus.md §1.
+        # Ranking heatmap pozostaje cross-env (env na osi Y), bo wewnętrznie
+        # rangi liczone są per (env, seed) — heatmap pokazuje per-env rangi
+        # w jednym obrazie dla ułatwienia porównania międzyśrodowiskowego.
         df_offline = _dedup_offline(df_run)
+        offline_envs = sorted(df_offline["environment"].dropna().unique())
         for metric in self.cfg.metrics_offline:
             if metric not in df_offline.columns:
                 continue
@@ -396,24 +550,64 @@ class ExperimentAnalyzer:
             if sub.empty:
                 continue
             higher = HIGHER_IS_BETTER.get(metric, False)
-            try:
-                fr = friedman_with_nemenyi(
-                    sub, metric=metric, higher_is_better=higher,
-                    block_cols=("environment", "seed"),
-                )
-                if fr.cd_nemenyi is not None:
-                    plot_cd_diagram(
-                        fr.average_ranks, fr.cd_nemenyi,
-                        plots_dir / "cd_diagrams" / f"cd_{metric}.pdf",
-                        title=f"CD — {metric} ({'higher=better' if higher else 'lower=better'})",
+            for env in offline_envs:
+                sub_env = sub[sub["environment"] == env]
+                if sub_env.empty:
+                    continue
+                try:
+                    fr = friedman_with_nemenyi(
+                        sub_env, metric=metric, higher_is_better=higher,
+                        block_cols=("seed",),
                     )
-            except ValueError:
-                pass
+                    if fr.cd_nemenyi is not None:
+                        plot_cd_diagram(
+                            fr.average_ranks, fr.cd_nemenyi,
+                            plots_dir / "cd_diagrams" / f"cd_{env}_{metric}.pdf",
+                            title=(
+                                f"CD — {metric} [{env}] "
+                                f"({'higher=better' if higher else 'lower=better'})"
+                            ),
+                        )
+                except ValueError:
+                    pass
             plot_ranking_heatmap(
                 df_offline, metric,
                 plots_dir / "rankings" / f"ranking_{metric}.pdf",
                 higher_is_better=higher,
             )
+
+        # CD diagrams dla online — per-env, na pełnym df_run (paired runs
+        # dają 4 obs per (env, seed) — Friedman w 1-D = poprawny). Wcześniej
+        # pooled cross-env Friedman dla online cicho failował z powodu
+        # nakładania się avoidance × seed indeksu — per-env naprawia to.
+        online_envs = sorted(df_run["environment"].dropna().unique())
+        for metric in self.cfg.metrics_online:
+            if metric not in df_run.columns:
+                continue
+            sub = df_run.dropna(subset=[metric])
+            if sub.empty:
+                continue
+            higher = HIGHER_IS_BETTER.get(metric, False)
+            for env in online_envs:
+                sub_env = sub[sub["environment"] == env]
+                if sub_env.empty:
+                    continue
+                try:
+                    fr = friedman_with_nemenyi(
+                        sub_env, metric=metric, higher_is_better=higher,
+                        block_cols=("seed",),
+                    )
+                    if fr.cd_nemenyi is not None:
+                        plot_cd_diagram(
+                            fr.average_ranks, fr.cd_nemenyi,
+                            plots_dir / "cd_diagrams" / f"cd_online_{env}_{metric}.pdf",
+                            title=(
+                                f"CD — {metric} [online, {env}] "
+                                f"({'higher=better' if higher else 'lower=better'})"
+                            ),
+                        )
+                except ValueError:
+                    pass
 
 
 def _dedup_offline(df_run: pd.DataFrame) -> pd.DataFrame:
@@ -435,19 +629,26 @@ def _dedup_offline(df_run: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compute_failure_flag(df_run: pd.DataFrame) -> pd.DataFrame:
-    """Dodaje binarne kolumny `is_offline_failure` i `is_online_failure` per run.
+    """Dodaje binarne kolumny `is_offline_failure`, `is_online_failure`
+    i `is_hv_degenerate` per run.
 
-    OFFLINE failure ⟺ przynajmniej jeden:
-    - `front_size_last_gen` ∈ {NULL, 0} — brak feasible non-dominated solutions
-    - `hypervolume` ∈ {NULL, 0} — front nie dominuje r* (degenerate / wszystkie
-      feasible solutions outside ref-point box)
+    **OFFLINE failure** ⟺ `tracking_phase_collisions > 0` — drone miał
+    kolizję podczas wykonywania trasy zaplanowanej offline (poza okresem
+    aktywnego uniku). Sygnalizuje, że trajektoria z fazy planowania była
+    kolizyjna z perspektywy fizycznej symulacji.
 
-    ONLINE failure ⟺ `collision_count > 0`.
+    **ONLINE failure** ⟺ `evasion_phase_collisions > 0` — drone miał
+    kolizję podczas wykonywania manewru uniku (event_type='trigger' bez
+    subsekwentnego 'rejoin'). Sygnalizuje, że algorytm reaktywnego
+    unikania zawiódł. Kolizje powstałe z złego planowania offline NIE
+    są tu liczone — patrz uzasadnienie w `reports/failure_success_methodology.md`.
 
-    Powody splitu: HV q25=0 oznacza tail-failure offline phase (algorytm
-    nie znalazł żadnych feasible-ND rozwiązań pokrywających r*); online
-    collisions to inny failure mode (avoidance phase). Łączenie obu
-    obscure'owałoby root cause.
+    **HV degenerate** (osobna diagnostyka, *nie* failure) ⟺ `hypervolume`
+    ∈ {NULL, 0} OR `front_size_last_gen` ∈ {NULL, 0}. Dla algorytmów
+    SOO ze skalaryzacją weighted-sum to *tautologia konstrukcji*
+    (1-pkt front w 5D), więc nieinformatywne dla porównania algorytmów.
+    Dla NSGA-III informatywne — tail-risk degeneracji frontu Pareto.
+    Raportowane osobno per algorytm.
 
     Reference: Liefooghe & Verel (2014). Failure rate to standardowy
     proxy tail-risk algorytmu, uzupełniający mean/median (które maskują
@@ -456,18 +657,33 @@ def _compute_failure_flag(df_run: pd.DataFrame) -> pd.DataFrame:
     if df_run.empty:
         return df_run
     df = df_run.copy()
+    tpc = df.get("tracking_phase_collisions")
+    epc = df.get("evasion_phase_collisions")
     fs = df.get("front_size_last_gen")
     hv = df.get("hypervolume")
-    cc = df.get("collision_count")
+
     offline_fail = pd.Series(False, index=df.index)
-    if fs is not None:
-        offline_fail = offline_fail | fs.isna() | (fs == 0)
-    if hv is not None:
-        offline_fail = offline_fail | hv.isna() | (hv == 0)
+    if tpc is not None:
+        offline_fail = offline_fail | (tpc.fillna(0) > 0)
     df["is_offline_failure"] = offline_fail.astype(int)
 
     online_fail = pd.Series(False, index=df.index)
-    if cc is not None:
-        online_fail = online_fail | (cc.fillna(0) > 0)
+    if epc is not None:
+        online_fail = online_fail | (epc.fillna(0) > 0)
     df["is_online_failure"] = online_fail.astype(int)
+    # `online_success_rate` przedefiniowane na poziomie DataFrame jako binarne
+    # **bezpieczeństwo manewru** (per-run): 1 = run bez kolizji w fazie evasion,
+    # 0 = co najmniej jedna kolizja. Nadpisuje wartość z `run_metrics.online_success_rate`
+    # (która jest `1 - budget_violation_rate` — niezawodność real-time, używana
+    # tylko wewnątrz DB do obliczenia `online_sp1`). User-facing semantyka
+    # "Online Success Rate" to fizyczne bezpieczeństwo, identyczne z §3.2.
+    df["online_success_rate"] = (1 - df["is_online_failure"]).astype(float)
+
+    # Diagnostyka MOO — raportowane osobno (głównie informatywne dla NSGA-III).
+    hv_degenerate = pd.Series(False, index=df.index)
+    if fs is not None:
+        hv_degenerate = hv_degenerate | fs.isna() | (fs == 0)
+    if hv is not None:
+        hv_degenerate = hv_degenerate | hv.isna() | (hv == 0)
+    df["is_hv_degenerate"] = hv_degenerate.astype(int)
     return df

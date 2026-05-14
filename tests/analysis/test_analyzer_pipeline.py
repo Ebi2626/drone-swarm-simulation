@@ -123,9 +123,10 @@ class TestAnalyzerPipeline:
         import pandas as pd
 
         out = ExperimentAnalyzer().analyze(populated_experiment)
-        friedman_csvs = list((out / "tables").glob("friedman_*.csv"))
+        # Per-env split: pliki mają prefiks `{env}_` (np. `forest_friedman_*.csv`).
+        friedman_csvs = list((out / "tables").glob("*friedman_*.csv"))
         if not friedman_csvs:
-            pytest.skip("Brak friedman_*.csv (zbyt mało metryk z >= 2 alg).")
+            pytest.skip("Brak *friedman_*.csv (zbyt mało metryk z >= 2 alg).")
         df = pd.read_csv(friedman_csvs[0])
         for col in ("optimizer", "avg_rank", "statistic", "p_value", "cd_nemenyi"):
             assert col in df.columns

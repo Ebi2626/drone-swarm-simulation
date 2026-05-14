@@ -168,22 +168,77 @@ class TestPipelineIntegration:
         assert roles.get("online_optimization_csv") == 1
         assert roles.get("convergence_traces_csv") == 1
 
+    def test_evasion_trajectory_metrics_aggregated(self, populated_db) -> None:
+        """§3.1.3.3: agregaty trajektorii fazy online z `online_optimization_tasks`.
+
+        Fixture ma jeden task per run z:
+            plan_arc_length_m=5.0, plan_total_duration_s=1.5,
+            pos_err_at_rejoin_m=0.1, vel_err_at_rejoin_mps=0.05,
+            time_to_rejoin_s=1.0, outcome='rejoined_ok'.
+        AVG po jednym wpisie = wartość wpisu; rejoin_success_rate = 1/1 = 1.0.
+        """
+        rows = populated_db.execute(
+            """
+            SELECT mean_evasion_arc_length_m, median_evasion_arc_length_m,
+                   mean_evasion_plan_duration_s,
+                   mean_pos_err_at_rejoin_m, mean_vel_err_at_rejoin_mps,
+                   mean_time_to_rejoin_s, rejoin_success_rate,
+                   rejoin_completion_rate, budget_violation_rate,
+                   online_success_rate, online_sp1,
+                   mean_online_evaluations_completed
+            FROM run_metrics
+            ORDER BY run_id
+            """
+        ).fetchall()
+        assert len(rows) == 2
+        for r in rows:
+            assert r["mean_evasion_arc_length_m"] == pytest.approx(5.0)
+            assert r["median_evasion_arc_length_m"] == pytest.approx(5.0)
+            assert r["mean_evasion_plan_duration_s"] == pytest.approx(1.5)
+            assert r["mean_pos_err_at_rejoin_m"] == pytest.approx(0.1)
+            assert r["mean_vel_err_at_rejoin_mps"] == pytest.approx(0.05)
+            assert r["mean_time_to_rejoin_s"] == pytest.approx(1.0)
+            assert r["rejoin_success_rate"] == pytest.approx(1.0)
+            # Fixture ma 1 trigger z outcome=rejoined_ok (sukces, 0 fail) →
+            # completion_rate = 1/(1+0) = 1.0. Brak pending w fixture →
+            # completion_rate == success_rate.
+            assert r["rejoin_completion_rate"] == pytest.approx(1.0)
+            # Fixture ma status='ok' → 0 violations / 1 trigger = 0.0.
+            assert r["budget_violation_rate"] == pytest.approx(0.0)
+            # Fixture: status='ok' → success_rate = 1.0,
+            # SP1 = RT_succ / p_s = NFE / 1.0 = NFE.
+            # (Brak failed tasks w fixture → RT_succ = mean NFE.)
+            assert r["online_success_rate"] == pytest.approx(1.0)
+            assert r["online_sp1"] == pytest.approx(r["mean_online_evaluations_completed"])
+
     def test_offline_objectives_extracted_from_h5(self, populated_db) -> None:
-        """Best feasible F-vector z h5 trafia do `run_metrics`."""
+        """Best feasible F-vector z h5 trafia do `run_metrics`.
+
+        Po 2026-05-13 `final_objective` jest skalarem weighted-normalized-sum
+        liczonym w post-pass `populate_final_objective_aggregated`:
+            final_objective = Σ w_i · F[i] / F_ref_env[i]
+        Gdy fixture ma wszystkie runy z identycznym F = [11, 22, 33, 44, 55],
+        median = F, więc F/F_ref = 1.0 per komponent → final_objective = Σ w_i.
+        Canonical weights `[0.05, 0.5, 0.8, 1.0, 0.25]` → sum = 2.6 (brak hydra
+        configu w fixture'ach → canonical fallback).
+        """
         pytest.importorskip("h5py")
         rows = populated_db.execute(
             """
             SELECT final_objective, final_objective_f1_trajectory,
                    final_objective_f2_height_angle, total_threat_cost,
-                   total_turn_penalty, total_coordination_cost
+                   total_turn_penalty, total_coordination_cost,
+                   final_objective_weights_json
             FROM run_metrics
             ORDER BY run_id
             """
         ).fetchall()
         for r in rows:
-            assert r["final_objective"] == pytest.approx(11.0)
+            # final_objective = Σ canonical_weights = 2.6 dla identical-F fixture'ów.
+            assert r["final_objective"] == pytest.approx(2.6)
             assert r["final_objective_f1_trajectory"] == pytest.approx(11.0)
             assert r["final_objective_f2_height_angle"] == pytest.approx(22.0)
             assert r["total_threat_cost"] == pytest.approx(33.0)
             assert r["total_turn_penalty"] == pytest.approx(44.0)
             assert r["total_coordination_cost"] == pytest.approx(55.0)
+            assert r["final_objective_weights_json"] is not None

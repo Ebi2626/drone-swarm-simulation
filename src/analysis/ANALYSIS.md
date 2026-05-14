@@ -151,6 +151,35 @@ Aktualny `VectorizedEvaluator` produkuje 5-obiektowy wektor celu:
 `populate_offline_objectives` wyciaga best feasible solution (argmin po f1)
 z last-gen `objectives_matrix` w h5 i mapuje F-vector na kolumny `run_metrics`.
 Feasibility ustalana z `feasible_mask` lub `constraint_violation` w h5.
+Dodatkowo wczytuje `objective_weights` z per-run `.hydra/config.yaml` i
+zapisuje do `final_objective_weights_json` (NSGA-III: canonical fallback
+`[0.05, 0.5, 0.8, 1.0, 0.25]`).
+
+### `final_objective` — weighted normalized sum (2026-05-13)
+
+Skalarny agregat F-vectora best-feasible solution, comparable cross-algorithm:
+
+```
+final_objective = Σ_{i=1..5} w_i · F_best[i] / F_ref_env[i]
+```
+
+gdzie:
+- `w_i`: wagi z `final_objective_weights_json` (per-run hydra config dla
+  SOO; canonical `[0.05, 0.5, 0.8, 1.0, 0.25]` dla NSGA-III).
+- `F_ref_env[i]`: per-environment median F_best[i] across all algos/seeds,
+  zapisana w `offline_objective_normalization`.
+
+Liczone w post-pass `populate_final_objective_aggregated` (RAZ po pełnym
+przejściu wszystkich runów przez `populate_offline_objectives` — wymaga
+populacji do wyliczenia median).
+
+**Trade-off F_ref median vs straight-line:** Faithful F_ref z trajektorii
+prostej (`soo_adapter._compute_reference_scales`) wymagałby rekonstrukcji
+`VectorizedEvaluator` w ETL. Median jako proxy preserves rankings
+within-env-seed (wszystkie algorytmy w jednym bloku dzielone przez
+tę samą stałą) → Friedman/Nemenyi p-values są niezmiennicze.
+
+Reference: Hwang & Yoon (1981) Multiple Attribute Decision Making §4.2.
 
 ## Wskazniki jakosci MOO
 
@@ -292,10 +321,13 @@ Reference: Hauser & Hubicki (2007).
 
 ## Framework testow statystycznych
 
-Implementacja w `statistical_tests.py` oparta na zaleceniach Demsara (2006)
-i Arcuri & Briand (2014).
+Implementacja w `statistical_tests.py` zgodna z metodologia
+`reports/statistical_tests_methodology.md` — trzy testy dobrane tak, aby
+kazdy odpowiadal na odrebne pytanie naukowe bez nakladania sie funkcji.
+Odrzucone metody (Wilcoxon+Holm, Bootstrap CI, Cochran's Q, McNemar+RD/OR,
+ANOVA, Bonferroni) — pelne uzasadnienia w metodologii §5.
 
-### Friedman + Nemenyi
+### Friedman + Nemenyi (metryki ciagle)
 
 Test Friedmana z post-hoc Nemenyi. Critical difference (CD):
 
@@ -312,15 +344,7 @@ z prac porownawczych meta-heurystyk.
 Reference: Demsar (2006) "Statistical Comparisons of Classifiers over
 Multiple Data Sets", JMLR 7:1-30, eq. 13.
 
-### Wilcoxon signed-rank + Holm-Bonferroni
-
-Test Wilcoxona dla kazdej pary algorytmow z korekcja Holma na wielokrotne
-porownania. Sortowanie par po surowym p-value, mnozenie przez (m - i)
-z monotonicznym ogr. <= 1.
-
-Reference: Demsar (2006) Sec. 3.2.
-
-### Vargha-Delaney A12
+### Vargha-Delaney A12 (effect size, metryki ciagle)
 
 Non-parametric effect size:
 
@@ -341,12 +365,32 @@ lepszy od B. Magnitude per Vargha & Delaney (2000):
 Reference: Arcuri & Briand (2014) "A Hitchhiker's guide to statistical tests
 for assessing randomized algorithms in software engineering", STVR 24(3).
 
-### Bootstrap CI
+### Wilson 95% CI (proporcje, failure rate)
 
-Bootstrap percentile CI (10 000 resampli, seed=42) dla median.
-`summary_with_ci()` generuje tabele: n, mean, std, median, q25, q75,
-ci95\_low, ci95\_high per group. Low-power warning dla N < 6
-(Demsar 2006 Sec. 4: Wilcoxon p\_min = 1/2^N).
+95% przedzial ufnosci Wilsona dla proporcji binomialnej. Stosowany zamiast
+Wald CI (ktory bywa ujemny / > 1 i ma katastrofalne pokrycie dla p̂
+blisko 0 lub 1 — typowe w safety-critical).
+
+```
+CI = (1 / (1 + z²/N)) · [p̂ + z²/(2N) ± z · sqrt(p̂(1-p̂)/N + z²/(4N²))]
+```
+
+Brak nakladania sie przedzialow Wilsona dla dwoch algorytmow ⇒ roznica
+proporcji istotna na poziomie α ≈ 0.05 (Cumming 2014 "ocular significance
+test").
+
+Reference: Wilson (1927) "Probable inference, the law of succession, and
+statistical inference", JASA 22(158):209–212; Newcombe (1998) "Two-sided
+confidence intervals for the single proportion", Stat. Med. 17(8):857–872.
+
+### Summary stats (mediana + IQR)
+
+`summary_stats()` generuje tabele: n, mean, std, min, max, median, q25, q75
+per group. Para `(mediana, [Q1, Q3])` jest standardowa forma raportowania
+rozkladow w literaturze metaheurystyk (Bartz-Beielstein i in. 2020 §4.2) —
+IQR obejmuje 50% obserwacji i jest odporny na ogony niegausowskie. Flaga
+`low_power_warning` zaznacza grupy z N < 6 (Friedman traci moc dla
+asymptotycznego rozkladu χ² przy malym N).
 
 ## Deduplication offline vs online
 
@@ -407,12 +451,12 @@ Per metryka generowane sa:
 
 | Plik | Zawartosc |
 |------|----------|
-| `summary_{metric}.csv/.tex` | n, mean, std, median, IQR, CI95(median), low\_power\_warning |
-| `wilcoxon_{metric}.csv` | Pary algorytmow: statistic, p-value, p\_value\_holm, median\_diff |
-| `friedman_{metric}.csv` | Average ranks, statistic, p-value, CD\_nemenyi, n\_datasets |
-| `a12_{metric}.csv` | Pary: A12 value, magnitude (negligible/small/medium/large) |
-| `failure_rate_offline.csv/.tex` | n\_runs, n\_failures, failure\_rate per (env, opt) |
-| `failure_rate_online.csv/.tex` | j.w. dla collision\_count > 0 |
+| `summary_{metric}.csv/.tex` | n, mean, std, min, max, median, q25, q75, low\_power\_warning |
+| `{env}_friedman_{metric}.csv` | Per-env: avg\_rank, statistic, p-value, CD\_nemenyi, n\_datasets |
+| `{env}_a12_{metric}.csv` | Per-env, pary: A12 value, magnitude (negligible/small/medium/large) |
+| `failure_rate_offline.csv/.tex` | Per (env, opt): n\_runs, n\_failures, failure\_rate, wilson\_ci95\_low/high |
+| `failure_rate_online.csv/.tex` | j.w. dla evasion\_phase\_collisions > 0 |
+| `failure_rate_hv_degenerate.csv/.tex` | j.w. dla HV=0 OR pusty front (diagnostyka NSGA-III) |
 | `online_summary.csv` | Per-run online avoidance z vw\_run\_online\_summary |
 
 ### Wykresy (`analysis_output/plots/`)

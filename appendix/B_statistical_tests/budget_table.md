@@ -14,34 +14,48 @@ gdzie:
 - **K** — liczba wewnętrznych punktów trajektorii drona (`n_inner_waypoints`)
 - **D** — liczba dronów w roju (`num_drones`)
 
-## Parametry wspólne dla wszystkich algorytmów
+## Parametry per środowisko
 
-| Parametr | Wartość | Źródło |
-|---|---|---|
-| K (`n_inner_waypoints`) | 11 | [E_configs/algorithms/](../E_configs/algorithms/) — wszystkie 4 algorytmy |
-| D (`num_drones`) | 5 | [E_configs/environments/{forest,urban}.yaml](../E_configs/environments/) |
+| Parametr | forest | urban | Źródło |
+|---|---:|---:|---|
+| K (`n_inner_waypoints`) | **11** | **15** | forest: [E_configs/algorithms/](../E_configs/algorithms/); urban: [E_configs/experiment_generated/proxy_overrides_urban/](../E_configs/experiment_generated/proxy_overrides_urban/) |
+| D (`num_drones`) | 5 | 5 | [E_configs/environments/](../E_configs/environments/) |
+
+**Uwaga:** dla środowiska *urban* hyperparametry są nadpisywane przez Hydra z plików **proxy** wygenerowanych przez [experiments/prepare_experiment.py](../../experiments/prepare_experiment.py) (commit `cdca9524`). Bazowe configi w `algorithms/` dotyczą tylko *forest*; faktyczne wartości dla urban znajdują się w [E_configs/experiment_generated/proxy_overrides_urban/](../E_configs/experiment_generated/proxy_overrides_urban/).
 
 ## Budżet per środowisko
 
 ### Środowisko *forest*
 
+P × G × K × D = **P × G × 11 × 5 = 55 × P × G**
+
 | Algorytm | P (pop_size) | G (n_gen / epochs) | P × G | Budżet = P × G × K × D |
 |---|---:|---:|---:|---:|
 | NSGA-III | 1001 | 200 | 200 200 | **11 011 000** |
-| MSFFOA | 1001 | ~200* | 200 200 | **11 011 000** |
+| MSFFOA | 1001 | 200* | 200 200 | **11 011 000** |
 | OOA | 1001 | 200 | 200 200 | **11 011 000** |
-| SSA | 1001 | ~200* | 200 200 | **11 011 000** |
+| SSA | 1001 | 200* | 200 200 | **11 011 000** |
 
-\* MSFFOA i SSA definiują `max_generations: 10000` jako twardy limit, ale są ograniczone budżetem ewaluacji równym pozostałym algorytmom (`pop_size × n_gen` z `nsga-3.yaml`/`ooa.yaml`).
+\* MSFFOA i SSA mają `max_generations: 10000` jako twardy limit, ale są ograniczone budżetem ewaluacji równym pozostałym algorytmom (200 generacji).
 
-### Środowisko *urban*
+### Środowisko *urban* (proxy overrides)
+
+P × G × K × D = **P × G × 15 × 5 = 75 × P × G**
 
 | Algorytm | P (pop_size) | G (n_gen / epochs) | P × G | Budżet = P × G × K × D |
 |---|---:|---:|---:|---:|
-| NSGA-III | 1500 | 300 | 450 000 | **24 750 000** |
-| MSFFOA | 1500 | ~300* | 450 000 | **24 750 000** |
-| OOA | 1500 | 300 | 450 000 | **24 750 000** |
-| SSA | 1500 | ~300* | 450 000 | **24 750 000** |
+| NSGA-III | 1500 | 300 | 450 000 | **33 750 000** |
+| MSFFOA | 1500 | 300* | 450 000 | **33 750 000** |
+| OOA | 1500 | 300 | 450 000 | **33 750 000** |
+| SSA | 1500 | 300* | 450 000 | **33 750 000** |
+
+\* MSFFOA i SSA — jak wyżej.
+
+**Skalowanie urban vs forest:** budżet urban / forest = 33 750 000 / 11 011 000 ≈ **3.07×**. Wynika z:
+- pop_size: 1500 / 1001 ≈ 1.50×
+- generations: 300 / 200 = 1.50×
+- waypoints: 15 / 11 ≈ 1.36×
+- iloczyn: 1.50 × 1.50 × 1.36 ≈ 3.07×
 
 ## Skalibrowanie
 
@@ -49,9 +63,13 @@ Rozmiar populacji został dobrany empirycznie podczas testowych symulacji (cytat
 
 > "Wielkość populacji została dobrana empirycznie w czasie testowych symulacji, aby odpowiadała złożoności problemu. Środowisko miejskie ze względu na większy obszar oraz większą liczbę przeszkód o większych wymiarach otrzymało większy budżet wynikający z tej różnicy."
 
-Konkretne uzasadnienie dla NSGA-III (komentarz z [E_configs/algorithms/nsga-3.yaml](../E_configs/algorithms/nsga-3.yaml)):
+Uzasadnienie kalibracji dla forest (komentarz z [E_configs/algorithms/nsga-3.yaml](../E_configs/algorithms/nsga-3.yaml)):
 
 > "n_gen skalibrowane empirycznie (exp_20260506): Q75 konwergencji przy iteracji 69 (~69k NFE). n_gen=100 daje ~100k NFE = 1.4× margines."
+
+Uzasadnienie kalibracji dla urban (komentarz z [E_configs/experiment_generated/experiment_definition.yaml](../E_configs/experiment_generated/experiment_definition.yaml)):
+
+> "URBAN (1000×300×20m, 27× BOX 15m³, dense grid_jitter): większy search space ⇒ pop_size 1001→1500, n_gen 100→300, więcej waypointów (11→15). Wartości skopiowane z dotychczasowych `_proxy_` yamls (results/exp_20260506.../) — sprawdzone produkcyjnie."
 
 ## Budżet czasowy online
 
@@ -64,6 +82,8 @@ Online pop_size jest stałe = 12 (`pop_size: 12` w sekcji `online_optimizer`). L
 ## Źródła
 
 - Wzór: praca, s. 73, linia 855–858
-- P, G dla forest: [E_configs/algorithms/{nsga-3,ooa,msffoa,ssa}.yaml](../E_configs/algorithms/)
-- P, G dla urban: z `.hydra/config.yaml` per-run (overrides Hydra dla środowiska urban) — przykłady w [G_per_run_seeds/<run_id>/.hydra/config.yaml](../G_per_run_seeds/)
-- K, D: jak wyżej w sekcji "Parametry wspólne"
+- P, G, K dla forest: [E_configs/algorithms/{nsga-3,ooa,msffoa,ssa}.yaml](../E_configs/algorithms/)
+- P, G, K dla urban: [E_configs/experiment_generated/proxy_overrides_urban/](../E_configs/experiment_generated/proxy_overrides_urban/) (proxy generated by `prepare_experiment.py`)
+- D: [E_configs/environments/{forest,urban}.yaml](../E_configs/environments/)
+- Job matrix (8 par optimizer × env): [E_configs/experiment_generated/experiment_generated.yaml](../E_configs/experiment_generated/experiment_generated.yaml)
+- Definicja eksperymentu: [E_configs/experiment_generated/experiment_definition.yaml](../E_configs/experiment_generated/experiment_definition.yaml)

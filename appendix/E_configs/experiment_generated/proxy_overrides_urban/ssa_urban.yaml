@@ -1,0 +1,29 @@
+# WYGENEROWANO AUTOMATYCZNIE - PROXY DLA exp_20260508_f3f718f8_bio_inspired_benchmark
+# Per-environment overrides: env=urban
+_target_: src.algorithms.abstraction.trajectory.strategies.ssa_strategy.ssa_swarm_strategy
+_partial_: true
+_convert_: all
+algorithm_params:
+  cruise_speed: 6.0
+  pop_size: 1500
+  epochs: 300
+  n_inner_waypoints: 15
+  ST: 0.6
+  PD: 0.4
+  SD: 0.1
+  objective_weights:
+  - 0.05
+  - 0.5
+  - 5.0
+  - 1.0
+  - 0.25
+  penalty_weight: 2.0
+  obstacle_safety_margin: 3.0
+  min_drone_distance: 2.0
+  k_factor: 2.0
+  absolute_min_node_dist: 2.0
+  max_accel_limit: 2.0
+  preferred_height: 10.0
+  coordination_penalty_factor: 1.2
+  noise_std_xy: 12.0
+  noise_std_z: 3.0

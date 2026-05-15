@@ -158,7 +158,7 @@ appendix/
 ├── B_statistical_tests/              # Friedman, A12, Wilson + thesis_stat_tables PNG
 ├── C_plots/                          # 18 wykresów (PDF + PNG)
 ├── D_database_schema/                # Schema SQL + ERD
-├── E_configs/                        # Hydra configs (definicja eksperymentu)
+├── E_configs/                        # Hydra configs (base + experiment_generated + proxy_overrides_urban)
 ├── F_environment/                    # environment.yaml + conda env snapshot
 ├── G_per_run_seeds/                  # 240 katalogów per-run (subset plików)
 └── H_run_manifest.csv                # Manifest z seedami (240 wierszy)

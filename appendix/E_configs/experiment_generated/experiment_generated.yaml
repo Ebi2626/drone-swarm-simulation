@@ -1,0 +1,71 @@
+# @package _global_
+# AUTOMATICALLY GENERATED EXPERIMENT CONFIGURATION
+# Date: 2026-05-08 01:16:47
+# Experiment ID: exp_20260508_f3f718f8_bio_inspired_benchmark
+# Based on definition: bio_inspired_benchmark
+#
+# Format Option A (per-environment overrides):
+#   `job_matrix` zawiera jawne pary (optimizer, environment). Generator
+#   `prepare_experiment.py` tworzy proxy yamls per (optimizer × env)
+#   gdy zdefiniowano `env_overrides`. Czytane przez
+#   `experiments/run_subprocess.py`.
+
+defaults:
+  - override /hydra/launcher: joblib
+
+experiment_meta:
+  id: "exp_20260508_f3f718f8_bio_inspired_benchmark"
+  name: "bio_inspired_benchmark"
+  total_runs: 240
+  pairing: paired_only
+
+job_matrix:
+- optimizer: msffoa
+  environment: forest
+  base_name: msffoa
+- optimizer: _proxy_exp_20260508_f3f718f8_bio_inspired_benchmark_msffoa_urban_0
+  environment: urban
+  base_name: msffoa
+- optimizer: ooa
+  environment: forest
+  base_name: ooa
+- optimizer: _proxy_exp_20260508_f3f718f8_bio_inspired_benchmark_ooa_urban_1
+  environment: urban
+  base_name: ooa
+- optimizer: ssa
+  environment: forest
+  base_name: ssa
+- optimizer: _proxy_exp_20260508_f3f718f8_bio_inspired_benchmark_ssa_urban_2
+  environment: urban
+  base_name: ssa
+- optimizer: nsga-3
+  environment: forest
+  base_name: nsga-3
+- optimizer: _proxy_exp_20260508_f3f718f8_bio_inspired_benchmark_nsga-3_urban_3
+  environment: urban
+  base_name: nsga-3
+
+# Static overrides (parameters_grid.<non-sweep> + static_overrides)
+simulation:
+  dynamic_obstacles: true
+  gui: false
+
+hydra:
+  mode: MULTIRUN
+  sweep:
+    dir: results/${experiment_meta.id}
+    subdir: ${hydra:runtime.choices.optimizer}_${hydra:runtime.choices.environment}_${hydra:runtime.choices.avoidance}_seed${seed}
+  launcher:
+    n_jobs: 6
+    # backend `loky` (zamiast `multiprocessing`) używa fork-and-exec
+    # (czysty Python interpreter per-worker), co eliminuje współdzielenie
+    # globalnego stanu C++ PyBullet między workerami. Patologia "drony stoją
+    # w PyBullet mimo poprawnie wygenerowanej trajektorii" (plan.md, Krok 2,
+    # H1 potwierdzona reprodukcją n_jobs=1) była efektem fork-share state z
+    # `backend: multiprocessing`.
+    backend: loky
+    prefer: processes
+  sweeper:
+    params:
+      avoidance: msffoa,ooa,ssa,nsga-3
+      seed: 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30

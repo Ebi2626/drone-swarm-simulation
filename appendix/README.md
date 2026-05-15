@@ -57,7 +57,7 @@ python -c "from src.analysis.ExperimentAggregator import ExperimentAggregator; \
            ExperimentAggregator().aggregate('./results/<your_run>/')"
 
 # 5. Analiza porównawcza → tables/ + plots/
-python scripts/run_analysis.py ./results/<your_run>/
+python run_etl.py ./results/<your_run>/
 ```
 
 ## Ograniczenia załącznika

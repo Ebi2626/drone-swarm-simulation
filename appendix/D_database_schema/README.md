@@ -4,18 +4,13 @@
 
 Dokumentacja schematu SQLite, którą wykorzystuje pipeline ETL do agregacji wyników eksperymentu. Sama `analysis.db` (861 MB) **nie jest dołączona** do załącznika — recenzent może ją zrekonstruować z surowych CSV w [G_per_run_seeds/](../G_per_run_seeds/) poprzez `ExperimentAggregator`.
 
-## Pliki do skopiowania
+## Zawartość
 
-| Plik docelowy | Źródło | Komenda |
+| Plik | Cel | Źródło |
 |---|---|---|
-| `schema.sql` | [src/analysis/db/schema.sql](../../src/analysis/db/schema.sql) | `cp src/analysis/db/schema.sql appendix/D_database_schema/` |
-
-## Pliki do napisania (po skopiowaniu schema)
-
-| Plik | Cel |
-|---|---|
-| `ERD.md` | Diagram Mermaid pokazujący relacje między 11 tabelami cytowanymi w pracy (subset 17 tabel pełnego schematu) |
-| `views.md` | Dokumentacja widoków: `vw_run_summary`, `vw_seed_summary`, `vw_global_summary`, `vw_run_online_summary`, `vw_algo_cross_sim_comparison` |
+| [`schema.sql`](schema.sql) | Pełna definicja SQL DDL (21 tabel, 5 widoków, 22 indeksy) | [`src/analysis/db/schema.sql`](../../src/analysis/db/schema.sql) |
+| [`ERD.md`](ERD.md) | Diagram Mermaid relacji między 11 tabelami cytowanymi w pracy | napisany ręcznie |
+| [`views.md`](views.md) | Dokumentacja 5 widoków analitycznych (`vw_run_summary`, `vw_seed_summary`, `vw_global_summary`, `vw_run_online_summary`, `vw_algo_cross_sim_comparison`) | napisany ręcznie |
 
 ## Tabele relevantne dla pracy (subset z 17)
 

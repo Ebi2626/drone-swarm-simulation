@@ -8,18 +8,30 @@ w środowiskach fizycznych opartych na PyBullet.
 
 ```
 drone-swarm-simulation/
+├── appendix/                   # Załącznik cyfrowy pracy magisterskiej
+│   ├── INDEX.md                # Indeks: metryki M1–M13, tabele T1–T21, wykresy W1–W18
+│   ├── A_metrics/              # Subset CSV z analysis.db (13 metryk × 240 runów)
+│   ├── B_statistical_tests/    # Friedman, A12, Wilson CI (CSV + TeX + panele PNG)
+│   ├── C_plots/                # 18 wykresów cytowanych w pracy (PDF + PNG)
+│   ├── D_database_schema/      # Schema SQL + ERD bazy analytycznej
+│   ├── E_configs/              # Snapshot konfiguracji Hydry dla eksperymentu
+│   ├── F_environment/          # environment.yaml + pełny snapshot conda
+│   ├── G_per_run_seeds/        # Surowe pliki per-run (240 katalogów)
+│   └── H_run_manifest.csv      # Manifest 240 runów (run_id, alg, env, seed, status)
 ├── configs/                    # Modularna konfiguracja Hydra 1.3
 │   ├── config.yaml             # Globalne parametry eksperymentu
-│   ├── avoidance/              # Strategie unikania online (A*, none, hybrydy algorytmów)
+│   ├── avoidance/              # Online avoidance: msffoa, nsga-3, ooa, ssa, none
 │   ├── environment/            # Konfiguracje światów (empty, forest, urban) + strategie rozmieszczenia
 │   └── optimizer/              # Konfiguracje optymalizatorów offline (msffoa, nsga-3, ooa, ssa)
-├── experiments/                # Skrypty uruchomieniowe eksperymentów
-├── notebooks/                  # Notebooki wyjaśniające bloki konstrukcyjne projektu
-├── results/                    # Logi z konkretnych uruchomień
+├── experiments/                # Definicje i runner eksperymentów (prepare_experiment + run_subprocess)
+├── notebooks/                  # 6 demonstracyjnych notebooków (zob. notebooks/README.md)
+├── results/                    # Logi z konkretnych uruchomień (gitignored)
 ├── src/                        # Główna logika aplikacji
 │   ├── algorithms/             # Logika optymalizacji (planowanie offline + unikanie online)
-│   │   ├── abstraction/        # Implementacje Strategy Pattern (MSFOA, NSGA-III, OOA, SSA)
-│   │   └── avoidance/          # Reaktywne unikanie lokalne (siatka A* 3D)
+│   │   ├── abstraction/        # Strategy Pattern dla offline (MSFOA, NSGA-III, OOA, SSA)
+│   │   └── avoidance/          # GenericOptimizingAvoidance + 4 sub-strategie
+│   │                           # (IObstaclePredictor, IPathRepresentation,
+│   │                           #  IFitnessEvaluator, IPathOptimizer)
 │   ├── analysis/               # ETL i analiza statystyczna eksperymentów
 │   │   ├── ExperimentAggregator.py  # Agregacja CSV/HDF5 z runów do analysis.db (SQLite)
 │   │   ├── analyzer/                # Analiza statystyczna i generowanie raportów
@@ -32,10 +44,10 @@ drone-swarm-simulation/
 │   ├── environments/           # Środowiska symulacji 3D
 │   │   ├── abstraction/        # Generatory przeszkód i granic świata
 │   │   ├── obstacles/          # Enum typów przeszkód (BOX, CYLINDER)
-│   │   ├── EmptyWorld.py       # Puste środowisko (benchmarki)
-│   │   ├── ForestWorld.py      # Las — 17 przeszkód cylindrycznych
+│   │   ├── EmptyWorld.py       # Puste środowisko (sanity-check)
+│   │   ├── ForestWorld.py      # Las — 13 cylindrów (60×600×11 m)
 │   │   ├── SwarmBaseWorld.py   # Bazowa klasa abstrakcyjna środowiska
-│   │   └── UrbanWorld.py       # Miasto — 27 przeszkód prostopadłościennych
+│   │   └── UrbanWorld.py       # Miasto — 27 boxów (300×1000×20 m)
 │   ├── runner/                 # Strategie uruchamiania eksperymentów (Strategy Pattern)
 │   │   ├── ExperimentDataStrategy.py   # Abstrakcyjny interfejs bazowy
 │   │   ├── GenerationDataStrategy.py   # Nowy eksperyment: generowanie świata + optymalizacja offline
@@ -54,29 +66,39 @@ drone-swarm-simulation/
 │       ├── ValidationMessage.py            # Enum komunikatów błędów
 │       └── pybullet_utils.py               # Wrappery PyBullet
 ├── tests/                      # Testy jednostkowe (odzwierciedla strukturę /src)
-├── ExperimentRunner.py         # Punkt wejścia dla eksperymentów konfigurowanych przez Hydra
-├── main.py                     # Runner z dwoma trybami uruchomienia:
+├── main.py                     # Runner z dwoma trybami uruchomienia (zawiera klasę ExperimentRunner):
 │                               #   default: python main.py — nowa symulacja z dynamicznym światem
 │                               #   replay:  python main.py --replay /results/2026-04-13/
 ├── run_etl.py                  # ETL pipeline: agregacja wyników + analiza statystyczna + raport
+├── run.sh                      # Wrapper uruchamiający pełną sesję eksperymentów
+├── clean-{all,experiments,optimizers,results}.sh   # Skrypty czyszczące katalogi wyjściowe
+├── turn-off-after-experiment.sh  # Bezpieczne wyłączenie maszyny po zakończonym sweep
 ├── environment.yaml            # Zależności Conda
 └── mypy.ini                    # Konfiguracja sprawdzania typów (mypy)
 ```
 
 ## Główne założenia
 
-- Eksperymenty są **w pełni reprodukowalne** — stan świata, przeszkody i trajektorie archiwizowane do CSV
-- Macierzowy plan eksperymentów:
-  - **3 środowiska** o rosnącej gęstości przeszkód: `empty`, `forest` (17 cylindrów), `urban` (27 boxów)
-  - **4 algorytmy**: MSFOA, SSA, OOA (inspirowane biologicznie) + NSGA-III (punkt odniesienia)
-  - **2 warianty** każdego środowiska: przeszkody statyczne i dynamiczne
-- **Dwufazowe planowanie**: optymalizacja globalna offline (waypoints) + reaktywne unikanie online (LiDAR + A*)
-- **Reprezentacja trajektorii**: Cubic B-Spline (ciągłość C²) z trapezowym lub stałym profilem prędkości
-- Miary oceny algorytmów:
-  - Czas dotarcia do celu
-  - Liczba kolizji (w tym kolizje między dronami w roju)
-  - Gładkość trajektorii
-  - Zachowanie w momencie pojawienia się dynamicznej przeszkody
+- Eksperymenty są **w pełni reprodukowalne** — stan świata, przeszkody i trajektorie
+  archiwizowane do CSV/HDF5; ziarna zarządzane przez `SeedRegistry`.
+- Macierzowy plan eksperymentów (final benchmark, `exp_20260508_…`):
+  - **2 środowiska** finalne: `forest` (13 cylindrów, 60×600×11 m) i `urban`
+    (27 boxów, 300×1000×20 m); `empty` służy jako sanity-check.
+  - **4 algorytmy**: MSFOA, SSA, OOA (bio-inspirowane) + NSGA-III (punkt odniesienia).
+  - **30 ziaren** per kombinacja ⇒ **240 runów** (4 × 2 × 30).
+- **Dwufazowe planowanie**:
+  - *Offline*: optymalizacja globalna waypointów na pełnym horyzoncie misji
+    (wspólny `VectorizedEvaluator` — 5 obiektywów, 3 ograniczenia).
+  - *Online*: reaktywne unikanie `GenericOptimizingAvoidance` — kompozycja
+    4 sub-strategii (predictor / path / fitness / optimizer) z budżetem
+    czasowym 0.5 s.
+- **Reprezentacja trajektorii**: Cubic B-Spline (ciągłość C²) z trapezowym
+  lub stałym profilem prędkości.
+- **Miary oceny** (M1–M13, pełna lista w
+  [`appendix/INDEX.md`](appendix/INDEX.md)):
+  bezpieczeństwo trajektorii (F3+F5), długość (F1), gładkość (F2+F4),
+  spójność roju, odsetek kolizji, długość krzywej unikowej, rejoin quality,
+  wartość i tempo optymalizacji (offline + online), SP1.
 
 ## Przegląd architektury
 
@@ -84,25 +106,35 @@ drone-swarm-simulation/
 CLI / konfiguracja Hydra
           │
           ▼
-   ExperimentRunner
+   ExperimentRunner (main.py)
           │
   ┌───────┴──────────────────┐
   │                          │
 GenerationStrategy      ReplayStrategy
   │                          │
   ▼                          ▼
-algorithms/             archiwa CSV
- (MSFOA/NSGA-III/        (świat, przeszkody,
-  OOA/SSA)                trajektorie)
+algorithms/abstraction/     archiwa CSV
+ (MSFOA/NSGA-III/           (świat, przeszkody,
+  OOA/SSA — offline)         trajektorie)
   │
   ▼
-trajectory/ (B-Spline)
+trajectory/ (B-Spline + profil prędkości)
   │
   ▼
 environments/ (fizyka PyBullet)
   │
-  ├── sensors/ (LiDAR → avoidance/)
-  └── utils/ (SimulationLogger → results/)
+  ├── sensors/ (LiDAR 3D, batch ray test)
+  │       │
+  │       ▼
+  │   algorithms/avoidance/ (GenericOptimizingAvoidance, FSM TRACK ⇄ EVADE ⇄ REJOIN)
+  │
+  └── utils/ (SimulationLogger → CSV/HDF5 → results/)
+                                      │
+                                      ▼
+                           run_etl.py → analysis.db
+                                      │
+                                      ▼
+                           tables/ + plots/ + report/
 ```
 
 ## Technologie
@@ -173,6 +205,27 @@ Interpretację poszczególnych typów wykresów (diagramy CD, boxploty, krzywe
 zbieżności itd.) opisuje plik
 [`PLOTS_LEGEND.md`](src/analysis/analyzer/plots/PLOTS_LEGEND.md).
 
+## Załącznik cyfrowy pracy magisterskiej (`appendix/`)
+
+Po zakończeniu pracy magisterskiej kompletny zestaw artefaktów cytowanych
+w tekście został wyodrębniony do katalogu [`appendix/`](appendix/).
+Zawiera m.in.:
+
+* **`INDEX.md`** — kompletna mapa 13 metryk (M1–M13), 21 tabel (T1–T21)
+  i 18 wykresów (W1–W18) cytowanych w pracy.
+* **`A_metrics/`, `B_statistical_tests/`, `C_plots/`** — gotowe agregaty
+  CSV/TeX/PDF/PNG do reprodukcji wszystkich wyników.
+* **`D_database_schema/`** — schemat SQLite + ERD + dokumentacja widoków
+  analitycznych.
+* **`E_configs/` + `F_environment/`** — snapshot konfiguracji Hydry
+  i pełny export środowiska conda do bit-exact reprodukcji.
+* **`G_per_run_seeds/`** — surowe pliki z 240 runów (CSV, HDF5).
+* **`H_run_manifest.csv`** — manifest runów z statusem agregacji.
+* **`CITATION.md`** — commit referencyjny `cdca9524…` + szablon BibTeX.
+
+Notebooki **04**, **05** i **06** w `notebooks/` korzystają wprost z
+zawartości tego katalogu jako autorytatywnego źródła wyników.
+
 ## Uruchamianie testów
 
 Testy odzwierciedlają strukturę katalogów `/src`. Aby uruchomić wszystkie testy jednostkowe:
@@ -186,12 +239,21 @@ python -m pytest
 Aktywuj środowisko conda, a następnie uruchom serwer:
 
 ```bash
-jupyter notebook
+conda activate drone-swarm-env
+jupyter lab notebooks/
 ```
 
-Dostępne notebooki w `/notebooks/`:
-- `world_generation.ipynb` — generowanie losowych światów z konfigurowalnymi parametrami
-- `draw_trajectory.ipynb` — wizualizacja przykładowych trajektorii wszystkich algorytmów w abstrakcyjnej przestrzeni 2D/3D
+W `/notebooks/` znajduje się 6 samowyjaśniających notebooków
+(pełen opis: [`notebooks/README.md`](notebooks/README.md)):
+
+| Plik | Tematyka |
+|------|----------|
+| `01_world_generation.ipynb` | Generowanie świata + przeszkód i wizualizacja 3D z proporcjonalnym skalowaniem osi |
+| `02_offline_optimization.ipynb` | Pełen pipeline optymalizacji offline (MSFOA / OOA / SSA / NSGA-III) z krzywą zbieżności |
+| `03_online_collision_scenario.ipynb` | Scenariusz head-on z dynamicznymi przeszkodami i wybranym algorytmem fazy online |
+| `04_statistical_analysis.ipynb` | Testy Friedmana + Nemenyiego, A12 Vargha–Delaney i Wilson 95% CI na metrykach M1–M13 |
+| `05_thesis_reproduction.ipynb` | Centralny przegląd wszystkich tabel T1–T21 i wykresów W1–W18 cytowanych w pracy |
+| `06_data_reproducibility.ipynb` | Domknięcie reprodukowalności: schemat DB, manifest 240 runów, snapshot środowiska, rekonstrukcja z plików per-run |
 
 ## Dokumentacja modułów
 
@@ -199,7 +261,7 @@ Szczegółowe opisy działania poszczególnych komponentów systemu (założenia
 
 | Moduł projektu | Plik z dokumentacją | Opis rozszerzony |
 |----------------|---------------------|------------------|
-| `src/algorithms/` | [`ALGORITHMS.md`](src/algorithms/ALGORITHMS.md) | Implementacje algorytmów ewolucyjnych (MSFOA, NSGA-III, OOA, SSA), mechanizm Strategy Pattern, wielokryterialne funkcje celu (długość trasy, ryzyko, energia) oraz reaktywne unikanie przeszkód A*. |
+| `src/algorithms/` | [`ALGORITHMS.md`](src/algorithms/ALGORITHMS.md) | Implementacje 4 algorytmów meta-heurystycznych (MSFOA, NSGA-III, OOA, SSA), Strategy Pattern dla fazy offline (wspólny `VectorizedEvaluator` z 5 obiektywami + 3 ograniczeniami) oraz online avoidance jako kompozycja 4 sub-strategii (`GenericOptimizingAvoidance`). |
 | `configs/` | [`CONFIGS.md`](configs/CONFIGS.md) | Hierarchia konfiguracji Hydra 1.3, parametry środowisk i optymalizatorów, instrukcje dotyczące przeszukiwania siatki (grid search) oraz schemat dispatchu. |
 | `src/environments/` | [`ENVIRONMENTS.md`](src/environments/ENVIRONMENTS.md) | Opis środowisk 3D (ForestWorld, UrbanWorld, EmptyWorld), generatorów przeszkód BOX/CYLINDER, strategii rozmieszczania (`random_uniform`, `grid_jitter`) oraz zapewnienia reprodukowalności (seed). |
 | `src/runner/` | [`RUNNER.md`](src/runner/RUNNER.md) | Obsługa logiki uruchomieniowej za pomocą Strategy Pattern: `GenerationDataStrategy` (nowy eksperyment) i `ReplayDataStrategy` (odtwarzanie z CSV), z opisem 4-etapowego pipeline'u. |

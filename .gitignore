@@ -21,8 +21,17 @@ plan.md
 .vscode/
 
 # scientific utils
-literature/ 
+literature/
 praca/
+
+# helper dirs/pliki — nie są częścią deliverable
+tools/
+scripts/
+reports/
+visualize_world.py
+debug_problem.ipynb
+drone_debug.log
+human-agent-interaction.md
 
 # images
 *.png

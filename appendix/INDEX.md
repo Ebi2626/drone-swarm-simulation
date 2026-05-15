@@ -2,7 +2,6 @@
 
 **Praca:** *Porównanie bio-inspirowanych metaheurystyk (MSFOA, OOA, SSA) z klasycznym NSGA-III w problemie planowania trajektorii roju UAV*
 
-Plik źródłowy: [praca/src/Praca magisterska-final.md](../praca/src/Praca magisterska-final.md)
 Eksperyment źródłowy: `results/exp_20260508_f3f718f8_bio_inspired_benchmark/` (4 algorytmy × 2 środowiska × 30 seeds × N_avoidance = 240 runów).
 Commit referencyjny: `cdca9524f58f54b5da720e80fcbd239595f4ea16` (branch `main`).
 
@@ -18,17 +17,17 @@ Tabela zbiorcza 13 metryk cytowanych w rozdziale 3 pracy. Direction: ↓ = niże
 |---|---|---|---|---|---|---|
 | M1 | Bezpieczeństwo trajektorii (F3+F5) | `trajectory_safety_f3_f5` *(derived: F[2]+F[4])* | 3.2.1.1 | ↓ | `optimization_history/optimization_history.h5:objectives_matrix` | [populate_offline_objectives.py](../src/analysis/db/populate_offline_objectives.py) + [metric_extractor.py](../src/analysis/analyzer/metric_extractor.py) |
 | M2 | Długość trajektorii (F1) | `final_objective_f1_trajectory` *(F[0])* | 3.2.1.1 | ↓ | `optimization_history/optimization_history.h5:objectives_matrix` | [populate_offline_objectives.py](../src/analysis/db/populate_offline_objectives.py) |
-| M3 | Gładkość trajektorii (F2+F4) | `trajectory_smoothness_f2_f4` *(derived: F[1]+F[3])* | 3.2.1.1 | ↓ | `optimization_history/optimization_history.h5:objectives_matrix` | [populate_offline_objectives.py](../src/analysis/db/populate_offline_objectives.py) + [metric_extractor.py:146-157](../src/analysis/analyzer/metric_extractor.py#L146-L157) |
-| M4 | Spójność roju | `swarm_cohesion_deviation` *(derived: `\|min_inter_uav − 5\| + \|max_inter_uav − 5\|`)* | 3.2.1.1 | ↓ | `trajectories.csv` → `uav_online_metrics` | [populate_online_safety_metrics.py](../src/analysis/db/populate_online_safety_metrics.py) + [metric_extractor.py:146-157](../src/analysis/analyzer/metric_extractor.py#L146-L157) |
-| M5 | Odsetek trajektorii kolizyjnych | `is_offline_failure` *(`tracking_phase_collisions > 0`)* | 3.2.1.1 | ↓ | `collisions.csv` + `evasion_events.csv` | [populate_run_metrics.py:52-75](../src/analysis/db/populate_run_metrics.py#L52-L75) |
+| M3 | Gładkość trajektorii (F2+F4) | `trajectory_smoothness_f2_f4` *(derived: F[1]+F[3])* | 3.2.1.1 | ↓ | `optimization_history/optimization_history.h5:objectives_matrix` | [populate_offline_objectives.py](../src/analysis/db/populate_offline_objectives.py) + [metric_extractor.py](../src/analysis/analyzer/metric_extractor.py) |
+| M4 | Spójność roju | `swarm_cohesion_deviation` *(derived: `\|min_inter_uav − 5\| + \|max_inter_uav − 5\|`)* | 3.2.1.1 | ↓ | `trajectories.csv` → `uav_online_metrics` | [populate_online_safety_metrics.py](../src/analysis/db/populate_online_safety_metrics.py) + [metric_extractor.py](../src/analysis/analyzer/metric_extractor.py) |
+| M5 | Odsetek trajektorii kolizyjnych | `is_offline_failure` *(`tracking_phase_collisions > 0`)* | 3.2.1.1 | ↓ | `collisions.csv` + `evasion_events.csv` | [populate_run_metrics.py](../src/analysis/db/populate_run_metrics.py) |
 | M6 | Długość krzywej unikowej | `mean_evasion_arc_length_m` | 3.2.1.2 | ↓ | `online_optimization.csv:plan_arc_length_m` | [populate_online_metrics.py](../src/analysis/db/populate_online_metrics.py) + [populate_run_metrics.py](../src/analysis/db/populate_run_metrics.py) |
 | M7 | Skuteczność powrotu na trajektorię nominalną | `rejoin_quality` *(TOPSIS composite z 3 błędów)* | 3.2.1.2 | ↓ | `online_optimization.csv:{pos_err_at_rejoin_m, vel_err_at_rejoin_mps, time_to_rejoin_s}` | [populate_rejoin_quality.py](../src/analysis/db/populate_rejoin_quality.py) |
-| M8 | Stosunek udanych uników | `1 − is_online_failure` *(`evasion_phase_collisions == 0`)* | 3.2.1.2 | ↑ | `collisions.csv` + `evasion_events.csv` | [populate_run_metrics.py:52-75](../src/analysis/db/populate_run_metrics.py#L52-L75) |
+| M8 | Stosunek udanych uników | `1 − is_online_failure` *(`evasion_phase_collisions == 0`)* | 3.2.1.2 | ↑ | `collisions.csv` + `evasion_events.csv` | [populate_run_metrics.py](../src/analysis/db/populate_run_metrics.py) |
 | M9 | Wartość optymalizacji offline | `final_objective` *(weighted normalized sum, Hwang & Yoon 1981)* | 3.2.2.1 | ↓ | `optimization_history.h5` + `offline_objective_normalization` | [populate_final_objective_aggregated.py](../src/analysis/db/populate_final_objective_aggregated.py) |
 | M10 | Tempo optymalizacji offline | `best_so_far` per iteration | 3.2.2.1 | ↓ | `optimization_history/optimization_history.h5:objectives_matrix` | [populate_iteration_metrics.py](../src/analysis/db/populate_iteration_metrics.py) |
-| M11 | Wartość optymalizacji online | `mean_online_best_fitness` | 3.2.2.2 | ↓ | `online_optimization.csv:best_fitness` | [populate_run_metrics.py:152-154](../src/analysis/db/populate_run_metrics.py#L152-L154) |
+| M11 | Wartość optymalizacji online | `mean_online_best_fitness` | 3.2.2.2 | ↓ | `online_optimization.csv:best_fitness` | [populate_run_metrics.py](../src/analysis/db/populate_run_metrics.py) |
 | M12 | Tempo optymalizacji online | `best_fitness` per generation | 3.2.2.2 | ↓ | `convergence_traces.csv` → `online_convergence_traces` | [populate_online_metrics.py](../src/analysis/db/populate_online_metrics.py) |
-| M13 | SP1 online | `online_sp1 = avg_evals_ok / success_rate` *(Auger & Hansen 2005)* | 3.2.2.2 | ↓ | `online_optimization.csv` | [populate_run_metrics.py:202-207](../src/analysis/db/populate_run_metrics.py#L202-L207) |
+| M13 | SP1 online | `online_sp1 = avg_evals_ok / success_rate` *(Auger & Hansen 2005)* | 3.2.2.2 | ↓ | `online_optimization.csv` | [populate_run_metrics.py](../src/analysis/db/populate_run_metrics.py) |
 
 ### Definicje i odniesienia literaturowe
 
@@ -36,7 +35,7 @@ Tabela zbiorcza 13 metryk cytowanych w rozdziale 3 pracy. Direction: ↓ = niże
 - **M2 — Długość trajektorii (F1)** = `final_objective_f1_trajectory` (F[0] z `objectives_matrix` h5), best feasible solution z ostatniej generacji.
 - **M3 — Gładkość trajektorii (F2+F4)** = `final_objective_f2_height_angle` (F[1], kara za zmiany wysokości i kąta) + `total_turn_penalty` (F[3], kara za zakręty).
 - **M4 — Spójność roju** = odchylenie od docelowego dystansu między dronami 5 m. Mierzone jako `|min_inter_uav − 5| + |max_inter_uav − 5|`, gdzie min/max są agregatami po wszystkich krokach symulacji. Niskie wartości → ścisła formacja blisko 5 m spacing; wysokie → kompresja lub rozpraszanie.
-- **M5 — Odsetek trajektorii kolizyjnych** = procent runów z `tracking_phase_collisions > 0` (kolizja w fazie wykonywania planu offline, *przed* aktywacją online avoidance). Definicja per [failure_success_methodology.md §1](../reports/failure_success_methodology.md).
+- **M5 — Odsetek trajektorii kolizyjnych** = procent runów z `tracking_phase_collisions > 0` (kolizja w fazie wykonywania planu offline, *przed* aktywacją online avoidance). Klasyfikacja faz: porównanie znacznika czasu kolizji z otwartymi rekordami uniku — szczegóły w rozdz. 3.2.1.1 pracy.
 - **M6 — Długość krzywej unikowej** = średnia długość łuku planu unikowego (B-spline) wygenerowanego przez optymalizator online w trakcie reaktywnego unikania. Proxy dla zużycia energii podczas manewru.
 - **M7 — Rejoin quality** = TOPSIS-based composite z trzech błędów powrotu: pozycyjnego (m), prędkościowego (m/s), czasowego (s), normalizowanych per środowisko. Niższe wartości → szybszy i dokładniejszy powrót na trajektorię nominalną. Definicja [src/analysis/db/populate_rejoin_quality.py](../src/analysis/db/populate_rejoin_quality.py).
 - **M8 — Stosunek udanych uników** = proporcja runów z `evasion_phase_collisions == 0` (system avoidance zapobiegł kolizji). Przedział ufności Wilsona (Wilson 1927; Newcombe 1998).
@@ -68,7 +67,7 @@ Z katalogu `results/<run_id>/`, do appendiksu **kopiujemy** wyłącznie:
 
 ## Sekcja B — Mapowanie Wykres N → plik
 
-18 wykresów cytowanych w spisie pracy (linie 1506–1525 [praca/src/Praca magisterska-final.md](../praca/src/Praca magisterska-final.md)). Wszystkie istnieją w `results/exp_20260508_f3f718f8_bio_inspired_benchmark/analysis_output/plots/` w wariantach `.pdf` (do druku) i `.png` (do raportu cyfrowego).
+18 wykresów cytowanych w spisie wykresów pracy magisterskiej. Wszystkie istnieją w `results/exp_20260508_f3f718f8_bio_inspired_benchmark/analysis_output/plots/` w wariantach `.pdf` (do druku) i `.png` (do raportu cyfrowego).
 
 | # | Rozdz. | Opis wykresu | Plik źródłowy (PDF + PNG) | Metryka | Generator |
 |---|---|---|---|---|---|
@@ -91,7 +90,7 @@ Z katalogu `results/<run_id>/`, do appendiksu **kopiujemy** wyłącznie:
 | W17 | 3.2.2.2 | Line: tempo optymalizacji online, forest | `plots/convergence/online_convergence_forest.{pdf,png}` | M12 | [convergence_plots.py](../src/analysis/analyzer/plots/convergence_plots.py) |
 | W18 | 3.2.2.2 | Line: tempo optymalizacji online, urban | `plots/convergence/online_convergence_urban.{pdf,png}` | M12 | [convergence_plots.py](../src/analysis/analyzer/plots/convergence_plots.py) |
 
-**Uwaga merytoryczna:** w obecnej wersji [praca/src/Praca magisterska-final.md](../praca/src/Praca magisterska-final.md) (linie 1248, 1252) podpisy Wykres 11 i 12 zawierają błąd („długości krzywej unikowej" zamiast „skuteczności powrotu na trajektorię nominalną") — odnotowane w [praca/src/spisy-rysunkow-tabel-wykresow.md](../praca/src/spisy-rysunkow-tabel-wykresow.md). W tabeli powyżej zastosowano poprawną wersję merytoryczną (wariant B).
+**Uwaga merytoryczna:** w spisie wykresów pracy magisterskiej (rozdz. 3.2.1.2) podpisy Wykres 11 i 12 zawierają błąd — „długość krzywej unikowej" zamiast „skuteczność powrotu na trajektorię nominalną". W tabeli powyżej zastosowano poprawną wersję merytoryczną (zgodną z rzeczywistą zawartością wykresu).
 
 ---
 
@@ -103,7 +102,7 @@ Z katalogu `results/<run_id>/`, do appendiksu **kopiujemy** wyłącznie:
 2. **Testy Friedmana + A12** (`{env}_friedman_{metric}.csv` + `{env}_a12_{metric}.csv`): per-environment.
 3. **Testy Wilsona** (`failure_rate_*.csv` + `.tex`): proporcje binomialne z 95% CI.
 
-Bonus dla recenzenta: PNG w `appendix/B_statistical_tests/thesis_stat_tables/` (z [praca/chapter-3/stat_tables/](../praca/chapter-3/stat_tables/)) to **gotowe panele** wykorzystane w pracy magisterskiej (Friedman + A12 + side-by-side forest/urban), generowane przez [scripts/generate_thesis_stat_tables.py](../scripts/generate_thesis_stat_tables.py).
+Bonus dla recenzenta: PNG w `appendix/B_statistical_tests/thesis_stat_tables/` to **gotowe panele** wykorzystane w pracy magisterskiej (Friedman + A12 + side-by-side forest/urban) dla każdej grupy testów statystycznych (rozdz. 3.2 pracy).
 
 | # | Rozdz. | Opis | Plik(i) źródłowy(e) | Metryka | Thesis PNG (panel) |
 |---|---|---|---|---|---|
@@ -137,10 +136,10 @@ Następujące artefakty wymagają jednorazowego eksportu/agregacji w fazie kopio
 
 | # | Cel | Lokalizacja docelowa | Komenda/skrypt |
 |---|---|---|---|
-| D1 | Subset `run_metrics` (13 kolumn z thesis × 240 wierszy) | `A_metrics/run_metrics_subset.csv` | `sqlite3 analysis.db "SELECT run_id, optimizer, environment, avoidance, seed, final_objective_f1_trajectory, total_threat_cost, total_turn_penalty, total_coordination_cost, final_objective, mean_evasion_arc_length_m, rejoin_quality, mean_online_best_fitness, online_sp1, tracking_phase_collisions, evasion_phase_collisions, min_inter_uav_distance_m, max_inter_uav_distance_m FROM vw_run_summary;"` |
+| D1 | Subset `run_metrics` (13 kolumn z thesis × 240 wierszy) | `A_metrics/run_metrics_subset.csv` | `sqlite3 analysis.db "SELECT run_id, optimizer_algo, environment, avoidance_algo, seed, final_objective_f1_trajectory, total_threat_cost, total_turn_penalty, total_coordination_cost, final_objective, mean_evasion_arc_length_m, rejoin_quality, mean_online_best_fitness, online_sp1, min_inter_uav_distance_m, max_inter_uav_distance_m FROM vw_run_summary;"` |
 | D2 | Subset `iteration_metrics` (best_so_far per gen) | `A_metrics/iteration_metrics_subset.csv` | `sqlite3 analysis.db "SELECT run_id, iteration, best_so_far, hypervolume, feasible_ratio FROM iteration_metrics;"` |
 | D3 | Subset `online_convergence_traces` | `A_metrics/online_convergence_subset.csv` | `sqlite3 analysis.db "SELECT run_id, drone_id, trigger_time, generation, best_fitness FROM online_convergence_traces;"` |
-| D4 | Run manifest (240 wierszy z statusem) | `H_run_manifest.csv` | `sqlite3 analysis.db "SELECT run_id, optimizer, environment, avoidance, seed, aggregation_status FROM runs;"` |
+| D4 | Run manifest (240 wierszy z statusem) | `H_run_manifest.csv` | `sqlite3 analysis.db "SELECT run_id, optimizer_algo, environment, avoidance_algo, seed, aggregation_status FROM runs;"` |
 | D5 | Conda env snapshot | `F_environment/conda_env_export.yaml` | `conda env export -n drone-swarm-env > F_environment/conda_env_export.yaml` |
 | D6 | Tabela 1 — budżet obliczeniowy | `B_statistical_tests/budget_table.{csv,md}` | Ręcznie z [configs/optimizer/](../configs/optimizer/) — 4 wiersze × 4 kolumny |
 | D7 | Tabela 14 — evasion success rate | `B_statistical_tests/wilson/evasion_success_rate.csv` | Derived: `1 − failure_rate_online` |

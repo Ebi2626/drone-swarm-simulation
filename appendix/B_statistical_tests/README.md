@@ -52,9 +52,7 @@ Pattern: `{env}_a12_{metric}.csv`. Te same metryki jak Friedman.
 
 ### `thesis_stat_tables/` (14 PNG)
 
-**Źródło:** [praca/chapter-3/stat_tables/](../../praca/chapter-3/stat_tables/)
-
-Gotowe panele składające forest+urban side-by-side, generowane przez [scripts/generate_thesis_stat_tables.py](../../scripts/generate_thesis_stat_tables.py):
+Gotowe panele składające forest+urban side-by-side dla każdej grupy testów statystycznych — używane bezpośrednio w pracy magisterskiej (rozdz. 3.2):
 
 - `stat_3211_trajectory_safety.png` — T2+T3
 - `stat_3211_trajectory_length.png` — T4+T5
@@ -93,8 +91,8 @@ done
 # wilson
 cp $SRC/failure_rate_{offline,online}.{csv,tex} $DST/wilson/
 
-# thesis stat tables PNG
-cp praca/chapter-3/stat_tables/*.png $DST/thesis_stat_tables/
+# thesis stat tables PNG — kopiowane z lokalizacji pracy magisterskiej
+# (poza repo; patrz CITATION.md aby uzyskać dostęp do plików źródłowych)
 
 # Tabela 1 (budżet) — ręczna, patrz INDEX.md §D D6
 ```
@@ -108,5 +106,5 @@ Skrócone podsumowanie (wartości z [E_configs/algorithms/](../E_configs/algorit
 - **Forest:** P=1001, G=200, K=11, D=5 → budżet **11 011 000** ewaluacji składowych
 - **Urban:** P=1500, G=300, K=11, D=5 → budżet **24 750 000** ewaluacji składowych
 
-Wzór: P × G × K × D (z s. 73 pracy).
+Wzór: P × G × K × D (rozdz. 2.3 pracy).
 

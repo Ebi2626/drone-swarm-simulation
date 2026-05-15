@@ -8,7 +8,7 @@ Subset zawartości `analysis.db` ograniczony do **13 metryk cytowanych w pracy**
 
 | Plik docelowy | Komenda |
 |---|---|
-| `run_metrics_subset.csv` | `sqlite3 results/exp_20260508_f3f718f8_bio_inspired_benchmark/analysis.db -header -csv "SELECT run_id, optimizer, environment, avoidance, seed, final_objective_f1_trajectory, total_threat_cost, total_turn_penalty, total_coordination_cost, final_objective, mean_evasion_arc_length_m, rejoin_quality, mean_online_best_fitness, online_sp1, tracking_phase_collisions, evasion_phase_collisions, min_inter_uav_distance_m, max_inter_uav_distance_m FROM vw_run_summary;" > appendix/A_metrics/run_metrics_subset.csv` |
+| `run_metrics_subset.csv` | `sqlite3 results/exp_20260508_f3f718f8_bio_inspired_benchmark/analysis.db -header -csv "SELECT run_id, optimizer_algo, environment, avoidance_algo, seed, final_objective_f1_trajectory, total_threat_cost, total_turn_penalty, total_coordination_cost, final_objective, mean_evasion_arc_length_m, rejoin_quality, mean_online_best_fitness, online_sp1, min_inter_uav_distance_m, max_inter_uav_distance_m FROM vw_run_summary;" > appendix/A_metrics/run_metrics_subset.csv` (kolumny `tracking_phase_collisions` i `evasion_phase_collisions` są zagregowane w widokach Wilson w `B_statistical_tests/wilson/`, nie w subsecie) |
 | `iteration_metrics_subset.csv` | `sqlite3 ...analysis.db -header -csv "SELECT run_id, iteration, best_so_far, hypervolume, feasible_ratio FROM iteration_metrics;" > appendix/A_metrics/iteration_metrics_subset.csv` |
 | `online_convergence_subset.csv` | `sqlite3 ...analysis.db -header -csv "SELECT run_id, drone_id, trigger_time, generation, best_fitness FROM online_convergence_traces;" > appendix/A_metrics/online_convergence_subset.csv` |
 

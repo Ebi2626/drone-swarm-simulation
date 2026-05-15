@@ -36,7 +36,7 @@ E_configs/
    - `n_inner_waypoints: 11`
    - `obstacle_safety_margin: 1.0`, `preferred_height: 5.0`
 
-2. **Proxy overrides w `experiment_generated/proxy_overrides_urban/`** — generowane przez `prepare_experiment.py` dla każdej pary (algorytm × urban):
+2. **Proxy overrides w `experiment_generated/proxy_overrides_urban/`** — generowane przez `experiments/prepare_experiment.py` dla każdej pary (algorytm × urban):
    - `pop_size: 1500`, `n_gen` / `epochs: 300`
    - `n_inner_waypoints: 15`
    - `obstacle_safety_margin: 3.0`, `preferred_height: 10.0`
@@ -50,7 +50,7 @@ E_configs/
 experiment_definition.yaml             # input z motywacją (Demšar 2006, runs_per_config=30)
         │
         ▼
-prepare_experiment.py                  # patrz experiments/prepare_experiment.py
+experiments/prepare_experiment.py
         │
         ├──► experiment_generated.yaml         # job_matrix (8 par optimizer × env)
         │
@@ -70,7 +70,7 @@ git clone https://github.com/Ebi2626/drone-swarm-simulation.git
 cd drone-swarm-simulation
 git checkout cdca9524f58f54b5da720e80fcbd239595f4ea16
 
-# 2. Skopiuj pliki Hydra z appendix (lub użyj bezpośrednio configs/ z repo)
+# 2. Skopiuj definicję z appendix do experiments/definitions/
 cp appendix/E_configs/experiment_generated/experiment_definition.yaml \
    experiments/definitions/bio_inspired_benchmark.yaml
 
